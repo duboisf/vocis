@@ -24,6 +24,13 @@
     "channels": 1,
     "max_duration_seconds": 120
   },
+  "streaming": {
+    "mode": "release",
+    "show_partial_overlay": true,
+    "prefix_padding_ms": 300,
+    "silence_duration_ms": 500,
+    "threshold": 0.5
+  },
   "insertion": {
     "mode": "auto",
     "default_paste_key": "ctrl+v",

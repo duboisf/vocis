@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,11 +39,21 @@ type recordingState struct {
 	session   *recorder.Session
 	stream    *openai.Stream
 	pumpDone  chan error
+	results   chan streamResult
 	cancel    context.CancelFunc
 	target    injector.Target
+
+	mu                  sync.Mutex
+	liveSegmentDelivery bool
+}
+
+type streamResult struct {
+	text string
+	err  error
 }
 
 const minToggleInterval = 250 * time.Millisecond
+const segmentDrainGrace = 250 * time.Millisecond
 
 func New(cfg config.Config) *App {
 	return &App{
@@ -65,7 +76,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	a.recorder = recorder.New()
 	a.injector = injector.New(a.cfg.Insertion)
-	a.transcribe = openai.New(apiKey, a.cfg.OpenAI)
+	a.transcribe = openai.New(apiKey, a.cfg.OpenAI, a.cfg.Streaming)
 
 	a.overlay, err = overlay.New(a.cfg.Overlay)
 	if err != nil {
@@ -180,12 +191,14 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 
 	a.sequence++
 	state := &recordingState{
-		id:        a.sequence,
-		startedAt: time.Now(),
-		session:   session,
-		pumpDone:  make(chan error, 1),
-		cancel:    cancel,
-		target:    target,
+		id:                  a.sequence,
+		startedAt:           time.Now(),
+		session:             session,
+		pumpDone:            make(chan error, 1),
+		results:             make(chan streamResult, 8),
+		cancel:              cancel,
+		target:              target,
+		liveSegmentDelivery: a.cfg.Streaming.Mode == "segment",
 	}
 	a.recording = state
 	a.overlay.ShowListening(target.WindowClass)
@@ -202,6 +215,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 func (a *App) stopRecordingLocked(ctx context.Context) {
 	state := a.recording
 	a.recording = nil
+	state.setLiveSegmentDelivery(false)
 	a.transcribing = true
 	a.overlay.ShowTranscribing()
 	sessionlog.Infof("stopping recording and finalizing transcription after %s",
@@ -260,6 +274,7 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 	}
 	state := a.recording
 	a.recording = nil
+	state.setLiveSegmentDelivery(false)
 	a.transcribing = true
 	a.mu.Unlock()
 
@@ -312,13 +327,37 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	sessionlog.Infof("audio captured successfully: %d bytes streamed over %s",
 		state.session.BytesCaptured(), state.session.Duration().Round(10*time.Millisecond))
 
+	if err := a.drainStreamResults(ctx, state); err != nil {
+		sessionlog.Errorf("stream transcription: %v", err)
+		a.overlay.ShowError(err)
+		return
+	}
+
+	if a.cfg.Streaming.Mode == "segment" {
+		if err := a.waitForOptionalStreamResults(ctx, state, segmentDrainGrace); err != nil {
+			sessionlog.Errorf("stream transcription: %v", err)
+			a.overlay.ShowError(err)
+			return
+		}
+	}
+
+	if a.cfg.Streaming.Mode == "segment" && strings.TrimSpace(state.stream.Partial()) == "" {
+		a.overlay.Hide()
+		return
+	}
+
 	transcribeCtx, transcribeCancel := context.WithTimeout(
 		ctx,
 		time.Duration(a.cfg.OpenAI.RequestLimit)*time.Second,
 	)
 	defer transcribeCancel()
 
-	text, err := state.stream.Commit(transcribeCtx)
+	if err := state.stream.Commit(transcribeCtx); err != nil {
+		sessionlog.Errorf("transcribe audio: %v", err)
+		a.overlay.ShowError(err)
+		return
+	}
+	text, err := a.waitForStreamResult(transcribeCtx, state)
 	if err != nil {
 		sessionlog.Errorf("transcribe audio: %v", err)
 		a.overlay.ShowError(err)
@@ -327,6 +366,10 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	sessionlog.Infof("transcription complete: %d characters", len(text))
 
 	if text == "" {
+		if a.cfg.Streaming.Mode == "segment" {
+			a.overlay.Hide()
+			return
+		}
 		sessionlog.Warnf("transcription was empty")
 		a.overlay.ShowError(errors.New("transcription came back empty"))
 		return
@@ -339,6 +382,10 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	}
 	sessionlog.Infof("transcript inserted into window=%s", state.target.WindowID)
 
+	if a.cfg.Streaming.Mode == "segment" {
+		a.overlay.Hide()
+		return
+	}
 	a.overlay.ShowSuccess(text)
 }
 
@@ -392,20 +439,90 @@ func (a *App) shutdown() error {
 	return nil
 }
 
+func (a *App) drainStreamResults(ctx context.Context, state *recordingState) error {
+	for {
+		select {
+		case result := <-state.results:
+			if result.err != nil {
+				return result.err
+			}
+			if strings.TrimSpace(result.text) == "" {
+				continue
+			}
+			if err := a.injector.Insert(ctx, state.target, result.text); err != nil {
+				return err
+			}
+			sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
+		default:
+			return nil
+		}
+	}
+}
+
+func (a *App) waitForStreamResult(ctx context.Context, state *recordingState) (string, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case result := <-state.results:
+			if result.err != nil {
+				return "", result.err
+			}
+			return strings.TrimSpace(result.text), nil
+		}
+	}
+}
+
+func (a *App) waitForOptionalStreamResults(
+	ctx context.Context,
+	state *recordingState,
+	grace time.Duration,
+) error {
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		case result := <-state.results:
+			if result.err != nil {
+				return result.err
+			}
+			if strings.TrimSpace(result.text) == "" {
+				continue
+			}
+			if err := a.injector.Insert(ctx, state.target, result.text); err != nil {
+				return err
+			}
+			sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(grace)
+		}
+	}
+}
+
 func (a *App) pumpAudio(ctx context.Context, state *recordingState) {
-	type streamResult struct {
+	type startStreamResult struct {
 		stream *openai.Stream
 		err    error
 	}
 
-	resultCh := make(chan streamResult, 1)
+	resultCh := make(chan startStreamResult, 1)
 	go func() {
 		stream, err := a.transcribe.StartStream(
 			ctx,
 			a.cfg.Recording.SampleRate,
 			a.cfg.Recording.Channels,
 		)
-		resultCh <- streamResult{stream: stream, err: err}
+		resultCh <- startStreamResult{stream: stream, err: err}
 	}()
 
 	var pending [][]int16
@@ -425,6 +542,7 @@ func (a *App) pumpAudio(ctx context.Context, state *recordingState) {
 				}
 				state.stream = result.stream
 				sessionlog.Infof("realtime transcription stream ready")
+				go a.consumeStreamEvents(ctx, state)
 				for _, chunk := range pending {
 					if err := state.stream.Append(ctx, chunk); err != nil {
 						a.finishPump(state, err)
@@ -475,4 +593,60 @@ func (a *App) finishPump(state *recordingState, err error) {
 	case state.pumpDone <- err:
 	default:
 	}
+}
+
+func (a *App) consumeStreamEvents(ctx context.Context, state *recordingState) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-state.stream.Events():
+			if !ok {
+				return
+			}
+
+			switch event.Type {
+			case openai.StreamEventPartial:
+				if a.cfg.Streaming.ShowPartialOverlay {
+					a.overlay.SetListeningText(state.target.WindowClass, event.Text)
+				}
+			case openai.StreamEventFinal:
+				text := strings.TrimSpace(event.Text)
+				if text == "" {
+					continue
+				}
+				if a.cfg.Streaming.Mode == "segment" && state.liveSegmentsEnabled() {
+					if err := a.injector.Insert(ctx, state.target, text); err != nil {
+						a.pushStreamResult(state, "", err)
+						return
+					}
+					sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
+					continue
+				}
+				a.pushStreamResult(state, text, nil)
+			case openai.StreamEventError:
+				a.pushStreamResult(state, "", event.Err)
+				return
+			}
+		}
+	}
+}
+
+func (a *App) pushStreamResult(state *recordingState, text string, err error) {
+	select {
+	case state.results <- streamResult{text: text, err: err}:
+	default:
+	}
+}
+
+func (s *recordingState) liveSegmentsEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.liveSegmentDelivery
+}
+
+func (s *recordingState) setLiveSegmentDelivery(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveSegmentDelivery = enabled
 }

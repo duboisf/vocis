@@ -31,10 +31,25 @@ const (
 
 type Client struct {
 	cfg          config.OpenAIConfig
+	streaming    config.StreamingConfig
 	client       openaisdk.Client
 	dialer       websocket.Dialer
 	websocketURL string
 	writeTimeout time.Duration
+}
+
+type StreamEventType string
+
+const (
+	StreamEventPartial StreamEventType = "partial"
+	StreamEventFinal   StreamEventType = "final"
+	StreamEventError   StreamEventType = "error"
+)
+
+type StreamEvent struct {
+	Type StreamEventType
+	Text string
+	Err  error
 }
 
 type Stream struct {
@@ -42,22 +57,16 @@ type Stream struct {
 	encoder      *pcmEncoder
 	writeTimeout time.Duration
 
-	writeMu    sync.Mutex
-	closeOnce  sync.Once
-	readyOnce  sync.Once
-	resultOnce sync.Once
+	writeMu   sync.Mutex
+	closeOnce sync.Once
+	readyOnce sync.Once
 
 	readyCh  chan error
-	resultCh chan transcriptResult
+	events   chan StreamEvent
 	readDone chan struct{}
 
 	partialMu sync.Mutex
 	partial   string
-}
-
-type transcriptResult struct {
-	text string
-	err  error
 }
 
 type realtimeEvent struct {
@@ -109,7 +118,7 @@ const defaultProgrammerPrompt = "Transcribe for a programmer speaking naturally.
 	"obvious technical terms, acronyms, and capitalization when the audio supports " +
 	"them. Do not invent extra words that were not spoken."
 
-func New(apiKey string, cfg config.OpenAIConfig) *Client {
+func New(apiKey string, cfg config.OpenAIConfig, streaming config.StreamingConfig) *Client {
 	timeout := time.Duration(cfg.RequestLimit) * time.Second
 
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
@@ -133,8 +142,9 @@ func New(apiKey string, cfg config.OpenAIConfig) *Client {
 	}
 
 	return &Client{
-		cfg:    cfg,
-		client: openaisdk.NewClient(opts...),
+		cfg:       cfg,
+		streaming: streaming,
+		client:    openaisdk.NewClient(opts...),
 		dialer: websocket.Dialer{
 			HandshakeTimeout: minDuration(timeout, 10*time.Second),
 		},
@@ -169,7 +179,7 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 		encoder:      newPCMEncoder(sampleRate, channels),
 		writeTimeout: c.writeTimeout,
 		readyCh:      make(chan error, 1),
-		resultCh:     make(chan transcriptResult, 1),
+		events:       make(chan StreamEvent, 16),
 		readDone:     make(chan struct{}),
 	}
 	go stream.readLoop()
@@ -194,25 +204,21 @@ func (s *Stream) Append(ctx context.Context, samples []int16) error {
 	})
 }
 
-func (s *Stream) Commit(ctx context.Context) (string, error) {
+func (s *Stream) Commit(ctx context.Context) error {
 	if err := s.sendJSON(ctx, map[string]any{"type": "input_audio_buffer.commit"}); err != nil {
-		return "", err
+		return err
 	}
-
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case result := <-s.resultCh:
-		return strings.TrimSpace(result.text), result.err
-	case <-s.readDone:
-		return "", errors.New("openai realtime stream closed before transcription completed")
-	}
+	return nil
 }
 
 func (s *Stream) Partial() string {
 	s.partialMu.Lock()
 	defer s.partialMu.Unlock()
 	return s.partial
+}
+
+func (s *Stream) Events() <-chan StreamEvent {
+	return s.events
 }
 
 func (s *Stream) Close() error {
@@ -259,12 +265,13 @@ func (s *Stream) sendJSON(ctx context.Context, payload any) error {
 
 func (s *Stream) readLoop() {
 	defer close(s.readDone)
+	defer close(s.events)
 
 	for {
 		var raw jsonMessage
 		if err := s.conn.ReadJSON(&raw); err != nil {
 			s.markReady(err)
-			s.finish("", err)
+			s.emit(StreamEvent{Type: StreamEventError, Err: err})
 			return
 		}
 
@@ -276,33 +283,41 @@ func (s *Stream) readLoop() {
 			if err := raw.decode(&event); err == nil && event.Delta != "" {
 				s.partialMu.Lock()
 				s.partial += event.Delta
+				partial := s.partial
 				s.partialMu.Unlock()
+				s.emitPartial(StreamEvent{Type: StreamEventPartial, Text: partial})
 			}
 		case "conversation.item.input_audio_transcription.completed":
 			var event transcriptionCompletedEvent
 			if err := raw.decode(&event); err != nil {
-				s.finish("", err)
+				s.emit(StreamEvent{Type: StreamEventError, Err: err})
 				return
 			}
-			s.finish(strings.TrimSpace(event.Transcript), nil)
-			return
+			s.partialMu.Lock()
+			s.partial = ""
+			s.partialMu.Unlock()
+			s.emitPartial(StreamEvent{Type: StreamEventPartial, Text: ""})
+			s.emit(StreamEvent{Type: StreamEventFinal, Text: strings.TrimSpace(event.Transcript)})
 		case "conversation.item.input_audio_transcription.failed":
 			var event transcriptionFailedEvent
 			if err := raw.decode(&event); err != nil {
-				s.finish("", err)
+				s.emit(StreamEvent{Type: StreamEventError, Err: err})
 				return
 			}
-			s.finish("", formatRealtimeError(event.Error.Code, event.Error.Message))
+			s.emit(StreamEvent{
+				Type: StreamEventError,
+				Err:  formatRealtimeError(event.Error.Code, event.Error.Message),
+			})
 			return
 		case "error":
 			var event realtimeErrorEvent
 			if err := raw.decode(&event); err != nil {
-				s.finish("", err)
+				s.emit(StreamEvent{Type: StreamEventError, Err: err})
 				return
 			}
 			err := formatRealtimeError(event.Error.Code, event.Error.Message)
 			s.markReady(err)
-			s.finish("", err)
+			s.emit(StreamEvent{Type: StreamEventError, Err: err})
 			return
 		}
 	}
@@ -314,10 +329,15 @@ func (s *Stream) markReady(err error) {
 	})
 }
 
-func (s *Stream) finish(text string, err error) {
-	s.resultOnce.Do(func() {
-		s.resultCh <- transcriptResult{text: text, err: err}
-	})
+func (s *Stream) emit(event StreamEvent) {
+	s.events <- event
+}
+
+func (s *Stream) emitPartial(event StreamEvent) {
+	select {
+	case s.events <- event:
+	default:
+	}
 }
 
 func (c *Client) sessionUpdateEvent() map[string]any {
@@ -342,7 +362,7 @@ func (c *Client) sessionUpdateEvent() map[string]any {
 						"rate": 24000,
 					},
 					"transcription":  transcription,
-					"turn_detection": nil,
+					"turn_detection": c.turnDetectionPayload(),
 				},
 			},
 		},
@@ -510,19 +530,24 @@ func (c *Client) createClientSecret(ctx context.Context) (string, error) {
 }
 
 func (c *Client) clientSecretParams() realtime.ClientSecretNewParams {
+	input := realtime.RealtimeTranscriptionSessionAudioInputParam{
+		Format: realtime.RealtimeAudioFormatsUnionParam{
+			OfAudioPCM: &realtime.RealtimeAudioFormatsAudioPCMParam{
+				Type: "audio/pcm",
+				Rate: 24000,
+			},
+		},
+		Transcription: c.audioTranscriptionParam(),
+	}
+	if turnDetection := c.turnDetectionParam(); turnDetection != nil {
+		input.TurnDetection = *turnDetection
+	}
+
 	return realtime.ClientSecretNewParams{
 		Session: realtime.ClientSecretNewParamsSessionUnion{
 			OfTranscription: &realtime.RealtimeTranscriptionSessionCreateRequestParam{
 				Audio: realtime.RealtimeTranscriptionSessionAudioParam{
-					Input: realtime.RealtimeTranscriptionSessionAudioInputParam{
-						Format: realtime.RealtimeAudioFormatsUnionParam{
-							OfAudioPCM: &realtime.RealtimeAudioFormatsAudioPCMParam{
-								Type: "audio/pcm",
-								Rate: 24000,
-							},
-						},
-						Transcription: c.audioTranscriptionParam(),
-					},
+					Input: input,
 				},
 			},
 		},
@@ -540,6 +565,34 @@ func (c *Client) audioTranscriptionParam() realtime.AudioTranscriptionParam {
 		param.Prompt = openaisdk.String(prompt)
 	}
 	return param
+}
+
+func (c *Client) turnDetectionPayload() any {
+	if c.streaming.Mode != "segment" {
+		return nil
+	}
+
+	return map[string]any{
+		"type":                "server_vad",
+		"prefix_padding_ms":   c.streaming.PrefixPaddingMS,
+		"silence_duration_ms": c.streaming.SilenceDurationMS,
+		"threshold":           c.streaming.Threshold,
+	}
+}
+
+func (c *Client) turnDetectionParam() *realtime.RealtimeTranscriptionSessionAudioInputTurnDetectionUnionParam {
+	if c.streaming.Mode != "segment" {
+		return nil
+	}
+
+	return &realtime.RealtimeTranscriptionSessionAudioInputTurnDetectionUnionParam{
+		OfServerVad: &realtime.RealtimeTranscriptionSessionAudioInputTurnDetectionServerVadParam{
+			Type:              "server_vad",
+			PrefixPaddingMs:   openaisdk.Int(int64(c.streaming.PrefixPaddingMS)),
+			SilenceDurationMs: openaisdk.Int(int64(c.streaming.SilenceDurationMS)),
+			Threshold:         openaisdk.Float(c.streaming.Threshold),
+		},
+	}
 }
 
 func requestID(err *openaisdk.Error) string {

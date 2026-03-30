@@ -15,6 +15,7 @@ It was very much vibe-coded from scratch to... scratch an itch.
 - XDG config file at `~/.config/vtt/config.json`
 - OpenAI API keys stored in the system keyring by default
 - Focus restore and paste back into the app that was active when recording
+- Optional segmented streaming that can paste completed phrases on pauses
 - Terminal-aware paste key support
 - Lightweight overlay for listening, transcribing, success, and errors
 
@@ -47,7 +48,7 @@ While `vtt serve` is running:
 ## Config
 
 The first run creates `~/.config/vtt/config.json`. A sample lives at
-[`config.example.json`](/home/fred/git/vtt/config.example.json).
+`config.example.json`.
 
 Important fields:
 
@@ -57,9 +58,14 @@ Important fields:
 - `openai.organization`: optional org id when your key can access multiple orgs
 - `openai.project`: optional project id when your key should bill a specific project
 - `openai.language`: optional ISO-639-1 hint such as `en`
-- `openai.vocabulary`: domain-specific spellings to bias transcription
+- `openai.prompt_hint`: optional terminology and style hint for transcription
 - `recording.backend`: currently `auto` or `pulse`
 - `recording.device`: PulseAudio source name, or `default`
+- `streaming.mode`: `release` or `segment`
+- `streaming.show_partial_overlay`: show live partial text in the overlay while speaking
+- `streaming.silence_duration_ms`: pause length that ends a segment in `segment` mode
+- `streaming.prefix_padding_ms`: audio kept ahead of each detected phrase in `segment` mode
+- `streaming.threshold`: VAD sensitivity from `0.0` to `1.0` in `segment` mode
 - `insertion.mode`: `auto`, `clipboard`, or `type`
 
 ## Secrets
