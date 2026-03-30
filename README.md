@@ -6,7 +6,7 @@ OpenAI for realtime transcription, and pastes the result back into the app
 you were already using. An always-on-top X11 overlay gives you the same
 "record / transcribe / typed" rhythm that keeps dictation feeling fast.
 
-It was very much vibe-coded from scratch to scratch an itch.
+It was very much vibe-coded from scratch to... scratch an itch.
 
 ## What it does
 
