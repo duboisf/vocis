@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,7 @@ type Session struct {
 	client    *pulse.Client
 	stream    *pulse.RecordStream
 	file      *wavFile
+	meter     *levelMeter
 	startedAt time.Time
 	once      sync.Once
 	err       error
@@ -42,6 +44,17 @@ type wavFile struct {
 	channels   int
 	dataBytes  uint32
 	closed     bool
+}
+
+type meteredWriter struct {
+	dst   *wavFile
+	meter *levelMeter
+}
+
+type levelMeter struct {
+	mu        sync.Mutex
+	level     float64
+	updatedAt time.Time
 }
 
 func New() *Recorder {
@@ -91,8 +104,9 @@ func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Sess
 		return nil, err
 	}
 
+	meter := &levelMeter{}
 	stream, err := client.NewRecord(
-		pulse.Int16Writer(wav.Write),
+		pulse.Int16Writer((&meteredWriter{dst: wav, meter: meter}).Write),
 		options...,
 	)
 	if err != nil {
@@ -107,6 +121,7 @@ func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Sess
 		client:    client,
 		stream:    stream,
 		file:      wav,
+		meter:     meter,
 		startedAt: time.Now(),
 	}
 
@@ -132,6 +147,13 @@ func (s *Session) Stop(ctx context.Context) error {
 		s.err = s.stop(ctx)
 	})
 	return s.err
+}
+
+func (s *Session) Level() float64 {
+	if s == nil || s.meter == nil {
+		return 0
+	}
+	return s.meter.Level()
 }
 
 func (s *Session) Cleanup() {
@@ -357,6 +379,60 @@ func (f *wavFile) Close() error {
 		return err
 	}
 	return f.file.Close()
+}
+
+func (w *meteredWriter) Write(samples []int16) (int, error) {
+	if w.meter != nil {
+		w.meter.Update(samples)
+	}
+	return w.dst.Write(samples)
+}
+
+func (m *levelMeter) Update(samples []int16) {
+	if len(samples) == 0 {
+		return
+	}
+
+	var peak float64
+	for _, sample := range samples {
+		value := math.Abs(float64(sample)) / 32768.0
+		if value > peak {
+			peak = value
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if peak > m.level {
+		m.level = peak
+	} else {
+		m.level = m.level*0.65 + peak*0.35
+	}
+	m.updatedAt = time.Now()
+}
+
+func (m *levelMeter) Level() float64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.updatedAt.IsZero() {
+		return 0
+	}
+
+	age := time.Since(m.updatedAt)
+	if age >= 220*time.Millisecond {
+		return 0
+	}
+
+	level := m.level * (1 - float64(age)/(220*float64(time.Millisecond)))
+	if level < 0 {
+		return 0
+	}
+	if level > 1 {
+		return 1
+	}
+	return level
 }
 
 func (f *wavFile) header() []byte {

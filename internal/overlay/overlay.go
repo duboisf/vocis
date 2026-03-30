@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
-	"math"
 	"strings"
 	"sync"
 	"time"
@@ -25,23 +24,21 @@ import (
 type Overlay struct {
 	cfg config.OverlayConfig
 
-	mu       sync.Mutex
-	x        *xgbutil.XUtil
-	win      *xwindow.Window
-	visible  bool
-	state    viewState
-	phase    float64
-	animTick *time.Ticker
-	animStop chan struct{}
-	hide     *time.Timer
+	mu      sync.Mutex
+	x       *xgbutil.XUtil
+	win     *xwindow.Window
+	visible bool
+	state   viewState
+	level   float64
+	hide    *time.Timer
 }
 
 type viewState struct {
-	title     string
-	subtitle  string
-	body      string
-	accent    color.RGBA
-	animating bool
+	title        string
+	subtitle     string
+	body         string
+	accent       color.RGBA
+	reactiveWave bool
 }
 
 func New(cfg config.OverlayConfig) (*Overlay, error) {
@@ -90,21 +87,20 @@ func (o *Overlay) ShowListening(windowClass string) {
 		subtitle = fmt.Sprintf("Ready to type into %s", windowClass)
 	}
 	o.show(viewState{
-		title:     "Listening",
-		subtitle:  subtitle,
-		body:      "Press the hotkey again to transcribe and paste.",
-		accent:    color.RGBA{R: 34, G: 197, B: 94, A: 255},
-		animating: true,
+		title:        "Listening",
+		subtitle:     subtitle,
+		body:         "Speak naturally. Release when you want it pasted.",
+		accent:       color.RGBA{R: 34, G: 197, B: 94, A: 255},
+		reactiveWave: true,
 	}, false)
 }
 
-func (o *Overlay) ShowTranscribing(path string) {
+func (o *Overlay) ShowTranscribing() {
 	o.show(viewState{
-		title:     "Transcribing",
-		subtitle:  "Sending audio to OpenAI",
-		body:      shorten(path, o.bodyTextLimit()),
-		accent:    color.RGBA{R: 245, G: 158, B: 11, A: 255},
-		animating: true,
+		title:    "Transcribing",
+		subtitle: "Turning your speech into polished text",
+		body:     "Keeping code, Git, and GitHub terms intact.",
+		accent:   color.RGBA{R: 245, G: 158, B: 11, A: 255},
 	}, false)
 }
 
@@ -129,7 +125,6 @@ func (o *Overlay) Close() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	o.stopAnimationLocked()
 	if o.hide != nil {
 		o.hide.Stop()
 	}
@@ -143,19 +138,13 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	defer o.mu.Unlock()
 
 	o.state = state
-	o.phase = 0
+	o.level = 0
 	o.drawLocked()
 
 	if !o.visible {
 		o.visible = true
 		o.win.Map()
 		o.win.Stack(xproto.StackModeAbove)
-	}
-
-	if state.animating {
-		o.startAnimationLocked()
-	} else {
-		o.stopAnimationLocked()
 	}
 
 	if o.hide != nil {
@@ -173,39 +162,22 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	}
 }
 
-func (o *Overlay) startAnimationLocked() {
-	if o.animTick != nil {
+func (o *Overlay) SetLevel(level float64) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if !o.visible || !o.state.reactiveWave {
 		return
 	}
 
-	o.animTick = time.NewTicker(110 * time.Millisecond)
-	o.animStop = make(chan struct{})
-	ticker := o.animTick
-	stop := o.animStop
-	go func() {
-		for {
-			select {
-			case <-ticker.C:
-			case <-stop:
-				return
-			}
-
-			o.mu.Lock()
-			o.phase += 0.55
-			o.drawLocked()
-			o.mu.Unlock()
-		}
-	}()
-}
-
-func (o *Overlay) stopAnimationLocked() {
-	if o.animTick == nil {
-		return
+	if level < 0 {
+		level = 0
 	}
-	o.animTick.Stop()
-	close(o.animStop)
-	o.animTick = nil
-	o.animStop = nil
+	if level > 1 {
+		level = 1
+	}
+	o.level = level
+	o.drawLocked()
 }
 
 func (o *Overlay) drawLocked() {
@@ -215,12 +187,12 @@ func (o *Overlay) drawLocked() {
 
 	drawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
 	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
-	drawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.phase, o.state.animating)
+	drawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level, o.state.reactiveWave)
 
 	writeText(img, 150, 36, o.state.title, o.state.accent, basicfont.Face7x13)
 	writeText(img, 150, 62, o.state.subtitle, color.RGBA{R: 226, G: 232, B: 240, A: 255}, basicfont.Face7x13)
 	if strings.TrimSpace(o.state.body) != "" {
-		writeText(img, 150, 90, o.state.body, color.RGBA{R: 148, G: 163, B: 184, A: 255}, basicfont.Face7x13)
+		writeText(img, 150, 90, shorten(o.state.body, o.bodyTextLimit()), color.RGBA{R: 148, G: 163, B: 184, A: 255}, basicfont.Face7x13)
 	}
 
 	ximg := xgraphics.NewConvert(o.x, img)
@@ -230,15 +202,16 @@ func (o *Overlay) drawLocked() {
 	ximg.Destroy()
 }
 
-func drawBars(dst *image.RGBA, rect image.Rectangle, accent color.RGBA, phase float64, animate bool) {
+func drawBars(dst *image.RGBA, rect image.Rectangle, accent color.RGBA, level float64, reactive bool) {
 	width := 10
 	gap := 6
-	count := 6
 	baseY := rect.Max.Y
-	for i := 0; i < count; i++ {
-		height := 18
-		if animate {
-			height = 18 + int(math.Abs(math.Sin(phase+float64(i)*0.55))*34)
+	profile := []float64{0.38, 0.62, 0.92, 0.82, 0.58, 0.34}
+
+	for i, weight := range profile {
+		height := 14 + i%2*4
+		if reactive {
+			height = 10 + int((level*weight)*54)
 		}
 		x := rect.Min.X + i*(width+gap)
 		r := image.Rect(x, baseY-height, x+width, baseY)
