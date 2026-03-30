@@ -19,6 +19,11 @@ type Client struct {
 	client openaisdk.Client
 }
 
+const defaultProgrammerPrompt = "Transcribe for a programmer speaking naturally. " +
+	"Prefer common software, terminal, API, Git, and GitHub terminology. Preserve " +
+	"obvious technical terms, acronyms, and capitalization when the audio supports " +
+	"them. Do not invent extra words that were not spoken."
+
 func New(apiKey string, cfg config.OpenAIConfig) *Client {
 	timeout := time.Duration(cfg.RequestLimit) * time.Second
 
@@ -77,14 +82,10 @@ func (c *Client) Transcribe(ctx context.Context, filePath string) (string, error
 }
 
 func (c *Client) prompt() string {
-	var parts []string
 	if hint := strings.TrimSpace(c.cfg.PromptHint); hint != "" {
-		parts = append(parts, hint)
+		return hint
 	}
-	if len(c.cfg.Vocabulary) > 0 {
-		parts = append(parts, "Prefer these spellings: "+strings.Join(c.cfg.Vocabulary, ", "))
-	}
-	return strings.TrimSpace(strings.Join(parts, "\n"))
+	return defaultProgrammerPrompt
 }
 
 func organization(cfg config.OpenAIConfig) string {
