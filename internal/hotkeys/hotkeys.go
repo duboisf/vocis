@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/keybind"
 	"github.com/BurntSushi/xgbutil/xevent"
@@ -19,6 +20,8 @@ type Registration struct {
 	x        *xgbutil.XUtil
 	down     chan struct{}
 	up       chan struct{}
+
+	trackedCodes map[xproto.Keycode]struct{}
 
 	mu           sync.Mutex
 	isDown       bool
@@ -37,11 +40,17 @@ func Register(shortcut string) (*Registration, error) {
 	}
 	keybind.Initialize(xu)
 
+	trackedCodes, err := trackedKeycodes(xu, shortcut)
+	if err != nil {
+		return nil, err
+	}
+
 	r := &Registration{
-		shortcut: shortcut,
-		x:        xu,
-		down:     make(chan struct{}, 1),
-		up:       make(chan struct{}, 1),
+		shortcut:     shortcut,
+		x:            xu,
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: trackedCodes,
 	}
 
 	err = keybind.KeyPressFun(func(_ *xgbutil.XUtil, _ xevent.KeyPressEvent) {
@@ -57,6 +66,14 @@ func Register(shortcut string) (*Registration, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	xevent.KeyPressFun(func(_ *xgbutil.XUtil, ev xevent.KeyPressEvent) {
+		r.handleTrackedPress(ev.Detail)
+	}).Connect(xu, xu.RootWin())
+
+	xevent.KeyReleaseFun(func(_ *xgbutil.XUtil, ev xevent.KeyReleaseEvent) {
+		r.handleTrackedRelease(ev.Detail)
+	}).Connect(xu, xu.RootWin())
 
 	go xevent.Main(xu)
 	return r, nil
@@ -90,12 +107,7 @@ func (r *Registration) Close() error {
 
 func (r *Registration) handlePress() {
 	r.mu.Lock()
-	if r.releaseTimer != nil {
-		r.releaseTimer.Stop()
-		r.releaseTimer = nil
-		r.mu.Unlock()
-		return
-	}
+	r.cancelReleaseTimerLocked()
 	if r.isDown {
 		r.mu.Unlock()
 		return
@@ -107,6 +119,28 @@ func (r *Registration) handlePress() {
 }
 
 func (r *Registration) handleRelease() {
+	r.scheduleRelease()
+}
+
+func (r *Registration) handleTrackedPress(code xproto.Keycode) {
+	if !r.isTrackedKey(code) {
+		return
+	}
+
+	r.mu.Lock()
+	r.cancelReleaseTimerLocked()
+	r.mu.Unlock()
+}
+
+func (r *Registration) handleTrackedRelease(code xproto.Keycode) {
+	if !r.isTrackedKey(code) {
+		return
+	}
+
+	r.scheduleRelease()
+}
+
+func (r *Registration) scheduleRelease() {
 	r.mu.Lock()
 	if !r.isDown || r.releaseTimer != nil {
 		r.mu.Unlock()
@@ -118,6 +152,13 @@ func (r *Registration) handleRelease() {
 	r.mu.Unlock()
 
 	go r.awaitRelease(timer)
+}
+
+func (r *Registration) cancelReleaseTimerLocked() {
+	if r.releaseTimer != nil {
+		r.releaseTimer.Stop()
+		r.releaseTimer = nil
+	}
 }
 
 func (r *Registration) awaitRelease(timer *time.Timer) {
@@ -143,6 +184,55 @@ func (r *Registration) emit(ch chan struct{}) {
 	select {
 	case ch <- struct{}{}:
 	default:
+	}
+}
+
+func (r *Registration) isTrackedKey(code xproto.Keycode) bool {
+	_, ok := r.trackedCodes[code]
+	return ok
+}
+
+func trackedKeycodes(xu *xgbutil.XUtil, shortcut string) (map[xproto.Keycode]struct{}, error) {
+	parts := strings.FieldsFunc(strings.ToLower(shortcut), func(r rune) bool {
+		return r == '+' || r == '-'
+	})
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid hotkey %q", shortcut)
+	}
+
+	codes := make(map[xproto.Keycode]struct{})
+	for _, part := range parts[:len(parts)-1] {
+		for _, name := range modifierKeyNames(part) {
+			for _, code := range keybind.StrToKeycodes(xu, name) {
+				codes[code] = struct{}{}
+			}
+		}
+	}
+	keyName, ok := parseKey(parts[len(parts)-1])
+	if !ok {
+		return nil, fmt.Errorf("unsupported key %q", parts[len(parts)-1])
+	}
+	for _, code := range keybind.StrToKeycodes(xu, keyName) {
+		codes[code] = struct{}{}
+	}
+	if len(codes) == 0 {
+		return nil, fmt.Errorf("no keycodes found for hotkey %q", shortcut)
+	}
+	return codes, nil
+}
+
+func modifierKeyNames(part string) []string {
+	switch part {
+	case "ctrl", "control":
+		return []string{"Control_L", "Control_R"}
+	case "alt", "option":
+		return []string{"Alt_L", "Alt_R", "Meta_L", "Meta_R"}
+	case "shift":
+		return []string{"Shift_L", "Shift_R"}
+	case "cmd", "super", "meta", "win":
+		return []string{"Super_L", "Super_R"}
+	default:
+		return nil
 	}
 }
 

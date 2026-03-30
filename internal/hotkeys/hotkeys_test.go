@@ -3,6 +3,8 @@ package hotkeys
 import (
 	"testing"
 	"time"
+
+	"github.com/BurntSushi/xgb/xproto"
 )
 
 func TestRegistrationEmitsDownAndUp(t *testing.T) {
@@ -39,6 +41,38 @@ func TestRegistrationSuppressesAutoRepeatRelease(t *testing.T) {
 
 	r.handleRelease()
 	expectEventWithin(t, r.up, autoRepeatReleaseDelay+40*time.Millisecond)
+}
+
+func TestTrackedModifierReleaseStopsHold(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.handleTrackedRelease(42)
+	expectEventWithin(t, r.up, autoRepeatReleaseDelay+40*time.Millisecond)
+}
+
+func TestUntrackedReleaseDoesNotStopHold(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.handleTrackedRelease(99)
+	expectNoEvent(t, r.up, autoRepeatReleaseDelay+40*time.Millisecond)
 }
 
 func expectEvent(t *testing.T, ch <-chan struct{}) {
