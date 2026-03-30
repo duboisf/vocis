@@ -1,8 +1,8 @@
 # vtt
 
 `vtt` is a Linux voice-to-text desktop helper written in Go. It stays in the
-background, listens for a global hotkey, records your microphone, sends the
-audio to the OpenAI transcription API, and pastes the result back into the app
+background, listens for a global hotkey, streams your microphone audio to
+OpenAI for realtime transcription, and pastes the result back into the app
 you were already using. An always-on-top X11 overlay gives you the same
 "record / transcribe / typed" rhythm that keeps dictation feeling fast.
 

@@ -1,57 +1,45 @@
 package recorder
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestValidRecordingRejectsHeaderOnlyAudio(t *testing.T) {
+func TestValidRecordingDurationRejectsZeroAudio(t *testing.T) {
 	t.Parallel()
 
-	path := writePCMRecording(t, 16000, 1, nil)
-	err := validRecording(path)
-	if err == nil {
-		t.Fatal("expected header-only recording to be rejected")
+	if err := validRecordingDuration(0); err == nil {
+		t.Fatal("expected zero-duration recording to be rejected")
 	}
 }
 
-func TestValidRecordingRejectsShortPCM(t *testing.T) {
+func TestValidRecordingDurationRejectsShortCapture(t *testing.T) {
 	t.Parallel()
 
-	samples := make([]int16, 16*40)
-	path := writePCMRecording(t, 16000, 1, samples)
-
-	err := validRecording(path)
-	if err == nil {
+	if err := validRecordingDuration(40 * time.Millisecond); err == nil {
 		t.Fatal("expected short recording to be rejected")
 	}
 }
 
-func TestValidRecordingAcceptsDurationsAboveThreshold(t *testing.T) {
+func TestValidRecordingDurationAcceptsLongerCapture(t *testing.T) {
 	t.Parallel()
 
-	samples := make([]int16, 16000)
-	path := writePCMRecording(t, 16000, 1, samples)
-
-	if err := validRecording(path); err != nil {
+	if err := validRecordingDuration(150 * time.Millisecond); err != nil {
 		t.Fatalf("expected recording to be valid: %v", err)
 	}
 }
 
-func TestWAVDurationUsesHeaderData(t *testing.T) {
+func TestSessionBytesCapturedUsesFrameCount(t *testing.T) {
 	t.Parallel()
 
-	samples := make([]int16, 32000)
-	path := writePCMRecording(t, 16000, 2, samples)
+	session := &Session{sampleRate: 24000, channels: 2}
+	session.frames.Store(2400)
 
-	duration, err := wavDuration(path)
-	if err != nil {
-		t.Fatalf("wav duration: %v", err)
+	if got, want := session.BytesCaptured(), int64(9600); got != want {
+		t.Fatalf("bytes captured = %d, want %d", got, want)
 	}
-	if duration != time.Second {
-		t.Fatalf("duration = %s, want %s", duration, time.Second)
+	if got, want := session.Duration(), 100*time.Millisecond; got != want {
+		t.Fatalf("duration = %s, want %s", got, want)
 	}
 }
 
@@ -71,31 +59,4 @@ func TestLevelMeterDropsToZeroWhenStale(t *testing.T) {
 	if got := meter.Level(); got != 0 {
 		t.Fatalf("stale level = %f, want 0", got)
 	}
-}
-
-func writePCMRecording(t *testing.T, sampleRate, channels int, samples []int16) string {
-	t.Helper()
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sample.wav")
-
-	file, err := os.Create(path)
-	if err != nil {
-		t.Fatalf("create temp recording: %v", err)
-	}
-
-	wav, err := newWAVFile(file, sampleRate, channels)
-	if err != nil {
-		t.Fatalf("new wav file: %v", err)
-	}
-	if len(samples) > 0 {
-		if _, err := wav.Write(samples); err != nil {
-			t.Fatalf("write samples: %v", err)
-		}
-	}
-	if err := wav.Close(); err != nil {
-		t.Fatalf("close wav file: %v", err)
-	}
-
-	return path
 }

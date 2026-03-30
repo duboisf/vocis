@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -37,6 +36,8 @@ type recordingState struct {
 	id        uint64
 	startedAt time.Time
 	session   *recorder.Session
+	stream    *openai.Stream
+	pumpDone  chan error
 	target    injector.Target
 }
 
@@ -165,8 +166,16 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 			target.WindowID, target.WindowClass)
 	}
 
+	stream, err := a.transcribe.StartStream(ctx, a.cfg.Recording.SampleRate, a.cfg.Recording.Channels)
+	if err != nil {
+		sessionlog.Errorf("start transcription stream: %v", err)
+		a.overlay.ShowError(err)
+		return
+	}
+
 	session, err := a.recorder.Start(ctx, a.cfg.Recording)
 	if err != nil {
+		_ = stream.Close()
 		sessionlog.Errorf("start recording: %v", err)
 		a.overlay.ShowError(err)
 		return
@@ -177,11 +186,15 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		id:        a.sequence,
 		startedAt: time.Now(),
 		session:   session,
+		stream:    stream,
+		pumpDone:  make(chan error, 1),
 		target:    target,
 	}
 	a.recording = state
 	a.overlay.ShowListening(target.WindowClass)
-	sessionlog.Infof("recording started: %s", state.session.Path())
+	sessionlog.Infof("recording started: %d Hz, %d channel(s), realtime transcription armed",
+		state.session.SampleRate(), state.session.Channels())
+	go a.pumpAudio(ctx, state)
 	go a.monitorRecordingLevel(ctx, state.id, state.session)
 
 	if a.cfg.Recording.MaxDurationSeconds > 0 {
@@ -194,8 +207,8 @@ func (a *App) stopRecordingLocked(ctx context.Context) {
 	a.recording = nil
 	a.transcribing = true
 	a.overlay.ShowTranscribing()
-	sessionlog.Infof("stopping recording and transcribing after %s: %s",
-		time.Since(state.startedAt).Round(10*time.Millisecond), state.session.Path())
+	sessionlog.Infof("stopping recording and finalizing transcription after %s",
+		time.Since(state.startedAt).Round(10*time.Millisecond))
 
 	go a.finishRecording(ctx, state)
 }
@@ -254,7 +267,7 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 	a.mu.Unlock()
 
 	a.overlay.ShowTranscribing()
-	sessionlog.Warnf("auto-stopping recording after timeout: %s", state.session.Path())
+	sessionlog.Warnf("auto-stopping recording after timeout")
 	go a.finishRecording(ctx, state)
 }
 
@@ -264,6 +277,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.transcribing = false
 		a.mu.Unlock()
 	}()
+	defer state.stream.Close()
 
 	stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -271,21 +285,23 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	if err := state.session.Stop(stopCtx); err != nil {
 		sessionlog.Errorf("stop recording: %v", err)
 		a.overlay.ShowError(err)
-		state.session.Cleanup()
 		return
 	}
-	defer state.session.Cleanup()
-	audioSize := int64(-1)
-	if info, err := os.Stat(state.session.Path()); err == nil {
-		audioSize = info.Size()
+	if err := <-state.pumpDone; err != nil {
+		sessionlog.Errorf("stream audio: %v", err)
+		a.overlay.ShowError(err)
+		return
 	}
-	if audioSize >= 0 {
-		sessionlog.Infof("audio captured successfully: %s (%d bytes)", state.session.Path(), audioSize)
-	} else {
-		sessionlog.Infof("audio captured successfully: %s", state.session.Path())
-	}
+	sessionlog.Infof("audio captured successfully: %d bytes streamed over %s",
+		state.session.BytesCaptured(), state.session.Duration().Round(10*time.Millisecond))
 
-	text, err := a.transcribe.Transcribe(ctx, state.session.Path())
+	transcribeCtx, transcribeCancel := context.WithTimeout(
+		ctx,
+		time.Duration(a.cfg.OpenAI.RequestLimit)*time.Second,
+	)
+	defer transcribeCancel()
+
+	text, err := state.stream.Commit(transcribeCtx)
 	if err != nil {
 		sessionlog.Errorf("transcribe audio: %v", err)
 		a.overlay.ShowError(err)
@@ -351,8 +367,42 @@ func (a *App) shutdown() error {
 		if err := state.session.Stop(stopCtx); err != nil {
 			sessionlog.Warnf("shutdown: %v", err)
 		}
-		state.session.Cleanup()
+		_ = state.stream.Close()
 	}
 
 	return nil
+}
+
+func (a *App) pumpAudio(ctx context.Context, state *recordingState) {
+	defer func() {
+		select {
+		case state.pumpDone <- nil:
+		default:
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			select {
+			case state.pumpDone <- ctx.Err():
+			default:
+			}
+			return
+		case chunk, ok := <-state.session.Samples():
+			if !ok {
+				return
+			}
+			if len(chunk) == 0 {
+				continue
+			}
+			if err := state.stream.Append(ctx, chunk); err != nil {
+				select {
+				case state.pumpDone <- err:
+				default:
+				}
+				return
+			}
+		}
+	}
 }
