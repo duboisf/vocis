@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -23,6 +25,8 @@ type Injector struct {
 	cfg config.InsertionConfig
 }
 
+var quotedValuePattern = regexp.MustCompile(`"([^"]+)"`)
+
 func New(cfg config.InsertionConfig) *Injector {
 	return &Injector{cfg: cfg}
 }
@@ -35,6 +39,15 @@ func (i *Injector) CaptureTarget(ctx context.Context) (Target, error) {
 
 	className, _ := i.runTrimmed(ctx, "xdotool", "getwindowclassname", windowID)
 	windowName, _ := i.runTrimmed(ctx, "xdotool", "getwindowname", windowID)
+	if className == "" || windowName == "" {
+		fallbackClass, fallbackName := i.readWindowMetadata(ctx, windowID)
+		if className == "" {
+			className = fallbackClass
+		}
+		if windowName == "" {
+			windowName = fallbackName
+		}
+	}
 
 	return Target{
 		WindowID:    windowID,
@@ -90,9 +103,17 @@ func (i *Injector) paste(ctx context.Context, target Target, text string) error 
 	}
 
 	pasteKey := i.cfg.DefaultPasteKey
-	if i.isTerminal(target.WindowClass) {
+	isTerminal := i.isTerminal(target.WindowClass)
+	if isTerminal {
 		pasteKey = i.cfg.TerminalPasteKey
 	}
+	log.Printf(
+		"pasting transcript into window=%s class=%q terminal=%t key=%s",
+		target.WindowID,
+		target.WindowClass,
+		isTerminal,
+		pasteKey,
+	)
 
 	args := []string{"key", "--clearmodifiers"}
 	if target.WindowID != "" {
@@ -153,4 +174,35 @@ func (i *Injector) runTrimmed(ctx context.Context, name string, args ...string) 
 		return "", fmt.Errorf("%s %v: %s", name, args, msg)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (i *Injector) readWindowMetadata(ctx context.Context, windowID string) (className, windowName string) {
+	output, err := i.runTrimmed(ctx, "xprop", "-id", windowID, "WM_CLASS", "WM_NAME")
+	if err != nil {
+		return "", ""
+	}
+	return parseXPropMetadata(output)
+}
+
+func parseXPropMetadata(output string) (className, windowName string) {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		matches := quotedValuePattern.FindAllStringSubmatch(line, -1)
+		if len(matches) == 0 {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "WM_CLASS"):
+			className = matches[len(matches)-1][1]
+		case strings.HasPrefix(line, "WM_NAME"):
+			windowName = matches[0][1]
+		}
+	}
+
+	return className, windowName
 }
