@@ -65,8 +65,8 @@ func TestTranscribeUsesSDKAndReturnsText(t *testing.T) {
 			if got := fields["response_format"]; got != "json" {
 				t.Fatalf("response_format = %q", got)
 			}
-			if got := fields["prompt"]; !strings.Contains(got, "OpenAI") {
-				t.Fatalf("prompt missing vocabulary, got %q", got)
+			if got := fields["prompt"]; got != defaultProgrammerPrompt {
+				t.Fatalf("prompt = %q, want %q", got, defaultProgrammerPrompt)
 			}
 		}
 
@@ -107,6 +107,73 @@ func TestTranscribeUsesSDKAndReturnsText(t *testing.T) {
 	}
 	if !strings.HasPrefix(sawContentType, "multipart/form-data;") {
 		t.Fatalf("content type = %q", sawContentType)
+	}
+}
+
+func TestTranscribeIncludesPromptHintWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	var sawPrompt string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reader, err := r.MultipartReader()
+		if err != nil {
+			t.Fatalf("multipart reader: %v", err)
+		}
+
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("next part: %v", err)
+			}
+			body, err := io.ReadAll(part)
+			if err != nil {
+				t.Fatalf("read part %s: %v", part.FormName(), err)
+			}
+			if part.FormName() == "prompt" {
+				sawPrompt = string(body)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"text": "prompt hint ok"})
+	}))
+	defer server.Close()
+
+	filePath := writeTempAudio(t)
+	defer os.Remove(filePath)
+
+	cfg := config.Default()
+	cfg.OpenAI.BaseURL = server.URL
+	cfg.OpenAI.PromptHint = "Use technical spelling."
+	cfg.OpenAI.Vocabulary = []string{"OpenAI", "GPT", "VTT"}
+
+	client := New("test-key", cfg.OpenAI)
+	got, err := client.Transcribe(context.Background(), filePath)
+	if err != nil {
+		t.Fatalf("transcribe: %v", err)
+	}
+
+	if got != "prompt hint ok" {
+		t.Fatalf("transcript = %q", got)
+	}
+	if sawPrompt != "Use technical spelling." {
+		t.Fatalf("prompt = %q", sawPrompt)
+	}
+}
+
+func TestPromptUsesBuiltInProgrammerHintByDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.OpenAI.PromptHint = ""
+
+	client := New("test-key", cfg.OpenAI)
+	if got := client.prompt(); got != defaultProgrammerPrompt {
+		t.Fatalf("prompt = %q, want %q", got, defaultProgrammerPrompt)
 	}
 }
 
