@@ -102,7 +102,7 @@ func (o *Overlay) ShowTranscribing(path string) {
 	o.show(viewState{
 		title:     "Transcribing",
 		subtitle:  "Sending audio to OpenAI",
-		body:      shorten(path, 52),
+		body:      shorten(path, o.bodyTextLimit()),
 		accent:    color.RGBA{R: 245, G: 158, B: 11, A: 255},
 		animating: true,
 	}, false)
@@ -112,7 +112,7 @@ func (o *Overlay) ShowSuccess(text string) {
 	o.show(viewState{
 		title:    "Typed",
 		subtitle: "Transcription inserted into your active app",
-		body:     shorten(strings.ReplaceAll(text, "\n", " "), 74),
+		body:     shorten(strings.ReplaceAll(text, "\n", " "), o.bodyTextLimit()),
 		accent:   color.RGBA{R: 56, G: 189, B: 248, A: 255},
 	}, true)
 }
@@ -120,7 +120,7 @@ func (o *Overlay) ShowSuccess(text string) {
 func (o *Overlay) ShowError(err error) {
 	o.show(viewState{
 		title:    "Error",
-		subtitle: shorten(err.Error(), 74),
+		subtitle: shorten(err.Error(), o.subtitleTextLimit()),
 		accent:   color.RGBA{R: 248, G: 113, B: 113, A: 255},
 	}, true)
 }
@@ -271,6 +271,33 @@ func position(xu *xgbutil.XUtil, cfg config.OverlayConfig) (int, int) {
 		y = 0
 	}
 	return x, y
+}
+
+func (o *Overlay) subtitleTextLimit() int {
+	return textLimit(o.cfg.Width, 20)
+}
+
+func (o *Overlay) bodyTextLimit() int {
+	return textLimit(o.cfg.Width, 20)
+}
+
+func textLimit(width int, rightPadding int) int {
+	const (
+		textLeft   = 150
+		glyphWidth = 7
+		minChars   = 12
+	)
+
+	available := width - textLeft - rightPadding
+	if available <= 0 {
+		return minChars
+	}
+
+	chars := available / glyphWidth
+	if chars < minChars {
+		return minChars
+	}
+	return chars
 }
 
 func shorten(s string, max int) string {

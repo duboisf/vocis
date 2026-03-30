@@ -96,7 +96,7 @@ func Default() Config {
 			},
 		},
 		Overlay: OverlayConfig{
-			Width:          460,
+			Width:          620,
 			Height:         132,
 			MarginTop:      44,
 			Opacity:        0.94,
