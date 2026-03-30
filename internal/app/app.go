@@ -283,6 +283,12 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	defer cancel()
 
 	if err := state.session.Stop(stopCtx); err != nil {
+		if errors.Is(err, recorder.ErrRecordingTooShort) {
+			sessionlog.Infof("discarding short recording after %s",
+				state.session.Duration().Round(10*time.Millisecond))
+			a.overlay.Hide()
+			return
+		}
 		sessionlog.Errorf("stop recording: %v", err)
 		a.overlay.ShowError(err)
 		return

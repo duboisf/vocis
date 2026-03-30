@@ -133,6 +133,20 @@ func (o *Overlay) Close() {
 	}
 }
 
+func (o *Overlay) Hide() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if o.hide != nil {
+		o.hide.Stop()
+		o.hide = nil
+	}
+	o.visible = false
+	if o.win != nil {
+		o.win.Unmap()
+	}
+}
+
 func (o *Overlay) show(state viewState, autoHide bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
