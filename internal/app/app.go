@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -267,7 +268,15 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		return
 	}
 	defer state.session.Cleanup()
-	log.Printf("audio captured successfully: %s", state.session.Path())
+	audioSize := int64(-1)
+	if info, err := os.Stat(state.session.Path()); err == nil {
+		audioSize = info.Size()
+	}
+	if audioSize >= 0 {
+		log.Printf("audio captured successfully: %s (%d bytes)", state.session.Path(), audioSize)
+	} else {
+		log.Printf("audio captured successfully: %s", state.session.Path())
+	}
 
 	text, err := a.transcribe.Transcribe(ctx, state.session.Path())
 	if err != nil {
