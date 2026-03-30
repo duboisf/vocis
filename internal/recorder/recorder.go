@@ -20,6 +20,8 @@ const (
 	stopFlushDelay       = 120 * time.Millisecond
 )
 
+var ErrRecordingTooShort = errors.New("recording too short")
+
 type Recorder struct{}
 
 type Session struct {
@@ -269,7 +271,7 @@ func newPulseClient() (*pulse.Client, error) {
 
 func validRecordingDuration(duration time.Duration) error {
 	if duration < minRecordingDuration {
-		return fmt.Errorf("recording duration %s is too short", duration.Round(10*time.Millisecond))
+		return fmt.Errorf("%w: %s", ErrRecordingTooShort, duration.Round(10*time.Millisecond))
 	}
 	return nil
 }

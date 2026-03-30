@@ -1,6 +1,7 @@
 package recorder
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -8,16 +9,24 @@ import (
 func TestValidRecordingDurationRejectsZeroAudio(t *testing.T) {
 	t.Parallel()
 
-	if err := validRecordingDuration(0); err == nil {
+	err := validRecordingDuration(0)
+	if err == nil {
 		t.Fatal("expected zero-duration recording to be rejected")
+	}
+	if !errors.Is(err, ErrRecordingTooShort) {
+		t.Fatalf("expected ErrRecordingTooShort, got %v", err)
 	}
 }
 
 func TestValidRecordingDurationRejectsShortCapture(t *testing.T) {
 	t.Parallel()
 
-	if err := validRecordingDuration(40 * time.Millisecond); err == nil {
+	err := validRecordingDuration(40 * time.Millisecond)
+	if err == nil {
 		t.Fatal("expected short recording to be rejected")
+	}
+	if !errors.Is(err, ErrRecordingTooShort) {
+		t.Fatalf("expected ErrRecordingTooShort, got %v", err)
 	}
 }
 
