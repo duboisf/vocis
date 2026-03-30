@@ -119,11 +119,7 @@ func (i *Injector) paste(ctx context.Context, target Target, text string) error 
 		pasteKey,
 	)
 
-	args := []string{"key", "--clearmodifiers"}
-	if target.WindowID != "" {
-		args = append(args, "--window", target.WindowID)
-	}
-	args = append(args, normalizeKeyChord(pasteKey)...)
+	args := buildPasteArgs(pasteKey)
 
 	if _, err := i.runTrimmed(ctx, "xdotool", args...); err != nil {
 		return fmt.Errorf("paste text: %w", err)
@@ -161,6 +157,12 @@ func (i *Injector) isTerminal(windowClass string) bool {
 		}
 	}
 	return false
+}
+
+func buildPasteArgs(pasteKey string) []string {
+	args := []string{"key", "--clearmodifiers"}
+	args = append(args, normalizeKeyChord(pasteKey)...)
+	return args
 }
 
 func normalizeKeyChord(chord string) []string {
