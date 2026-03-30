@@ -176,6 +176,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	a.recording = state
 	a.overlay.ShowListening(target.WindowClass)
 	sessionlog.Infof("recording started: %s", state.session.Path())
+	go a.monitorRecordingLevel(ctx, state.id, state.session)
 
 	if a.cfg.Recording.MaxDurationSeconds > 0 {
 		go a.forceStopAfter(ctx, state.id, time.Duration(a.cfg.Recording.MaxDurationSeconds)*time.Second)
@@ -186,7 +187,7 @@ func (a *App) stopRecordingLocked(ctx context.Context) {
 	state := a.recording
 	a.recording = nil
 	a.transcribing = true
-	a.overlay.ShowTranscribing(state.session.Path())
+	a.overlay.ShowTranscribing()
 	sessionlog.Infof("stopping recording and transcribing after %s: %s",
 		time.Since(state.startedAt).Round(10*time.Millisecond), state.session.Path())
 
@@ -246,7 +247,7 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 	a.transcribing = true
 	a.mu.Unlock()
 
-	a.overlay.ShowTranscribing(state.session.Path())
+	a.overlay.ShowTranscribing()
 	sessionlog.Warnf("auto-stopping recording after timeout: %s", state.session.Path())
 	go a.finishRecording(ctx, state)
 }
@@ -300,6 +301,29 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	sessionlog.Infof("transcript inserted into window=%s", state.target.WindowID)
 
 	a.overlay.ShowSuccess(text)
+}
+
+func (a *App) monitorRecordingLevel(ctx context.Context, id uint64, session *recorder.Session) {
+	ticker := time.NewTicker(65 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		a.mu.Lock()
+		active := a.recording != nil && a.recording.id == id && !a.transcribing
+		a.mu.Unlock()
+		if !active {
+			a.overlay.SetLevel(0)
+			return
+		}
+
+		a.overlay.SetLevel(session.Level())
+	}
 }
 
 func (a *App) hotkeyHint(shortcut string) string {

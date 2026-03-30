@@ -55,6 +55,24 @@ func TestWAVDurationUsesHeaderData(t *testing.T) {
 	}
 }
 
+func TestLevelMeterDropsToZeroWhenStale(t *testing.T) {
+	t.Parallel()
+
+	meter := &levelMeter{}
+	meter.Update([]int16{0, 8000, -12000, 4000})
+	if got := meter.Level(); got <= 0 {
+		t.Fatalf("level = %f, want > 0", got)
+	}
+
+	meter.mu.Lock()
+	meter.updatedAt = time.Now().Add(-300 * time.Millisecond)
+	meter.mu.Unlock()
+
+	if got := meter.Level(); got != 0 {
+		t.Fatalf("stale level = %f, want 0", got)
+	}
+}
+
 func writePCMRecording(t *testing.T, sampleRate, channels int, samples []int16) string {
 	t.Helper()
 
