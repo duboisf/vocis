@@ -37,7 +37,7 @@ func TestStartStreamAppendsPCMAndReturnsTranscript(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode client secret request: %v", err)
 			}
-			assertClientSecretRequest(t, body, defaultProgrammerPrompt)
+			assertClientSecretRequest(t, body, defaultProgrammerPrompt, false)
 
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -69,7 +69,7 @@ func TestStartStreamAppendsPCMAndReturnsTranscript(t *testing.T) {
 			if err := conn.ReadJSON(&sessionUpdate); err != nil {
 				t.Fatalf("read session update: %v", err)
 			}
-			assertSessionUpdate(t, sessionUpdate, defaultProgrammerPrompt)
+			assertSessionUpdate(t, sessionUpdate, defaultProgrammerPrompt, false)
 
 			_ = conn.WriteJSON(map[string]any{"type": "session.updated"})
 
@@ -121,7 +121,7 @@ func TestStartStreamAppendsPCMAndReturnsTranscript(t *testing.T) {
 	cfg.OpenAI.Project = "proj_test"
 	cfg.OpenAI.Language = "en"
 
-	client := New("test-key", cfg.OpenAI)
+	client := New("test-key", cfg.OpenAI, cfg.Streaming)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -134,16 +134,38 @@ func TestStartStreamAppendsPCMAndReturnsTranscript(t *testing.T) {
 	if err := stream.Append(ctx, []int16{1000, -1000, 2000, -2000}); err != nil {
 		t.Fatalf("append: %v", err)
 	}
-	got, err := stream.Commit(ctx)
-	if err != nil {
+	if err := stream.Commit(ctx); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
 
-	if got != "hello world" {
-		t.Fatalf("transcript = %q", got)
+	var gotPartial string
+	var gotFinal string
+	for gotFinal == "" {
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case event := <-stream.Events():
+			switch event.Type {
+			case StreamEventPartial:
+				if event.Text != "" {
+					gotPartial = event.Text
+				}
+			case StreamEventFinal:
+				gotFinal = event.Text
+			case StreamEventError:
+				t.Fatalf("stream error: %v", event.Err)
+			}
+		}
 	}
-	if partial := stream.Partial(); partial != "hello " {
-		t.Fatalf("partial = %q", partial)
+
+	if gotFinal != "hello world" {
+		t.Fatalf("transcript = %q", gotFinal)
+	}
+	if gotPartial != "hello " {
+		t.Fatalf("partial event = %q", gotPartial)
+	}
+	if partial := stream.Partial(); partial != "" {
+		t.Fatalf("partial = %q, want empty after completion", partial)
 	}
 	if sawAuth != "Bearer test-key" {
 		t.Fatalf("authorization = %q", sawAuth)
@@ -168,7 +190,7 @@ func TestStartStreamUsesPromptHintWhenConfigured(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode client secret request: %v", err)
 			}
-			assertClientSecretRequest(t, body, "Use technical spelling.")
+			assertClientSecretRequest(t, body, "Use technical spelling.", false)
 
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -196,7 +218,7 @@ func TestStartStreamUsesPromptHintWhenConfigured(t *testing.T) {
 			if err := conn.ReadJSON(&sessionUpdate); err != nil {
 				t.Fatalf("read session update: %v", err)
 			}
-			assertSessionUpdate(t, sessionUpdate, "Use technical spelling.")
+			assertSessionUpdate(t, sessionUpdate, "Use technical spelling.", false)
 
 			_ = conn.WriteJSON(map[string]any{"type": "session.updated"})
 		default:
@@ -209,7 +231,7 @@ func TestStartStreamUsesPromptHintWhenConfigured(t *testing.T) {
 	cfg.OpenAI.BaseURL = server.URL
 	cfg.OpenAI.PromptHint = "Use technical spelling."
 
-	client := New("test-key", cfg.OpenAI)
+	client := New("test-key", cfg.OpenAI, cfg.Streaming)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -254,7 +276,7 @@ func TestDialErrorIncludesHTTPDetails(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.OpenAI.BaseURL = server.URL
-	client := New("test-key", cfg.OpenAI)
+	client := New("test-key", cfg.OpenAI, cfg.Streaming)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -271,7 +293,69 @@ func TestDialErrorIncludesHTTPDetails(t *testing.T) {
 	}
 }
 
-func assertClientSecretRequest(t *testing.T, body map[string]any, wantPrompt string) {
+func TestStartStreamEnablesServerVADForSegmentMode(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/realtime/client_secrets":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode client secret request: %v", err)
+			}
+			assertClientSecretRequest(t, body, defaultProgrammerPrompt, true)
+
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"expires_at": 123,
+				"value":      "ek_test",
+				"session": map[string]any{
+					"type": "transcription",
+				},
+			})
+		case "/realtime":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Fatalf("upgrade: %v", err)
+			}
+			defer conn.Close()
+
+			if err := conn.WriteJSON(map[string]any{
+				"type":    "session.created",
+				"session": map[string]any{"type": "transcription"},
+			}); err != nil {
+				t.Fatalf("write created event: %v", err)
+			}
+
+			var sessionUpdate map[string]any
+			if err := conn.ReadJSON(&sessionUpdate); err != nil {
+				t.Fatalf("read session update: %v", err)
+			}
+			assertSessionUpdate(t, sessionUpdate, defaultProgrammerPrompt, true)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.OpenAI.BaseURL = server.URL
+	cfg.Streaming.Mode = "segment"
+
+	client := New("test-key", cfg.OpenAI, cfg.Streaming)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := client.StartStream(ctx, 24000, 1)
+	if err != nil {
+		t.Fatalf("start stream: %v", err)
+	}
+	defer stream.Close()
+}
+
+func assertClientSecretRequest(t *testing.T, body map[string]any, wantPrompt string, wantSegment bool) {
 	t.Helper()
 
 	session := body["session"].(map[string]any)
@@ -296,9 +380,10 @@ func assertClientSecretRequest(t *testing.T, body map[string]any, wantPrompt str
 	if got := transcription["prompt"]; got != wantPrompt {
 		t.Fatalf("prompt = %v, want %q", got, wantPrompt)
 	}
+	assertTurnDetection(t, input["turn_detection"], wantSegment)
 }
 
-func assertSessionUpdate(t *testing.T, event map[string]any, wantPrompt string) {
+func assertSessionUpdate(t *testing.T, event map[string]any, wantPrompt string, wantSegment bool) {
 	t.Helper()
 
 	if got := event["type"]; got != "session.update" {
@@ -318,16 +403,41 @@ func assertSessionUpdate(t *testing.T, event map[string]any, wantPrompt string) 
 	if got := int(format["rate"].(float64)); got != 24000 {
 		t.Fatalf("audio rate = %d", got)
 	}
-	if value, ok := input["turn_detection"]; !ok || value != nil {
-		t.Fatalf("turn_detection = %v, want explicit null", value)
-	}
-
 	transcription := input["transcription"].(map[string]any)
 	if got := transcription["model"]; got != "gpt-4o-mini-transcribe" {
 		t.Fatalf("model = %v", got)
 	}
 	if got := transcription["prompt"]; got != wantPrompt {
 		t.Fatalf("prompt = %v, want %q", got, wantPrompt)
+	}
+	assertTurnDetection(t, input["turn_detection"], wantSegment)
+}
+
+func assertTurnDetection(t *testing.T, value any, wantSegment bool) {
+	t.Helper()
+
+	if !wantSegment {
+		if value != nil {
+			t.Fatalf("turn_detection = %v, want nil", value)
+		}
+		return
+	}
+
+	turnDetection, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("turn_detection type = %T, want map[string]any", value)
+	}
+	if got := turnDetection["type"]; got != "server_vad" {
+		t.Fatalf("turn_detection.type = %v", got)
+	}
+	if got := int(turnDetection["prefix_padding_ms"].(float64)); got != 300 {
+		t.Fatalf("turn_detection.prefix_padding_ms = %d", got)
+	}
+	if got := int(turnDetection["silence_duration_ms"].(float64)); got != 500 {
+		t.Fatalf("turn_detection.silence_duration_ms = %d", got)
+	}
+	if got := turnDetection["threshold"].(float64); got != 0.5 {
+		t.Fatalf("turn_detection.threshold = %v", got)
 	}
 }
 

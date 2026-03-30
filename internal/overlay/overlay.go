@@ -82,17 +82,32 @@ func (o *Overlay) ShowHint(text string) {
 }
 
 func (o *Overlay) ShowListening(windowClass string) {
-	subtitle := "Recording from your microphone"
-	if strings.TrimSpace(windowClass) != "" {
-		subtitle = fmt.Sprintf("Ready to type into %s", windowClass)
-	}
 	o.show(viewState{
 		title:        "Listening",
-		subtitle:     subtitle,
-		body:         "Speak naturally. Release when you want it pasted.",
+		subtitle:     listeningSubtitle(windowClass),
+		body:         listeningBody(""),
 		accent:       color.RGBA{R: 34, G: 197, B: 94, A: 255},
 		reactiveWave: true,
 	}, false)
+}
+
+func (o *Overlay) SetListeningText(windowClass, text string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if !o.visible || o.state.title != "Listening" {
+		return
+	}
+
+	subtitle := listeningSubtitle(windowClass)
+	body := listeningBody(text)
+	if o.state.subtitle == subtitle && o.state.body == body {
+		return
+	}
+
+	o.state.subtitle = subtitle
+	o.state.body = body
+	o.drawLocked()
 }
 
 func (o *Overlay) ShowTranscribing() {
@@ -245,6 +260,21 @@ func writeText(dst *image.RGBA, x, y int, msg string, clr color.Color, face font
 
 func drawRect(dst *image.RGBA, rect image.Rectangle, clr color.Color) {
 	draw.Draw(dst, rect, &image.Uniform{C: clr}, image.Point{}, draw.Src)
+}
+
+func listeningSubtitle(windowClass string) string {
+	if strings.TrimSpace(windowClass) != "" {
+		return fmt.Sprintf("Ready to type into %s", windowClass)
+	}
+	return "Recording from your microphone"
+}
+
+func listeningBody(text string) string {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	if text == "" {
+		return "Speak naturally. Release when you want it pasted."
+	}
+	return text
 }
 
 func position(xu *xgbutil.XUtil, cfg config.OverlayConfig) (int, int) {

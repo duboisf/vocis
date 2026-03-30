@@ -17,6 +17,7 @@ type Config struct {
 	LogWindowTitle bool            `json:"log_window_title"`
 	OpenAI         OpenAIConfig    `json:"openai"`
 	Recording      RecordingConfig `json:"recording"`
+	Streaming      StreamingConfig `json:"streaming"`
 	Insertion      InsertionConfig `json:"insertion"`
 	Overlay        OverlayConfig   `json:"overlay"`
 }
@@ -38,6 +39,14 @@ type RecordingConfig struct {
 	SampleRate         int    `json:"sample_rate"`
 	Channels           int    `json:"channels"`
 	MaxDurationSeconds int    `json:"max_duration_seconds"`
+}
+
+type StreamingConfig struct {
+	Mode               string  `json:"mode"`
+	ShowPartialOverlay bool    `json:"show_partial_overlay"`
+	PrefixPaddingMS    int     `json:"prefix_padding_ms"`
+	SilenceDurationMS  int     `json:"silence_duration_ms"`
+	Threshold          float64 `json:"threshold"`
 }
 
 type InsertionConfig struct {
@@ -77,6 +86,13 @@ func Default() Config {
 			SampleRate:         16000,
 			Channels:           1,
 			MaxDurationSeconds: 120,
+		},
+		Streaming: StreamingConfig{
+			Mode:               "release",
+			ShowPartialOverlay: true,
+			PrefixPaddingMS:    300,
+			SilenceDurationMS:  500,
+			Threshold:          0.5,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
@@ -214,6 +230,24 @@ func (c Config) Validate() error {
 	case "", "auto", "pulse":
 	default:
 		return fmt.Errorf("recording.backend must be auto or pulse")
+	}
+
+	switch c.Streaming.Mode {
+	case "", "release", "segment":
+	default:
+		return fmt.Errorf("streaming.mode must be release or segment")
+	}
+
+	if c.Streaming.PrefixPaddingMS < 0 || c.Streaming.PrefixPaddingMS > 2000 {
+		return errors.New("streaming.prefix_padding_ms must be between 0 and 2000")
+	}
+
+	if c.Streaming.SilenceDurationMS < 0 || c.Streaming.SilenceDurationMS > 5000 {
+		return errors.New("streaming.silence_duration_ms must be between 0 and 5000")
+	}
+
+	if c.Streaming.Threshold < 0 || c.Streaming.Threshold > 1 {
+		return errors.New("streaming.threshold must be between 0 and 1")
 	}
 
 	if c.Overlay.Width < 200 || c.Overlay.Height < 80 {
