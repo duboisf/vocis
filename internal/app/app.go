@@ -38,6 +38,7 @@ type recordingState struct {
 	session   *recorder.Session
 	stream    *openai.Stream
 	pumpDone  chan error
+	cancel    context.CancelFunc
 	target    injector.Target
 }
 
@@ -168,35 +169,29 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 			target.WindowID, target.WindowClass)
 	}
 
-	stream, err := a.transcribe.StartStream(ctx, a.cfg.Recording.SampleRate, a.cfg.Recording.Channels)
-	if err != nil {
-		sessionlog.Errorf("start transcription stream: %v", err)
-		a.overlay.ShowError(err)
-		return
-	}
-
 	session, err := a.recorder.Start(ctx, a.cfg.Recording)
 	if err != nil {
-		_ = stream.Close()
 		sessionlog.Errorf("start recording: %v", err)
 		a.overlay.ShowError(err)
 		return
 	}
+
+	recordCtx, cancel := context.WithCancel(ctx)
 
 	a.sequence++
 	state := &recordingState{
 		id:        a.sequence,
 		startedAt: time.Now(),
 		session:   session,
-		stream:    stream,
 		pumpDone:  make(chan error, 1),
+		cancel:    cancel,
 		target:    target,
 	}
 	a.recording = state
 	a.overlay.ShowListening(target.WindowClass)
-	sessionlog.Infof("recording started: %d Hz, %d channel(s), realtime transcription armed",
+	sessionlog.Infof("recording started: %d Hz, %d channel(s), connecting realtime transcription",
 		state.session.SampleRate(), state.session.Channels())
-	go a.pumpAudio(ctx, state)
+	go a.pumpAudio(recordCtx, state)
 	go a.monitorRecordingLevel(ctx, state.id, state.session)
 
 	if a.cfg.Recording.MaxDurationSeconds > 0 {
@@ -279,7 +274,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.transcribing = false
 		a.mu.Unlock()
 	}()
-	defer state.stream.Close()
+	defer state.cancel()
 
 	stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -288,18 +283,32 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		if errors.Is(err, recorder.ErrRecordingTooShort) {
 			sessionlog.Infof("discarding short recording after %s",
 				state.session.Duration().Round(10*time.Millisecond))
+			state.cancel()
+			<-state.pumpDone
+			if state.stream != nil {
+				_ = state.stream.Close()
+			}
 			a.overlay.Hide()
 			return
 		}
 		sessionlog.Errorf("stop recording: %v", err)
 		a.overlay.ShowError(err)
+		state.cancel()
+		<-state.pumpDone
+		if state.stream != nil {
+			_ = state.stream.Close()
+		}
 		return
 	}
 	if err := <-state.pumpDone; err != nil {
 		sessionlog.Errorf("stream audio: %v", err)
 		a.overlay.ShowError(err)
+		if state.stream != nil {
+			_ = state.stream.Close()
+		}
 		return
 	}
+	defer state.stream.Close()
 	sessionlog.Infof("audio captured successfully: %d bytes streamed over %s",
 		state.session.BytesCaptured(), state.session.Duration().Round(10*time.Millisecond))
 
@@ -375,42 +384,95 @@ func (a *App) shutdown() error {
 		if err := state.session.Stop(stopCtx); err != nil {
 			sessionlog.Warnf("shutdown: %v", err)
 		}
-		_ = state.stream.Close()
+		if state.stream != nil {
+			_ = state.stream.Close()
+		}
 	}
 
 	return nil
 }
 
 func (a *App) pumpAudio(ctx context.Context, state *recordingState) {
-	defer func() {
-		select {
-		case state.pumpDone <- nil:
-		default:
-		}
+	type streamResult struct {
+		stream *openai.Stream
+		err    error
+	}
+
+	resultCh := make(chan streamResult, 1)
+	go func() {
+		stream, err := a.transcribe.StartStream(
+			ctx,
+			a.cfg.Recording.SampleRate,
+			a.cfg.Recording.Channels,
+		)
+		resultCh <- streamResult{stream: stream, err: err}
 	}()
 
+	var pending [][]int16
+	samples := state.session.Samples()
+	samplesOpen := true
+
 	for {
+		if state.stream == nil {
+			select {
+			case <-ctx.Done():
+				a.finishPump(state, ctx.Err())
+				return
+			case result := <-resultCh:
+				if result.err != nil {
+					a.finishPump(state, fmt.Errorf("start transcription stream: %w", result.err))
+					return
+				}
+				state.stream = result.stream
+				sessionlog.Infof("realtime transcription stream ready")
+				for _, chunk := range pending {
+					if err := state.stream.Append(ctx, chunk); err != nil {
+						a.finishPump(state, err)
+						return
+					}
+				}
+				pending = nil
+				if !samplesOpen {
+					a.finishPump(state, nil)
+					return
+				}
+			case chunk, ok := <-samples:
+				if !ok {
+					samplesOpen = false
+					samples = nil
+					continue
+				}
+				if len(chunk) == 0 {
+					continue
+				}
+				pending = append(pending, chunk)
+			}
+			continue
+		}
+
 		select {
 		case <-ctx.Done():
-			select {
-			case state.pumpDone <- ctx.Err():
-			default:
-			}
+			a.finishPump(state, ctx.Err())
 			return
-		case chunk, ok := <-state.session.Samples():
+		case chunk, ok := <-samples:
 			if !ok {
+				a.finishPump(state, nil)
 				return
 			}
 			if len(chunk) == 0 {
 				continue
 			}
 			if err := state.stream.Append(ctx, chunk); err != nil {
-				select {
-				case state.pumpDone <- err:
-				default:
-				}
+				a.finishPump(state, err)
 				return
 			}
 		}
+	}
+}
+
+func (a *App) finishPump(state *recordingState, err error) {
+	select {
+	case state.pumpDone <- err:
+	default:
 	}
 }
