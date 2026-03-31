@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,12 @@ type Overlay struct {
 	state   viewState
 	level   float64
 	hide    *time.Timer
+
+	animToken    uint64
+	animating    bool
+	liveBody     string
+	wavePhase    float64
+	partialToken uint64
 }
 
 type viewState struct {
@@ -39,6 +46,7 @@ type viewState struct {
 	body         string
 	accent       color.RGBA
 	reactiveWave bool
+	idleWave     bool
 }
 
 func New(cfg config.OverlayConfig) (*Overlay, error) {
@@ -78,14 +86,16 @@ func (o *Overlay) ShowHint(text string) {
 		title:    "Ready",
 		subtitle: text,
 		accent:   color.RGBA{R: 96, G: 165, B: 250, A: 255},
+		idleWave: true,
 	}, true)
 }
 
 func (o *Overlay) ShowListening(windowClass string) {
+	body := listeningBody("")
 	o.show(viewState{
 		title:        "Listening",
 		subtitle:     listeningSubtitle(windowClass),
-		body:         listeningBody(""),
+		body:         body,
 		accent:       color.RGBA{R: 34, G: 197, B: 94, A: 255},
 		reactiveWave: true,
 	}, false)
@@ -100,14 +110,48 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 	}
 
 	subtitle := listeningSubtitle(windowClass)
-	body := listeningBody(text)
-	if o.state.subtitle == subtitle && o.state.body == body {
+	targetText := normalizeListeningText(text)
+	body := listeningBody(targetText)
+	o.liveBody = body
+	currentText := displayedListeningText(o.state.body)
+	if o.state.subtitle == subtitle && currentText == targetText {
 		return
 	}
 
 	o.state.subtitle = subtitle
+	if o.animating {
+		return
+	}
+	if shouldAnimatePartial(currentText, targetText) {
+		o.partialToken++
+		token := o.partialToken
+		go o.animateListeningText(token, currentText, targetText)
+		return
+	}
 	o.state.body = body
 	o.drawLocked()
+}
+
+func (o *Overlay) AnimateChunk(text string) {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	if text == "" {
+		return
+	}
+
+	o.mu.Lock()
+	if !o.visible || o.state.title != "Listening" {
+		o.mu.Unlock()
+		return
+	}
+
+	o.animToken++
+	token := o.animToken
+	o.animating = true
+	o.state.body = ""
+	o.drawLocked()
+	o.mu.Unlock()
+
+	go o.animateChunk(token, shorten(text, o.bodyTextLimit()))
 }
 
 func (o *Overlay) ShowTranscribing() {
@@ -140,6 +184,9 @@ func (o *Overlay) Close() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	o.animToken++
+	o.animating = false
+	o.partialToken++
 	if o.hide != nil {
 		o.hide.Stop()
 	}
@@ -152,6 +199,9 @@ func (o *Overlay) Hide() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	o.animToken++
+	o.animating = false
+	o.partialToken++
 	if o.hide != nil {
 		o.hide.Stop()
 		o.hide = nil
@@ -166,8 +216,17 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	o.animToken++
+	o.animating = false
+	o.partialToken++
 	o.state = state
 	o.level = 0
+	o.wavePhase = 0
+	if state.title == "Listening" {
+		o.liveBody = state.body
+	} else {
+		o.liveBody = ""
+	}
 	o.drawLocked()
 
 	if !o.visible {
@@ -188,6 +247,9 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 			o.visible = false
 			o.win.Unmap()
 		})
+	}
+	if state.idleWave {
+		go o.animateIdleWave(o.animToken)
 	}
 }
 
@@ -216,7 +278,15 @@ func (o *Overlay) drawLocked() {
 
 	drawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
 	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
-	drawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level, o.state.reactiveWave)
+	drawBars(
+		img,
+		image.Rect(26, 42, 132, 98),
+		o.state.accent,
+		o.level,
+		o.state.reactiveWave,
+		o.state.idleWave,
+		o.wavePhase,
+	)
 
 	writeText(img, 150, 36, o.state.title, o.state.accent, basicfont.Face7x13)
 	writeText(img, 150, 62, o.state.subtitle, color.RGBA{R: 226, G: 232, B: 240, A: 255}, basicfont.Face7x13)
@@ -231,7 +301,94 @@ func (o *Overlay) drawLocked() {
 	ximg.Destroy()
 }
 
-func drawBars(dst *image.RGBA, rect image.Rectangle, accent color.RGBA, level float64, reactive bool) {
+func (o *Overlay) animateChunk(token uint64, text string) {
+	runes := []rune(text)
+	for i := range runes {
+		time.Sleep(16 * time.Millisecond)
+
+		o.mu.Lock()
+		if token != o.animToken || !o.visible || o.state.title != "Listening" {
+			o.mu.Unlock()
+			return
+		}
+		o.state.body = string(runes[:i+1])
+		o.drawLocked()
+		o.mu.Unlock()
+	}
+
+	time.Sleep(260 * time.Millisecond)
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if token != o.animToken || !o.visible || o.state.title != "Listening" {
+		return
+	}
+	o.animating = false
+	o.state.body = o.liveBody
+	o.drawLocked()
+}
+
+func (o *Overlay) animateListeningText(token uint64, current, target string) {
+	targetRunes := []rune(target)
+	currentLen := len([]rune(current))
+	if currentLen > len(targetRunes) {
+		currentLen = 0
+	}
+
+	for currentLen < len(targetRunes) {
+		next := nextWordBoundary(targetRunes, currentLen)
+		time.Sleep(28 * time.Millisecond)
+
+		o.mu.Lock()
+		if token != o.partialToken || o.animating || !o.visible || o.state.title != "Listening" {
+			o.mu.Unlock()
+			return
+		}
+		o.state.body = listeningBody(string(targetRunes[:next]))
+		o.drawLocked()
+		o.mu.Unlock()
+
+		currentLen = next
+	}
+}
+
+func shouldAnimatePartial(current, target string) bool {
+	current = normalizeListeningText(current)
+	target = normalizeListeningText(target)
+	if target == "" {
+		return false
+	}
+	if current == "" {
+		return true
+	}
+	if !strings.HasPrefix(target, current) {
+		return false
+	}
+	return target != current
+}
+
+func nextWordBoundary(runes []rune, start int) int {
+	if start >= len(runes) {
+		return len(runes)
+	}
+	for i := start + 1; i < len(runes); i++ {
+		if runes[i] == ' ' {
+			return i + 1
+		}
+	}
+	return len(runes)
+}
+
+func drawBars(
+	dst *image.RGBA,
+	rect image.Rectangle,
+	accent color.RGBA,
+	level float64,
+	reactive bool,
+	idle bool,
+	phase float64,
+) {
 	width := 10
 	gap := 6
 	baseY := rect.Max.Y
@@ -241,6 +398,9 @@ func drawBars(dst *image.RGBA, rect image.Rectangle, accent color.RGBA, level fl
 		height := 14 + i%2*4
 		if reactive {
 			height = 10 + int((level*weight)*54)
+		} else if idle {
+			pulse := 0.5 + 0.5*math.Sin(phase+float64(i)*0.75)
+			height = 14 + int((weight*20)*pulse)
 		}
 		x := rect.Min.X + i*(width+gap)
 		r := image.Rect(x, baseY-height, x+width, baseY)
@@ -262,6 +422,22 @@ func drawRect(dst *image.RGBA, rect image.Rectangle, clr color.Color) {
 	draw.Draw(dst, rect, &image.Uniform{C: clr}, image.Point{}, draw.Src)
 }
 
+func (o *Overlay) animateIdleWave(token uint64) {
+	ticker := time.NewTicker(45 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		o.mu.Lock()
+		if token != o.animToken || !o.visible || !o.state.idleWave {
+			o.mu.Unlock()
+			return
+		}
+		o.wavePhase += 0.28
+		o.drawLocked()
+		o.mu.Unlock()
+	}
+}
+
 func listeningSubtitle(windowClass string) string {
 	if strings.TrimSpace(windowClass) != "" {
 		return fmt.Sprintf("Ready to type into %s", windowClass)
@@ -270,9 +446,21 @@ func listeningSubtitle(windowClass string) string {
 }
 
 func listeningBody(text string) string {
-	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	text = normalizeListeningText(text)
 	if text == "" {
 		return "Speak naturally. Release when you want it pasted."
+	}
+	return text
+}
+
+func normalizeListeningText(text string) string {
+	return strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+}
+
+func displayedListeningText(body string) string {
+	text := normalizeListeningText(body)
+	if text == normalizeListeningText(listeningBody("")) {
+		return ""
 	}
 	return text
 }

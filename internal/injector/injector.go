@@ -61,8 +61,7 @@ func (i *Injector) CaptureTarget(ctx context.Context) (Target, error) {
 }
 
 func (i *Injector) Insert(ctx context.Context, target Target, text string) error {
-	text = strings.TrimSpace(text)
-	if text == "" {
+	if !hasVisibleText(text) {
 		return nil
 	}
 
@@ -76,15 +75,7 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 	mode := i.resolveMode(target.WindowClass)
 	switch mode {
 	case "type":
-		args := []string{"type", "--clearmodifiers"}
-		if i.cfg.TypeDelayMS >= 0 {
-			args = append(args, "--delay", fmt.Sprintf("%d", i.cfg.TypeDelayMS))
-		}
-		if target.WindowID != "" {
-			args = append(args, "--window", target.WindowID)
-		}
-		args = append(args, "--", text)
-		if _, err := i.runTrimmed(ctx, "xdotool", args...); err != nil {
+		if err := i.typeText(ctx, target, text, true); err != nil {
 			return fmt.Errorf("type text: %w", err)
 		}
 		return nil
@@ -93,7 +84,29 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 	}
 }
 
+func (i *Injector) InsertLive(ctx context.Context, target Target, text string) error {
+	if !hasVisibleText(text) {
+		return nil
+	}
+	if err := i.focusTarget(ctx, target); err != nil {
+		return err
+	}
+	sessionlog.Infof(
+		"typing live segment into window=%s class=%q",
+		target.WindowID,
+		target.WindowClass,
+	)
+	if err := i.typeText(ctx, target, text, false); err != nil {
+		return fmt.Errorf("type live segment: %w", err)
+	}
+	return nil
+}
+
 func (i *Injector) paste(ctx context.Context, target Target, text string) error {
+	if err := i.focusTarget(ctx, target); err != nil {
+		return err
+	}
+
 	originalClipboard := ""
 	if i.cfg.RestoreClipboard {
 		clip, err := clipboard.ReadAll()
@@ -143,6 +156,17 @@ func (i *Injector) paste(ctx context.Context, target Target, text string) error 
 	return nil
 }
 
+func (i *Injector) focusTarget(ctx context.Context, target Target) error {
+	if target.WindowID == "" {
+		return nil
+	}
+	if _, err := i.runTrimmed(ctx, "xdotool", "windowactivate", "--sync", target.WindowID); err != nil {
+		return fmt.Errorf("restore focus: %w", err)
+	}
+	time.Sleep(120 * time.Millisecond)
+	return nil
+}
+
 func (i *Injector) resolveMode(windowClass string) string {
 	if i.cfg.Mode != "auto" {
 		return i.cfg.Mode
@@ -165,9 +189,38 @@ func buildPasteArgs(pasteKey string) []string {
 	return args
 }
 
+func buildTypeArgs(typeDelayMS int, target Target, text string, useWindow bool) []string {
+	args := []string{"type", "--clearmodifiers"}
+	if typeDelayMS >= 0 {
+		args = append(args, "--delay", fmt.Sprintf("%d", typeDelayMS))
+	}
+	if useWindow && target.WindowID != "" {
+		args = append(args, "--window", target.WindowID)
+	}
+	args = append(args, "--", text)
+	return args
+}
+
 func normalizeKeyChord(chord string) []string {
 	chord = strings.ReplaceAll(strings.ToLower(chord), "+", "+")
 	return []string{chord}
+}
+
+func (i *Injector) typeText(
+	ctx context.Context,
+	target Target,
+	text string,
+	useWindow bool,
+) error {
+	args := buildTypeArgs(i.cfg.TypeDelayMS, target, text, useWindow)
+	if _, err := i.runTrimmed(ctx, "xdotool", args...); err != nil {
+		return err
+	}
+	return nil
+}
+
+func hasVisibleText(text string) bool {
+	return strings.TrimSpace(text) != ""
 }
 
 func (i *Injector) runTrimmed(ctx context.Context, name string, args ...string) (string, error) {
