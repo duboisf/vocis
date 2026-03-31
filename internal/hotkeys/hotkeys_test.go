@@ -110,7 +110,8 @@ func TestSuppressedRealReleaseEmitsUpAfterWindow(t *testing.T) {
 	r.SuppressReleasesFor(120 * time.Millisecond)
 	r.handleTrackedRelease(42)
 
-	expectEventWithin(t, r.up, 220*time.Millisecond)
+	// suppress window (120ms) + one rearm interval (~80ms)
+	expectEventWithin(t, r.up, 300*time.Millisecond)
 }
 
 func TestSuppressedReleaseDoesNotEmitUpWhileTrackedKeyStillDown(t *testing.T) {

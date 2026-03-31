@@ -239,16 +239,13 @@ func (r *Registration) finishSuppressedRelease() {
 		r.mu.Unlock()
 		return
 	}
-	if r.anyTrackedKeyDownLocked() {
-		r.rearmSuppressedReleaseLocked(autoRepeatReleaseDelay)
-		r.mu.Unlock()
-		return
-	}
 	r.suppressedReleasePending = false
-	r.isDown = false
+	// Hand off to the normal release-check loop rather than trusting
+	// a single QueryKeymap reading.  If the keymap is temporarily
+	// stale from a synthetic xdotool keyup, the recheck after one
+	// auto-repeat interval will see the recovered state.
+	r.rearmReleaseCheckLocked()
 	r.mu.Unlock()
-
-	r.emit(r.up)
 }
 
 func (r *Registration) awaitRelease(timer *time.Timer) {
