@@ -506,6 +506,9 @@ func (a *App) handleDictationEvent(
 		if err := a.injector.InsertLive(ctx, state.target, event.Text); err != nil {
 			return err
 		}
+		if a.hotkey != nil {
+			a.hotkey.SuppressReleasesFor(syntheticReleaseGuard)
+		}
 		a.overlay.AnimateChunk(event.Text)
 		if a.cfg.Streaming.ShowPartialOverlay {
 			a.overlay.SetListeningText(state.target.WindowClass, event.Text)

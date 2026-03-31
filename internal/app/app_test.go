@@ -73,8 +73,9 @@ func TestHandleDictationEventInsertsSegmentWhileHolding(t *testing.T) {
 	if len(fakeOverlay.animatedChunks) != 1 || fakeOverlay.animatedChunks[0] != "segment one" {
 		t.Fatalf("animatedChunks = %v, want [segment one]", fakeOverlay.animatedChunks)
 	}
-	if !app.hotkey.(*hotkeyStub).called {
-		t.Fatal("expected hotkey release suppression after live insert")
+	hk := app.hotkey.(*hotkeyStub)
+	if hk.callCount != 2 {
+		t.Fatalf("suppress call count = %d, want 2 (before and after insertion)", hk.callCount)
 	}
 }
 
@@ -227,11 +228,13 @@ func (i *injectorStub) InsertLive(_ context.Context, _ injector.Target, text str
 }
 
 type hotkeyStub struct {
-	called   bool
-	duration time.Duration
+	called    bool
+	callCount int
+	duration  time.Duration
 }
 
 func (h *hotkeyStub) SuppressReleasesFor(duration time.Duration) {
 	h.called = true
+	h.callCount++
 	h.duration = duration
 }
