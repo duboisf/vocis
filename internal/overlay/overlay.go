@@ -306,6 +306,18 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	go o.animateFadeIn(fadeToken)
 }
 
+func (o *Overlay) neededHeight(state viewState) int {
+	bodyLines := wrapLines(state.body, o.bodyTextLimit())
+	needed := o.cfg.Height
+	if len(bodyLines) > 1 {
+		needed = bodyStartY + len(bodyLines)*lineHeight + bodyPadBot
+	}
+	if needed < o.cfg.Height {
+		needed = o.cfg.Height
+	}
+	return needed
+}
+
 func (o *Overlay) applyStateLocked(state viewState) {
 	o.animToken++
 	o.animating = false
@@ -313,10 +325,12 @@ func (o *Overlay) applyStateLocked(state viewState) {
 	o.state = state
 	o.level = 0
 	o.wavePhase = 0
-	o.height = o.cfg.Height
-	o.targetHeight = o.cfg.Height
+
+	needed := o.neededHeight(state)
+	o.height = needed
+	o.targetHeight = needed
 	o.resizeToken++
-	o.win.Resize(o.cfg.Width, o.cfg.Height)
+	o.win.Resize(o.cfg.Width, needed)
 	if state.title == "Listening" {
 		o.liveBody = state.body
 	} else {
