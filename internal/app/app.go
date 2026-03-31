@@ -497,7 +497,6 @@ func (a *App) handleDictationEvent(
 			return nil
 		}
 		state.liveText += event.Text
-		a.overlay.AnimateChunk(event.Text)
 		a.overlay.SetListeningText(state.target.WindowClass, state.liveText)
 		sessionlog.Infof("stream segment accumulated: %d chars total", len(state.liveText))
 		return nil

@@ -68,9 +68,6 @@ func TestHandleDictationEventAccumulatesSegments(t *testing.T) {
 	if state.liveText != "segment one segment two" {
 		t.Fatalf("liveText = %q, want %q", state.liveText, "segment one segment two")
 	}
-	if len(fakeOverlay.animatedChunks) != 2 {
-		t.Fatalf("animatedChunks = %v, want 2 entries", fakeOverlay.animatedChunks)
-	}
 	if fakeOverlay.listeningText != "segment one segment two" {
 		t.Fatalf("listeningText = %q, want accumulated text", fakeOverlay.listeningText)
 	}
