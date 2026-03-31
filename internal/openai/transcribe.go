@@ -22,9 +22,9 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
-	"vtt/internal/config"
-	"vtt/internal/sessionlog"
-	"vtt/internal/telemetry"
+	"vocis/internal/config"
+	"vocis/internal/sessionlog"
+	"vocis/internal/telemetry"
 )
 
 const (
@@ -232,7 +232,7 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 		return nil, errors.New("recording.channels must be greater than zero")
 	}
 
-	ctx, connectSpan := telemetry.StartSpan(ctx, "vtt.openai.connect",
+	ctx, connectSpan := telemetry.StartSpan(ctx, "vocis.openai.connect",
 		attribute.String("openai.model", c.cfg.Model),
 		attribute.Int("audio.sample_rate", sampleRate),
 		attribute.Int("audio.channels", channels),
@@ -322,7 +322,7 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 		return FinalizeResult{}, errors.New("realtime transcription stream was not established")
 	}
 
-	_, drainSpan := telemetry.StartSpan(ctx, "vtt.transcribe.drain")
+	_, drainSpan := telemetry.StartSpan(ctx, "vocis.transcribe.drain")
 	text, err := s.drainTrailingText(ctx, stream)
 	telemetry.EndSpan(drainSpan, err)
 	if err != nil {
@@ -333,7 +333,7 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 		return FinalizeResult{Text: text}, nil
 	}
 
-	_, commitSpan := telemetry.StartSpan(ctx, "vtt.transcribe.commit")
+	_, commitSpan := telemetry.StartSpan(ctx, "vocis.transcribe.commit")
 	if err := stream.Commit(ctx); err != nil {
 		telemetry.EndSpan(commitSpan, err)
 		if s.shouldIgnoreEmptyCommit(err, stream) {
@@ -343,7 +343,7 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 	}
 	telemetry.EndSpan(commitSpan, nil)
 
-	_, waitSpan := telemetry.StartSpan(ctx, "vtt.transcribe.wait_final",
+	_, waitSpan := telemetry.StartSpan(ctx, "vocis.transcribe.wait_final",
 		attribute.String("trailing_duration", s.trailingDuration().Round(10*time.Millisecond).String()),
 		attribute.Int("segment_count", s.segmentCountValue()),
 	)

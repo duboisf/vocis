@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"vtt/internal/config"
+	"vocis/internal/config"
 )
 
 func TestTerminalDetectionIsCaseInsensitive(t *testing.T) {

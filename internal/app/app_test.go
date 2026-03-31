@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"vtt/internal/config"
-	"vtt/internal/injector"
-	"vtt/internal/openai"
+	"vocis/internal/config"
+	"vocis/internal/injector"
+	"vocis/internal/openai"
 )
 
 func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {

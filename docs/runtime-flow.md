@@ -4,9 +4,9 @@ This page is the detailed path for one dictation session.
 
 ## Startup
 
-When `vtt serve` runs:
+When `vocis serve` runs:
 
-1. [`cmd/vtt/main.go`](/home/fred/git/vtt/cmd/vtt/main.go) starts a session log.
+1. [`cmd/vocis/main.go`](/home/fred/git/vtt/cmd/vocis/main.go) starts a session log.
 2. [`internal/config/config.go`](/home/fred/git/vtt/internal/config/config.go) loads config.
 3. [`internal/securestore/keyring.go`](/home/fred/git/vtt/internal/securestore/keyring.go) resolves the OpenAI API key.
 4. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) creates the runtime dependencies and registers the hotkey.
@@ -75,19 +75,19 @@ The overlay uses three animation modes for transitions:
 
 When telemetry is enabled, the following OpenTelemetry spans are emitted per dictation session:
 
-- `vtt.dictation` — root span covering the full session lifecycle
-  - `vtt.recorder.start` — PulseAudio client init and stream creation
-  - `vtt.openai.connect` — WebSocket dial and realtime session setup
-  - `vtt.recorder.stop` — stream stop and resource cleanup
-  - `vtt.transcribe.finalize` — post-recording finalization
-    - `vtt.transcribe.drain` — drain pending segment finals (250ms window)
-    - `vtt.transcribe.commit` — commit trailing audio buffer to OpenAI
-    - `vtt.transcribe.wait_final` — wait for OpenAI to return the trailing transcript
-  - `vtt.inject` — text insertion into the target window
-    - `vtt.inject.focus` — window activate and modifier key release
-    - `vtt.inject.paste` or `vtt.inject.type` — clipboard paste or xdotool type
+- `vocis.dictation` — root span covering the full session lifecycle
+  - `vocis.recorder.start` — PulseAudio client init and stream creation
+  - `vocis.openai.connect` — WebSocket dial and realtime session setup
+  - `vocis.recorder.stop` — stream stop and resource cleanup
+  - `vocis.transcribe.finalize` — post-recording finalization
+    - `vocis.transcribe.drain` — drain pending segment finals (250ms window)
+    - `vocis.transcribe.commit` — commit trailing audio buffer to OpenAI
+    - `vocis.transcribe.wait_final` — wait for OpenAI to return the trailing transcript
+  - `vocis.inject` — text insertion into the target window
+    - `vocis.inject.focus` — window activate and modifier key release
+    - `vocis.inject.paste` or `vocis.inject.type` — clipboard paste or xdotool type
 
-`vtt.inject.capture_target` runs before the dictation span to identify the active window.
+`vocis.inject.capture_target` runs before the dictation span to identify the active window.
 
 ## Short Recordings
 
@@ -101,7 +101,7 @@ Very short recordings are treated as a silent cancel:
 
 Each `serve` session writes a log file under:
 
-- `~/.local/state/vtt/sessions/`
+- `~/.local/state/vocis/sessions/`
 
 The log is the best place to look for:
 

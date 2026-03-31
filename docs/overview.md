@@ -1,6 +1,6 @@
 # Overview
 
-`vtt` is a Linux X11 voice-to-text helper written in Go.
+`vocis` is a Linux X11 voice-to-text helper written in Go.
 
 At a high level:
 
@@ -31,4 +31,4 @@ Core product choices:
 - transcription is realtime-streamed, not uploaded from a WAV file
 - turn assembly and trailing-flush decisions live in the OpenAI dictation session, not in the app layer
 
-If you only need the “what is this thing” version of the repo, stop here.
+If you only need the "what is this thing" version of the repo, stop here.

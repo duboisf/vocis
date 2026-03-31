@@ -1,10 +1,10 @@
-APP := vtt
+APP := vocis
 
 .PHONY: build test fmt tidy
 
 build:
 	mkdir -p bin
-	go build -o bin/$(APP) ./cmd/vtt
+	go build -o bin/$(APP) ./cmd/vocis
 
 test:
 	go test ./...

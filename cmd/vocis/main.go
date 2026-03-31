@@ -13,12 +13,12 @@ import (
 
 	"golang.org/x/term"
 
-	"vtt/internal/app"
-	"vtt/internal/config"
-	"vtt/internal/recorder"
-	"vtt/internal/securestore"
-	"vtt/internal/sessionlog"
-	"vtt/internal/telemetry"
+	"vocis/internal/app"
+	"vocis/internal/config"
+	"vocis/internal/recorder"
+	"vocis/internal/securestore"
+	"vocis/internal/sessionlog"
+	"vocis/internal/telemetry"
 )
 
 func main() {
@@ -235,15 +235,15 @@ func clearBytes(b []byte) {
 }
 
 func printUsage() {
-	fmt.Println(`vtt
+	fmt.Println(`vocis — Latin: "of voice" (pronounced WOH-kiss)
 
 Usage:
-  vtt serve
-  vtt init
-  vtt doctor
-  vtt key set
-  vtt key clear
-  vtt key show-source`)
+  vocis serve
+  vocis init
+  vocis doctor
+  vocis key set
+  vocis key clear
+  vocis key show-source`)
 }
 
 func findExecutable(name string) (string, bool) {

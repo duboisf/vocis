@@ -15,7 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"vtt/internal/config"
+	"vocis/internal/config"
 )
 
 func TestStartStreamAppendsPCMAndReturnsTranscript(t *testing.T) {

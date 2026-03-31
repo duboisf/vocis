@@ -22,8 +22,8 @@ import (
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
 
-	"vtt/internal/config"
-	"vtt/internal/sessionlog"
+	"vocis/internal/config"
+	"vocis/internal/sessionlog"
 )
 
 type Overlay struct {

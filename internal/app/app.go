@@ -11,15 +11,15 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"vtt/internal/config"
-	"vtt/internal/hotkeys"
-	"vtt/internal/injector"
-	"vtt/internal/openai"
-	"vtt/internal/overlay"
-	"vtt/internal/recorder"
-	"vtt/internal/securestore"
-	"vtt/internal/sessionlog"
-	"vtt/internal/telemetry"
+	"vocis/internal/config"
+	"vocis/internal/hotkeys"
+	"vocis/internal/injector"
+	"vocis/internal/openai"
+	"vocis/internal/overlay"
+	"vocis/internal/recorder"
+	"vocis/internal/securestore"
+	"vocis/internal/sessionlog"
+	"vocis/internal/telemetry"
 )
 
 type App struct {
@@ -85,7 +85,7 @@ func (a *App) Run(ctx context.Context) error {
 	if err := a.cfg.Validate(); err != nil {
 		return err
 	}
-	sessionlog.Infof("starting vtt session")
+	sessionlog.Infof("starting vocis session")
 	recorder.CleanupStale()
 
 	apiKey, err := a.store.APIKey()
@@ -190,7 +190,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	a.dismissCompletionOverlay = false
 	a.overlay.ShowListening("")
 
-	spanCtx, recordingSpan := telemetry.StartSpan(ctx, "vtt.dictation")
+	spanCtx, recordingSpan := telemetry.StartSpan(ctx, "vocis.dictation")
 
 	session, err := a.recorder.Start(spanCtx, a.cfg.Recording)
 	if err != nil {
@@ -379,7 +379,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.mu.Unlock()
 	}()
 
-	transcribeCtx, transcribeSpan := telemetry.StartSpan(transcribeCtx, "vtt.transcribe.finalize")
+	transcribeCtx, transcribeSpan := telemetry.StartSpan(transcribeCtx, "vocis.transcribe.finalize")
 	result, err := state.dictation.Finalize(transcribeCtx)
 	telemetry.EndSpan(transcribeSpan, err)
 	if err != nil {
@@ -416,7 +416,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		return
 	}
 
-	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vtt.inject",
+	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vocis.inject",
 		attribute.String("target.window_id", state.target.WindowID),
 		attribute.String("target.window_class", state.target.WindowClass),
 		attribute.Int("text.length", len(text)),

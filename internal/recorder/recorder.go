@@ -13,8 +13,8 @@ import (
 	"github.com/jfreymuth/pulse"
 	"go.opentelemetry.io/otel/attribute"
 
-	"vtt/internal/config"
-	"vtt/internal/telemetry"
+	"vocis/internal/config"
+	"vocis/internal/telemetry"
 )
 
 const (
@@ -79,7 +79,7 @@ func Check() error {
 func CleanupStale() {}
 
 func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Session, error) {
-	ctx, span := telemetry.StartSpan(ctx, "vtt.recorder.start",
+	ctx, span := telemetry.StartSpan(ctx, "vocis.recorder.start",
 		attribute.Int("audio.sample_rate", cfg.SampleRate),
 		attribute.Int("audio.channels", cfg.Channels),
 		attribute.String("audio.device", cfg.Device),
@@ -178,7 +178,7 @@ func (s *Session) BytesCaptured() int64 {
 
 func (s *Session) Stop(ctx context.Context) error {
 	s.once.Do(func() {
-		_, span := telemetry.StartSpan(ctx, "vtt.recorder.stop")
+		_, span := telemetry.StartSpan(ctx, "vocis.recorder.stop")
 		s.err = s.stop(ctx)
 		span.SetAttributes(
 			attribute.Int64("recording.bytes", s.BytesCaptured()),
@@ -249,7 +249,7 @@ func (s *Session) closeResources() error {
 func recordOptions(client *pulse.Client, cfg config.RecordingConfig) ([]pulse.RecordOption, error) {
 	options := []pulse.RecordOption{
 		pulse.RecordSampleRate(cfg.SampleRate),
-		pulse.RecordMediaName("vtt dictation"),
+		pulse.RecordMediaName("vocis dictation"),
 		pulse.RecordLatency(0.05),
 	}
 
@@ -282,7 +282,7 @@ func resolveSource(client *pulse.Client, device string) (*pulse.Source, error) {
 
 func newPulseClient() (*pulse.Client, error) {
 	return pulse.NewClient(
-		pulse.ClientApplicationName("vtt"),
+		pulse.ClientApplicationName("vocis"),
 		pulse.ClientApplicationIconName("audio-input-microphone"),
 	)
 }

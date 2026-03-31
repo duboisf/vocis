@@ -1,6 +1,10 @@
-# vtt
+# vocis
 
-`vtt` is a Linux voice-to-text desktop helper written in Go. It stays in the
+*vocis* — Latin genitive of *vox* ("of voice"), pronounced **WOH-kiss** in
+classical Latin (the "v" is a "w", the "c" is hard like "k", and the "i" is
+short).
+
+`vocis` is a Linux voice-to-text desktop helper written in Go. It stays in the
 background, listens for a global hotkey, streams your microphone audio to
 OpenAI for realtime transcription, and pastes the result back into the app
 you were already using. An always-on-top X11 overlay gives you the same
@@ -15,7 +19,7 @@ It was very much vibe-coded from scratch to... scratch an itch.
 - Overlay appears immediately on hotkey press
 - Local recording starts before target-window lookup finishes
 - Early audio is buffered locally until the OpenAI realtime session is ready
-- XDG config file at `~/.config/vtt/config.json`
+- XDG config file at `~/.config/vocis/config.json`
 - OpenAI API keys stored in the system keyring by default
 - Focus restore and paste back into the app that was active when recording
 - Segmented streaming mode: live transcription appears in the overlay as you speak, pasted once on release
@@ -24,7 +28,7 @@ It was very much vibe-coded from scratch to... scratch an itch.
 
 ## Dependencies
 
-`vtt` records audio in-process over PulseAudio / PipeWire. It still shells out
+`vocis` records audio in-process over PulseAudio / PipeWire. It still shells out
 to a few stable desktop tools for X11 automation:
 
 - `xdotool` for focus restore and simulated paste
@@ -36,12 +40,12 @@ The app currently targets Linux X11. Wayland support is not wired up yet.
 
 ```bash
 make build
-./bin/vtt init
-./bin/vtt key set
-./bin/vtt serve
+./bin/vocis init
+./bin/vocis key set
+./bin/vocis serve
 ```
 
-While `vtt serve` is running:
+While `vocis serve` is running:
 
 1. Focus any text field.
 2. Hold `Ctrl+Shift+Space`.
@@ -58,7 +62,7 @@ Expected startup behavior on key-down:
 
 ## Config
 
-The first run creates `~/.config/vtt/config.json`. A sample lives at
+The first run creates `~/.config/vocis/config.json`. A sample lives at
 `config.example.json`.
 
 Important fields:
@@ -84,7 +88,7 @@ Important fields:
 Use the system keyring so the API key is not stored in plain text:
 
 ```bash
-./bin/vtt key set
+./bin/vocis key set
 ```
 
 For one-off sessions you can also export `OPENAI_API_KEY`.

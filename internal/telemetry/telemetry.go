@@ -12,10 +12,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 
-	"vtt/internal/config"
+	"vocis/internal/config"
 )
 
-const tracerName = "vtt"
+const tracerName = "vocis"
 
 var tracer trace.Tracer
 
@@ -52,7 +52,7 @@ func Init(ctx context.Context, cfg config.TelemetryConfig) (func(context.Context
 		resource.WithHost(),
 		resource.WithTelemetrySDK(),
 		resource.WithAttributes(
-			attribute.String("service.name", "vtt"),
+			attribute.String("service.name", "vocis"),
 			attribute.String("service.version", "0.1.0"),
 		),
 	)

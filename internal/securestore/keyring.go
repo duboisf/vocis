@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	serviceName = "vtt"
+	serviceName = "vocis"
 	accountName = "openai_api_key"
 )
 
@@ -28,7 +28,7 @@ func (s *Store) APIKey() (string, error) {
 	key, err := keyring.Get(serviceName, accountName)
 	if err != nil {
 		if errors.Is(err, keyring.ErrNotFound) {
-			return "", errors.New("OpenAI API key not found; run `vtt key set` or export OPENAI_API_KEY")
+			return "", errors.New("OpenAI API key not found; run `vocis key set` or export OPENAI_API_KEY")
 		}
 		return "", err
 	}

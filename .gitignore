@@ -1,5 +1,5 @@
 bin/
 dist/
 .venv/
-/vtt
-/VTT
+/vocis
+/VOCIS

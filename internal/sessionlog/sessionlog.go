@@ -69,7 +69,7 @@ func logDir() (string, error) {
 		base = filepath.Join(home, ".local", "state")
 	}
 
-	dir := filepath.Join(base, "vtt", "sessions")
+	dir := filepath.Join(base, "vocis", "sessions")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}

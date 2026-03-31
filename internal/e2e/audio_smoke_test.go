@@ -12,16 +12,16 @@ import (
 	"testing"
 	"time"
 
-	"vtt/internal/config"
-	"vtt/internal/openai"
-	"vtt/internal/recorder"
-	"vtt/internal/securestore"
-	"vtt/internal/sessionlog"
+	"vocis/internal/config"
+	"vocis/internal/openai"
+	"vocis/internal/recorder"
+	"vocis/internal/securestore"
+	"vocis/internal/sessionlog"
 )
 
 func TestPiperAudioToRealtimeSmoke(t *testing.T) {
-	if os.Getenv("VTT_AUDIO_SMOKE") != "1" {
-		t.Skip("set VTT_AUDIO_SMOKE=1 to run the audio smoke test")
+	if os.Getenv("VOCIS_AUDIO_SMOKE") != "1" {
+		t.Skip("set VOCIS_AUDIO_SMOKE=1 to run the audio smoke test")
 	}
 
 	requireCommand(t, "pactl")
@@ -38,7 +38,7 @@ func TestPiperAudioToRealtimeSmoke(t *testing.T) {
 	}
 	defer logSession.Close()
 
-	sinkName := fmt.Sprintf("vtt_smoke_%d", time.Now().UnixNano())
+	sinkName := fmt.Sprintf("vocis_smoke_%d", time.Now().UnixNano())
 	moduleID := loadNullSink(t, sinkName)
 	defer unloadModule(t, moduleID)
 

@@ -4,7 +4,7 @@ This repo is intentionally small. The main runtime path is split by responsibili
 
 Top-level entry points:
 
-- [`cmd/vtt/main.go`](/home/fred/git/vtt/cmd/vtt/main.go): CLI entrypoint for `serve`, `init`, `doctor`, and key management
+- [`cmd/vocis/main.go`](/home/fred/git/vtt/cmd/vocis/main.go): CLI entrypoint for `serve`, `init`, `doctor`, and key management
 - [`README.md`](/home/fred/git/vtt/README.md): user-facing setup and usage
 - [`config.example.json`](/home/fred/git/vtt/config.example.json): config shape example
 

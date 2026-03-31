@@ -83,7 +83,7 @@ func Default() Config {
 			Vocabulary: []string{
 				"OpenAI",
 				"GPT",
-				"VTT",
+				"Vocis",
 			},
 		},
 		Recording: RecordingConfig{
@@ -133,7 +133,7 @@ func Default() Config {
 }
 
 func Path() (string, error) {
-	if env := strings.TrimSpace(os.Getenv("VTT_CONFIG")); env != "" {
+	if env := strings.TrimSpace(os.Getenv("VOCIS_CONFIG")); env != "" {
 		return env, nil
 	}
 
@@ -141,7 +141,7 @@ func Path() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "vtt", fileName), nil
+	return filepath.Join(base, "vocis", fileName), nil
 }
 
 func InitDefault() (string, error) {

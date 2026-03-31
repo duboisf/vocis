@@ -13,10 +13,10 @@ import (
 	"github.com/atotto/clipboard"
 	"go.opentelemetry.io/otel/attribute"
 
-	"vtt/internal/config"
-	"vtt/internal/hotkeys"
-	"vtt/internal/sessionlog"
-	"vtt/internal/telemetry"
+	"vocis/internal/config"
+	"vocis/internal/hotkeys"
+	"vocis/internal/sessionlog"
+	"vocis/internal/telemetry"
 )
 
 type Target struct {
@@ -55,7 +55,7 @@ func New(cfg config.InsertionConfig, shortcut string) *Injector {
 }
 
 func (i *Injector) CaptureTarget(ctx context.Context) (Target, error) {
-	ctx, span := telemetry.StartSpan(ctx, "vtt.inject.capture_target")
+	ctx, span := telemetry.StartSpan(ctx, "vocis.inject.capture_target")
 	defer func() { telemetry.EndSpan(span, nil) }()
 
 	windowID, err := i.run(ctx, "xdotool", "getactivewindow")
@@ -92,7 +92,7 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 		return nil
 	}
 
-	ctx, focusSpan := telemetry.StartSpan(ctx, "vtt.inject.focus",
+	ctx, focusSpan := telemetry.StartSpan(ctx, "vocis.inject.focus",
 		attribute.String("window.id", target.WindowID),
 	)
 	if target.WindowID != "" {
@@ -112,7 +112,7 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 	mode := i.resolveMode(target.WindowClass)
 	switch mode {
 	case "type":
-		ctx, typeSpan := telemetry.StartSpan(ctx, "vtt.inject.type",
+		ctx, typeSpan := telemetry.StartSpan(ctx, "vocis.inject.type",
 			attribute.Int("text.length", len(text)),
 		)
 		err := i.typeText(ctx, target, text, true)
@@ -150,7 +150,7 @@ func (i *Injector) InsertLive(ctx context.Context, target Target, text string) e
 }
 
 func (i *Injector) paste(ctx context.Context, target Target, text string) error {
-	ctx, span := telemetry.StartSpan(ctx, "vtt.inject.paste",
+	ctx, span := telemetry.StartSpan(ctx, "vocis.inject.paste",
 		attribute.Int("text.length", len(text)),
 		attribute.Bool("terminal", i.isTerminal(target.WindowClass)),
 	)

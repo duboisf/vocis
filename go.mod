@@ -1,4 +1,4 @@
-module vtt
+module vocis
 
 go 1.26.1
 
