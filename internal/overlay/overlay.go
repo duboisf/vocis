@@ -116,7 +116,8 @@ func New(cfg config.OverlayConfig) (*Overlay, error) {
 func (o *Overlay) ShowHint(text string) {
 	o.show(viewState{
 		title:    "Ready",
-		subtitle: text,
+		subtitle: "Voice typing is armed",
+		body:     text,
 		accent:   color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		idleWave: true,
 	}, true)

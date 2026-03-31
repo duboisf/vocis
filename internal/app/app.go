@@ -457,9 +457,9 @@ func (a *App) monitorRecordingLevel(ctx context.Context, id uint64, session *rec
 
 func (a *App) hotkeyHint(shortcut string) string {
 	if a.cfg.HotkeyMode == "toggle" {
-		return fmt.Sprintf("Press %s to start and press again to stop", shortcut)
+		return fmt.Sprintf("Press %s to start, press again to stop", shortcut)
 	}
-	return fmt.Sprintf("Hold %s to record, then release to transcribe", shortcut)
+	return fmt.Sprintf("Hold %s, release to transcribe", shortcut)
 }
 
 func (a *App) dismissInFlightOverlay() bool {
