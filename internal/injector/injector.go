@@ -30,7 +30,6 @@ type Injector struct {
 	restoreTimer *time.Timer
 	run          commandRunner
 	releaseArgs  []string
-	restoreArgs  []string
 }
 
 type commandRunner func(ctx context.Context, name string, args ...string) (string, error)
@@ -43,7 +42,6 @@ func New(cfg config.InsertionConfig, shortcut string) *Injector {
 	if strings.TrimSpace(shortcut) != "" {
 		if keyNames, err := hotkeys.ReleaseKeyNames(shortcut); err == nil {
 			inj.releaseArgs = append([]string{"keyup"}, keyNames...)
-			inj.restoreArgs = append([]string{"keydown"}, keyNames...)
 		} else {
 			sessionlog.Warnf("resolve hotkey release keys: %v", err)
 		}
@@ -127,9 +125,6 @@ func (i *Injector) InsertLive(ctx context.Context, target Target, text string) e
 	)
 	if err := i.typeText(ctx, target, text, false); err != nil {
 		return fmt.Errorf("type live segment: %w", err)
-	}
-	if err := i.restoreHeldModifiers(ctx); err != nil {
-		sessionlog.Warnf("restore held modifiers: %v", err)
 	}
 	return nil
 }
@@ -279,16 +274,6 @@ func (i *Injector) releaseHeldModifiers(ctx context.Context) error {
 		args = buildModifierReleaseArgs()
 	}
 	if _, err := i.run(ctx, "xdotool", args...); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (i *Injector) restoreHeldModifiers(ctx context.Context) error {
-	if len(i.restoreArgs) == 0 {
-		return nil
-	}
-	if _, err := i.run(ctx, "xdotool", i.restoreArgs...); err != nil {
 		return err
 	}
 	return nil

@@ -136,8 +136,8 @@ func TestInsertLiveReleasesModifiersBeforeTyping(t *testing.T) {
 		t.Fatalf("InsertLive: %v", err)
 	}
 
-	if len(calls) != 4 {
-		t.Fatalf("len(calls) = %d, want 4; calls=%v", len(calls), calls)
+	if len(calls) != 3 {
+		t.Fatalf("len(calls) = %d, want 3; calls=%v", len(calls), calls)
 	}
 	if got, want := calls[0], "xdotool windowactivate --sync 42"; got != want {
 		t.Fatalf("calls[0] = %q, want %q; calls=%v", got, want, calls)
@@ -149,10 +149,6 @@ func TestInsertLiveReleasesModifiersBeforeTyping(t *testing.T) {
 	if !strings.HasPrefix(calls[2], "xdotool type --clearmodifiers --delay ") ||
 		!strings.HasSuffix(calls[2], " -- hello world") {
 		t.Fatalf("calls[2] = %q, want xdotool type ... hello world; calls=%v", calls[2], calls)
-	}
-	if got, want := calls[3],
-		"xdotool keydown Control_L Control_R Shift_L Shift_R space"; got != want {
-		t.Fatalf("calls[3] = %q, want %q; calls=%v", got, want, calls)
 	}
 }
 
