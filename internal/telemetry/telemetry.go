@@ -10,7 +10,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"vtt/internal/config"
@@ -49,12 +48,12 @@ func Init(ctx context.Context, cfg config.TelemetryConfig) (func(context.Context
 		return nil, err
 	}
 
-	res, err := resource.Merge(
-		resource.Default(),
-		resource.NewWithAttributes(
-			semconv.SchemaURL,
-			semconv.ServiceName("vtt"),
-			semconv.ServiceVersion("0.1.0"),
+	res, err := resource.New(ctx,
+		resource.WithHost(),
+		resource.WithTelemetrySDK(),
+		resource.WithAttributes(
+			attribute.String("service.name", "vtt"),
+			attribute.String("service.version", "0.1.0"),
 		),
 	)
 	if err != nil {
