@@ -71,6 +71,9 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 		}
 		time.Sleep(120 * time.Millisecond)
 	}
+	if err := i.releaseHeldModifiers(ctx); err != nil {
+		sessionlog.Warnf("release held modifiers: %v", err)
+	}
 
 	mode := i.resolveMode(target.WindowClass)
 	switch mode {
@@ -90,6 +93,9 @@ func (i *Injector) InsertLive(ctx context.Context, target Target, text string) e
 	}
 	if err := i.focusTarget(ctx, target); err != nil {
 		return err
+	}
+	if err := i.releaseHeldModifiers(ctx); err != nil {
+		sessionlog.Warnf("release held modifiers: %v", err)
 	}
 	sessionlog.Infof(
 		"typing live segment into window=%s class=%q",
@@ -201,6 +207,20 @@ func buildTypeArgs(typeDelayMS int, target Target, text string, useWindow bool) 
 	return args
 }
 
+func buildModifierReleaseArgs() []string {
+	return []string{
+		"keyup",
+		"Control_L",
+		"Control_R",
+		"Shift_L",
+		"Shift_R",
+		"Alt_L",
+		"Alt_R",
+		"Super_L",
+		"Super_R",
+	}
+}
+
 func normalizeKeyChord(chord string) []string {
 	chord = strings.ReplaceAll(strings.ToLower(chord), "+", "+")
 	return []string{chord}
@@ -214,6 +234,13 @@ func (i *Injector) typeText(
 ) error {
 	args := buildTypeArgs(i.cfg.TypeDelayMS, target, text, useWindow)
 	if _, err := i.runTrimmed(ctx, "xdotool", args...); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (i *Injector) releaseHeldModifiers(ctx context.Context) error {
+	if _, err := i.runTrimmed(ctx, "xdotool", buildModifierReleaseArgs()...); err != nil {
 		return err
 	}
 	return nil

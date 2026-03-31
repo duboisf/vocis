@@ -62,3 +62,29 @@ func TestBuildTypeArgsForLiveSegmentUsesFocusedWidget(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildModifierReleaseArgs(t *testing.T) {
+	t.Parallel()
+
+	args := buildModifierReleaseArgs()
+
+	want := []string{
+		"keyup",
+		"Control_L",
+		"Control_R",
+		"Shift_L",
+		"Shift_R",
+		"Alt_L",
+		"Alt_R",
+		"Super_L",
+		"Super_R",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("len(args) = %d, want %d; args=%v", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q; args=%v", i, args[i], want[i], args)
+		}
+	}
+}

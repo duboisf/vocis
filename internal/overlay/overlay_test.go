@@ -47,3 +47,12 @@ func TestDisplayedListeningTextTreatsHelperAsEmpty(t *testing.T) {
 		t.Fatalf("displayedListeningText(transcript) = %q, want hello world", got)
 	}
 }
+
+func TestShortenUsesASCIIEllipsis(t *testing.T) {
+	t.Parallel()
+
+	got := shorten("hello world", 8)
+	if got != "hello..." {
+		t.Fatalf("shorten = %q, want hello...", got)
+	}
+}

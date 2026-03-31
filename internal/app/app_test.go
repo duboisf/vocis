@@ -72,8 +72,8 @@ func TestHandleDictationEventInsertsSegmentWhileHolding(t *testing.T) {
 	if len(fakeOverlay.animatedChunks) != 1 || fakeOverlay.animatedChunks[0] != "segment one" {
 		t.Fatalf("animatedChunks = %v, want [segment one]", fakeOverlay.animatedChunks)
 	}
-	if !app.shouldIgnoreSyntheticUp() {
-		t.Fatal("expected synthetic release guard after live insert")
+	if !app.suppressSyntheticUp {
+		t.Fatal("expected synthetic release suppression after live insert")
 	}
 }
 
@@ -107,7 +107,7 @@ func TestHandleDictationEventPreservesFormattedSegmentText(t *testing.T) {
 	}
 }
 
-func TestHandleUpIgnoresSyntheticReleaseDuringSegmentMode(t *testing.T) {
+func TestHandleUpConsumesSyntheticReleaseSuppressionDuringSegmentMode(t *testing.T) {
 	t.Parallel()
 
 	app := &App{
@@ -122,7 +122,8 @@ func TestHandleUpIgnoresSyntheticReleaseDuringSegmentMode(t *testing.T) {
 			id:        1,
 			startedAt: time.Now(),
 		},
-		lastLiveInsert: time.Now(),
+		suppressSyntheticUp:      true,
+		suppressSyntheticUpUntil: time.Now().Add(syntheticReleaseGuard),
 	}
 
 	app.handleUp(context.Background())
@@ -133,9 +134,12 @@ func TestHandleUpIgnoresSyntheticReleaseDuringSegmentMode(t *testing.T) {
 	if app.transcribing {
 		t.Fatal("transcribing started, wanted synthetic release to be ignored")
 	}
+	if app.suppressSyntheticUp {
+		t.Fatal("expected suppression to be consumed")
+	}
 }
 
-func TestShouldIgnoreSyntheticUpExpires(t *testing.T) {
+func TestConsumeSyntheticUpSuppressionExpires(t *testing.T) {
 	t.Parallel()
 
 	app := &App{
@@ -145,13 +149,16 @@ func TestShouldIgnoreSyntheticUpExpires(t *testing.T) {
 				Mode: "segment",
 			},
 		},
-		recording: &recordingState{id: 1},
+		recording:                &recordingState{id: 1},
+		suppressSyntheticUp:      true,
+		suppressSyntheticUpUntil: time.Now().Add(-10 * time.Millisecond),
 	}
 
-	app.lastLiveInsert = time.Now().Add(-syntheticReleaseGuard - 10*time.Millisecond)
-
-	if app.shouldIgnoreSyntheticUp() {
+	if app.consumeSyntheticUpSuppression() {
 		t.Fatal("expected expired synthetic release guard")
+	}
+	if app.suppressSyntheticUp {
+		t.Fatal("expected expired suppression to be cleared")
 	}
 }
 

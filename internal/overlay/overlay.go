@@ -511,8 +511,8 @@ func shorten(s string, max int) string {
 	if len(runes) <= max {
 		return s
 	}
-	if max <= 1 {
+	if max <= 3 {
 		return string(runes[:max])
 	}
-	return string(runes[:max-1]) + "…"
+	return string(runes[:max-3]) + "..."
 }

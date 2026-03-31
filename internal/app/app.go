@@ -31,7 +31,8 @@ type App struct {
 	transcribing             bool
 	dismissCompletionOverlay bool
 	lastToggle               time.Time
-	lastLiveInsert           time.Time
+	suppressSyntheticUp      bool
+	suppressSyntheticUpUntil time.Time
 	sequence                 uint64
 }
 
@@ -64,7 +65,7 @@ type injectorClient interface {
 }
 
 const minToggleInterval = 250 * time.Millisecond
-const syntheticReleaseGuard = 180 * time.Millisecond
+const syntheticReleaseGuard = 250 * time.Millisecond
 
 func New(cfg config.Config) *App {
 	return &App{
@@ -131,7 +132,7 @@ func (a *App) handleUp(ctx context.Context) {
 	if a.cfg.HotkeyMode != "hold" {
 		return
 	}
-	if a.shouldIgnoreSyntheticUp() {
+	if a.consumeSyntheticUpSuppression() {
 		return
 	}
 	a.handleStop(ctx)
@@ -497,10 +498,11 @@ func (a *App) handleDictationEvent(
 		if text == "" {
 			return nil
 		}
+		a.armSyntheticUpSuppression()
 		if err := a.injector.InsertLive(ctx, state.target, event.Text); err != nil {
+			a.clearSyntheticUpSuppression()
 			return err
 		}
-		a.markLiveInsert()
 		a.overlay.AnimateChunk(event.Text)
 		if a.cfg.Streaming.ShowPartialOverlay {
 			a.overlay.SetListeningText(state.target.WindowClass, event.Text)
@@ -512,21 +514,38 @@ func (a *App) handleDictationEvent(
 	}
 }
 
-func (a *App) markLiveInsert() {
+func (a *App) armSyntheticUpSuppression() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.lastLiveInsert = time.Now()
+	a.suppressSyntheticUp = true
+	a.suppressSyntheticUpUntil = time.Now().Add(syntheticReleaseGuard)
 }
 
-func (a *App) shouldIgnoreSyntheticUp() bool {
+func (a *App) clearSyntheticUpSuppression() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.suppressSyntheticUp = false
+	a.suppressSyntheticUpUntil = time.Time{}
+}
 
+func (a *App) consumeSyntheticUpSuppression() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.cfg.HotkeyMode != "hold" || a.cfg.Streaming.Mode != "segment" {
 		return false
 	}
 	if a.recording == nil {
 		return false
 	}
-	return time.Since(a.lastLiveInsert) < syntheticReleaseGuard
+	if !a.suppressSyntheticUp {
+		return false
+	}
+	if time.Now().After(a.suppressSyntheticUpUntil) {
+		a.suppressSyntheticUp = false
+		a.suppressSyntheticUpUntil = time.Time{}
+		return false
+	}
+	a.suppressSyntheticUp = false
+	a.suppressSyntheticUpUntil = time.Time{}
+	return true
 }
