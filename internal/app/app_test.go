@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"testing"
-	"time"
 
 	"vtt/internal/config"
 	"vtt/internal/injector"
@@ -74,8 +73,8 @@ func TestHandleDictationEventInsertsSegmentWhileHolding(t *testing.T) {
 		t.Fatalf("animatedChunks = %v, want [segment one]", fakeOverlay.animatedChunks)
 	}
 	hk := app.hotkey.(*hotkeyStub)
-	if hk.callCount != 2 {
-		t.Fatalf("suppress call count = %d, want 2 (before and after insertion)", hk.callCount)
+	if hk.lockCount != 1 || hk.unlockCount != 1 {
+		t.Fatalf("lock/unlock = %d/%d, want 1/1", hk.lockCount, hk.unlockCount)
 	}
 }
 
@@ -228,13 +227,9 @@ func (i *injectorStub) InsertLive(_ context.Context, _ injector.Target, text str
 }
 
 type hotkeyStub struct {
-	called    bool
-	callCount int
-	duration  time.Duration
+	lockCount   int
+	unlockCount int
 }
 
-func (h *hotkeyStub) SuppressReleasesFor(duration time.Duration) {
-	h.called = true
-	h.callCount++
-	h.duration = duration
-}
+func (h *hotkeyStub) Lock()   { h.lockCount++ }
+func (h *hotkeyStub) Unlock() { h.unlockCount++ }

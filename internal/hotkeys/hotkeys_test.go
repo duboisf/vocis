@@ -110,8 +110,7 @@ func TestSuppressedRealReleaseEmitsUpAfterWindow(t *testing.T) {
 	r.SuppressReleasesFor(120 * time.Millisecond)
 	r.handleTrackedRelease(42)
 
-	// suppress window (120ms) + one rearm interval (~80ms)
-	expectEventWithin(t, r.up, 300*time.Millisecond)
+	expectEventWithin(t, r.up, 220*time.Millisecond)
 }
 
 func TestSuppressedReleaseDoesNotEmitUpWhileTrackedKeyStillDown(t *testing.T) {
@@ -231,4 +230,70 @@ func expectNoEvent(t *testing.T, ch <-chan struct{}, timeout time.Duration) {
 		t.Fatal("expected no event")
 	case <-timer.C:
 	}
+}
+
+func TestLockedReleaseIsIgnored(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.Lock()
+	r.handleTrackedRelease(42)
+	r.handleRelease()
+	expectNoEvent(t, r.up, 200*time.Millisecond)
+}
+
+func TestUnlockSchedulesRecheckAndEmitsUp(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.Lock()
+	r.handleTrackedRelease(42)
+
+	r.Unlock()
+	// Key is physically up (no keyState override), so the recheck emits Up.
+	expectEventWithin(t, r.up, autoRepeatReleaseDelay+40*time.Millisecond)
+}
+
+func TestUnlockDoesNotEmitUpWhileKeyPhysicallyHeld(t *testing.T) {
+	t.Parallel()
+
+	down := true
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+		keyState: func() (map[xproto.Keycode]bool, error) {
+			return map[xproto.Keycode]bool{42: down}, nil
+		},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.Lock()
+	r.handleTrackedRelease(42)
+
+	r.Unlock()
+	// Key is still physically held — no Up should fire.
+	expectNoEvent(t, r.up, autoRepeatReleaseDelay+80*time.Millisecond)
+
+	// Now physically release.
+	down = false
+	expectEventWithin(t, r.up, autoRepeatReleaseDelay+120*time.Millisecond)
 }

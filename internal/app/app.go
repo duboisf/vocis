@@ -64,11 +64,11 @@ type injectorClient interface {
 }
 
 type hotkeyController interface {
-	SuppressReleasesFor(duration time.Duration)
+	Lock()
+	Unlock()
 }
 
 const minToggleInterval = 250 * time.Millisecond
-const syntheticReleaseGuard = 250 * time.Millisecond
 
 func New(cfg config.Config) *App {
 	return &App{
@@ -501,13 +501,14 @@ func (a *App) handleDictationEvent(
 			return nil
 		}
 		if a.hotkey != nil {
-			a.hotkey.SuppressReleasesFor(syntheticReleaseGuard)
+			a.hotkey.Lock()
 		}
-		if err := a.injector.InsertLive(ctx, state.target, event.Text); err != nil {
-			return err
-		}
+		err := a.injector.InsertLive(ctx, state.target, event.Text)
 		if a.hotkey != nil {
-			a.hotkey.SuppressReleasesFor(syntheticReleaseGuard)
+			a.hotkey.Unlock()
+		}
+		if err != nil {
+			return err
 		}
 		a.overlay.AnimateChunk(event.Text)
 		if a.cfg.Streaming.ShowPartialOverlay {

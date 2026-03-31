@@ -26,6 +26,7 @@ type Registration struct {
 
 	mu                       sync.Mutex
 	isDown                   bool
+	locked                   bool
 	releaseTimer             *time.Timer
 	suppressUntil            time.Time
 	suppressedReleasePending bool
@@ -120,6 +121,29 @@ func (r *Registration) SuppressReleasesFor(duration time.Duration) {
 	r.suppressTimer = time.AfterFunc(wait, r.finishSuppressedRelease)
 }
 
+// Lock makes the hotkey system ignore all release events until Unlock
+// is called. Use this to bracket operations (like xdotool keyup) that
+// corrupt the X11 keymap while the user is still physically holding
+// the hotkey.
+func (r *Registration) Lock() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.locked = true
+	r.cancelReleaseTimerLocked()
+}
+
+// Unlock re-enables release detection and schedules a deferred key
+// state check. By the time the check fires, hardware auto-repeat
+// will have restored the X11 keymap to reflect actual physical state.
+func (r *Registration) Unlock() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.locked = false
+	if r.isDown {
+		r.rearmReleaseCheckLocked()
+	}
+}
+
 func (r *Registration) Close() error {
 	r.mu.Lock()
 	if r.releaseTimer != nil {
@@ -178,7 +202,7 @@ func (r *Registration) handleTrackedRelease(code xproto.Keycode) {
 
 func (r *Registration) scheduleRelease() {
 	r.mu.Lock()
-	if !r.isDown {
+	if !r.isDown || r.locked {
 		r.mu.Unlock()
 		return
 	}
@@ -239,13 +263,16 @@ func (r *Registration) finishSuppressedRelease() {
 		r.mu.Unlock()
 		return
 	}
+	if r.anyTrackedKeyDownLocked() {
+		r.rearmSuppressedReleaseLocked(autoRepeatReleaseDelay)
+		r.mu.Unlock()
+		return
+	}
 	r.suppressedReleasePending = false
-	// Hand off to the normal release-check loop rather than trusting
-	// a single QueryKeymap reading.  If the keymap is temporarily
-	// stale from a synthetic xdotool keyup, the recheck after one
-	// auto-repeat interval will see the recovered state.
-	r.rearmReleaseCheckLocked()
+	r.isDown = false
 	r.mu.Unlock()
+
+	r.emit(r.up)
 }
 
 func (r *Registration) awaitRelease(timer *time.Timer) {
