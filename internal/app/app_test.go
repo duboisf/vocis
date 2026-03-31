@@ -200,7 +200,7 @@ type overlayStub struct {
 }
 
 func (o *overlayStub) ShowHint(string)      {}
-func (o *overlayStub) ShowListening(string) {}
+func (o *overlayStub) ShowListening(string, string) {}
 func (o *overlayStub) AnimateChunk(text string) {
 	o.animatedChunks = append(o.animatedChunks, text)
 }

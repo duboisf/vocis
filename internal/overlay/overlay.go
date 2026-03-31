@@ -46,6 +46,7 @@ type Overlay struct {
 	targetHeight int
 	resizeToken  uint64
 	face         font.Face
+	smallFace    font.Face
 	glyphWidth   int
 
 	baseX      int
@@ -89,6 +90,7 @@ func New(cfg config.OverlayConfig) (*Overlay, error) {
 	win.Stack(xproto.StackModeAbove)
 
 	face, glyphW := loadSystemFont(13)
+	smallFace, _ := loadSystemFont(11)
 
 	return &Overlay{
 		cfg:        cfg,
@@ -96,6 +98,7 @@ func New(cfg config.OverlayConfig) (*Overlay, error) {
 		win:        win,
 		height:     cfg.Height,
 		face:       face,
+		smallFace:  smallFace,
 		glyphWidth: glyphW,
 		baseX:      x,
 		baseY:      y,
@@ -118,10 +121,11 @@ func (o *Overlay) ShowHint(text string) {
 	}, true)
 }
 
-func (o *Overlay) ShowListening(windowClass string) {
+func (o *Overlay) ShowListening(windowClass, hotkeyMode string) {
 	body := listeningBody("")
 	o.show(viewState{
 		title:        "Listening",
+		titleSuffix:  listeningHint(hotkeyMode),
 		subtitle:     listeningSubtitle(windowClass),
 		body:         body,
 		accent:       color.RGBA{R: 34, G: 197, B: 94, A: 255},
@@ -459,7 +463,7 @@ func (o *Overlay) drawLocked() {
 	writeText(img, 150, 36, o.state.title, o.state.accent, o.face)
 	if o.state.titleSuffix != "" {
 		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
-		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
+		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.smallFace)
 	}
 	writeText(img, 150, 62, o.state.subtitle, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
 
@@ -596,6 +600,7 @@ func writeText(dst *image.RGBA, x, y int, msg string, clr color.Color, face font
 	d.DrawString(msg)
 }
 
+
 func drawRect(dst *image.RGBA, rect image.Rectangle, clr color.Color) {
 	draw.Draw(dst, rect, &image.Uniform{C: clr}, image.Point{}, draw.Src)
 }
@@ -613,7 +618,7 @@ func (o *Overlay) captureFrameLocked() *image.RGBA {
 	writeText(img, 150, 36, o.state.title, o.state.accent, o.face)
 	if o.state.titleSuffix != "" {
 		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
-		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
+		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.smallFace)
 	}
 	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
 	for i, line := range strings.Split(o.state.subtitle, "\n") {
@@ -781,6 +786,13 @@ func easeOutCubic(t float64) float64 {
 
 func easeInCubic(t float64) float64 {
 	return t * t * t
+}
+
+func listeningHint(hotkeyMode string) string {
+	if hotkeyMode == "toggle" {
+		return " — press to stop"
+	}
+	return " — release to paste"
 }
 
 func listeningSubtitle(windowClass string) string {

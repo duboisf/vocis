@@ -55,7 +55,7 @@ type recordingState struct {
 
 type overlayUI interface {
 	ShowHint(text string)
-	ShowListening(windowClass string)
+	ShowListening(windowClass, hotkeyMode string)
 	SetListeningText(windowClass, text string)
 	AnimateChunk(text string)
 	ShowFinishing(body, shortcut string)
@@ -188,7 +188,7 @@ func (a *App) handleStop(ctx context.Context) {
 
 func (a *App) startRecordingLocked(ctx context.Context) {
 	a.dismissCompletionOverlay = false
-	a.overlay.ShowListening("")
+	a.overlay.ShowListening("", a.cfg.HotkeyMode)
 
 	spanCtx, recordingSpan := telemetry.StartSpan(ctx, "vocis.dictation")
 
@@ -248,7 +248,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	}
 	state.dictation = dictation
 	a.recording = state
-	a.overlay.ShowListening(target.WindowClass)
+	a.overlay.ShowListening(target.WindowClass, a.cfg.HotkeyMode)
 	sessionlog.Infof("recording started: %d Hz, %d channel(s), connecting realtime transcription",
 		state.session.SampleRate(), state.session.Channels())
 	go a.consumeDictationEvents(recordCtx, state)
