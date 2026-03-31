@@ -322,7 +322,9 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 		return FinalizeResult{}, errors.New("realtime transcription stream was not established")
 	}
 
+	_, drainSpan := telemetry.StartSpan(ctx, "vtt.transcribe.drain")
 	text, err := s.drainTrailingText(ctx, stream)
+	telemetry.EndSpan(drainSpan, err)
 	if err != nil {
 		return FinalizeResult{}, err
 	}
@@ -331,14 +333,22 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 		return FinalizeResult{Text: text}, nil
 	}
 
+	_, commitSpan := telemetry.StartSpan(ctx, "vtt.transcribe.commit")
 	if err := stream.Commit(ctx); err != nil {
+		telemetry.EndSpan(commitSpan, err)
 		if s.shouldIgnoreEmptyCommit(err, stream) {
 			return FinalizeResult{Text: text}, nil
 		}
 		return FinalizeResult{}, err
 	}
+	telemetry.EndSpan(commitSpan, nil)
 
+	_, waitSpan := telemetry.StartSpan(ctx, "vtt.transcribe.wait_final",
+		attribute.String("trailing_duration", s.trailingDuration().Round(10*time.Millisecond).String()),
+		attribute.Int("segment_count", s.segmentCountValue()),
+	)
 	finalText, err := s.waitForFinalText(ctx)
+	telemetry.EndSpan(waitSpan, err)
 	if err != nil {
 		if s.shouldIgnoreMissingTrailingFinal(err, stream) {
 			return FinalizeResult{Text: text}, nil

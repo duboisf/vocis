@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/jfreymuth/pulse"
+	"go.opentelemetry.io/otel/attribute"
 
 	"vtt/internal/config"
+	"vtt/internal/telemetry"
 )
 
 const (
@@ -77,14 +79,23 @@ func Check() error {
 func CleanupStale() {}
 
 func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Session, error) {
+	ctx, span := telemetry.StartSpan(ctx, "vtt.recorder.start",
+		attribute.Int("audio.sample_rate", cfg.SampleRate),
+		attribute.Int("audio.channels", cfg.Channels),
+		attribute.String("audio.device", cfg.Device),
+	)
+	defer func() { telemetry.EndSpan(span, nil) }()
+
 	client, err := newPulseClient()
 	if err != nil {
+		telemetry.EndSpan(span, err)
 		return nil, err
 	}
 
 	options, err := recordOptions(client, cfg)
 	if err != nil {
 		client.Close()
+		telemetry.EndSpan(span, err)
 		return nil, err
 	}
 
@@ -109,6 +120,7 @@ func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Sess
 	if err != nil {
 		client.Close()
 		session.pipe.Close()
+		telemetry.EndSpan(span, err)
 		return nil, err
 	}
 
@@ -117,6 +129,7 @@ func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Sess
 	select {
 	case <-ctx.Done():
 		session.closeResources()
+		telemetry.EndSpan(span, ctx.Err())
 		return nil, ctx.Err()
 	default:
 	}
@@ -165,7 +178,13 @@ func (s *Session) BytesCaptured() int64 {
 
 func (s *Session) Stop(ctx context.Context) error {
 	s.once.Do(func() {
+		_, span := telemetry.StartSpan(ctx, "vtt.recorder.stop")
 		s.err = s.stop(ctx)
+		span.SetAttributes(
+			attribute.Int64("recording.bytes", s.BytesCaptured()),
+			attribute.String("recording.duration", s.Duration().Round(10*time.Millisecond).String()),
+		)
+		telemetry.EndSpan(span, s.err)
 	})
 	return s.err
 }

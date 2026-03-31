@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/atotto/clipboard"
+	"go.opentelemetry.io/otel/attribute"
 
 	"vtt/internal/config"
 	"vtt/internal/hotkeys"
 	"vtt/internal/sessionlog"
+	"vtt/internal/telemetry"
 )
 
 type Target struct {
@@ -53,8 +55,12 @@ func New(cfg config.InsertionConfig, shortcut string) *Injector {
 }
 
 func (i *Injector) CaptureTarget(ctx context.Context) (Target, error) {
+	ctx, span := telemetry.StartSpan(ctx, "vtt.inject.capture_target")
+	defer func() { telemetry.EndSpan(span, nil) }()
+
 	windowID, err := i.run(ctx, "xdotool", "getactivewindow")
 	if err != nil {
+		telemetry.EndSpan(span, err)
 		return Target{}, fmt.Errorf("active window: %w", err)
 	}
 
@@ -70,6 +76,10 @@ func (i *Injector) CaptureTarget(ctx context.Context) (Target, error) {
 		}
 	}
 
+	span.SetAttributes(
+		attribute.String("window.id", windowID),
+		attribute.String("window.class", className),
+	)
 	return Target{
 		WindowID:    windowID,
 		WindowClass: className,
@@ -82,8 +92,12 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 		return nil
 	}
 
+	ctx, focusSpan := telemetry.StartSpan(ctx, "vtt.inject.focus",
+		attribute.String("window.id", target.WindowID),
+	)
 	if target.WindowID != "" {
 		if _, err := i.run(ctx, "xdotool", "windowactivate", "--sync", target.WindowID); err != nil {
+			telemetry.EndSpan(focusSpan, err)
 			return fmt.Errorf("restore focus: %w", err)
 		}
 		time.Sleep(120 * time.Millisecond)
@@ -93,11 +107,17 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 	} else {
 		time.Sleep(25 * time.Millisecond)
 	}
+	telemetry.EndSpan(focusSpan, nil)
 
 	mode := i.resolveMode(target.WindowClass)
 	switch mode {
 	case "type":
-		if err := i.typeText(ctx, target, text, true); err != nil {
+		ctx, typeSpan := telemetry.StartSpan(ctx, "vtt.inject.type",
+			attribute.Int("text.length", len(text)),
+		)
+		err := i.typeText(ctx, target, text, true)
+		telemetry.EndSpan(typeSpan, err)
+		if err != nil {
 			return fmt.Errorf("type text: %w", err)
 		}
 		return nil
@@ -130,7 +150,14 @@ func (i *Injector) InsertLive(ctx context.Context, target Target, text string) e
 }
 
 func (i *Injector) paste(ctx context.Context, target Target, text string) error {
+	ctx, span := telemetry.StartSpan(ctx, "vtt.inject.paste",
+		attribute.Int("text.length", len(text)),
+		attribute.Bool("terminal", i.isTerminal(target.WindowClass)),
+	)
+	defer func() { telemetry.EndSpan(span, nil) }()
+
 	if err := i.focusTarget(ctx, target); err != nil {
+		telemetry.EndSpan(span, err)
 		return err
 	}
 
@@ -143,6 +170,7 @@ func (i *Injector) paste(ctx context.Context, target Target, text string) error 
 	}
 
 	if err := clipboard.WriteAll(text); err != nil {
+		telemetry.EndSpan(span, err)
 		return fmt.Errorf("clipboard write: %w", err)
 	}
 
@@ -151,6 +179,7 @@ func (i *Injector) paste(ctx context.Context, target Target, text string) error 
 	if isTerminal {
 		pasteKey = i.cfg.TerminalPasteKey
 	}
+	span.SetAttributes(attribute.String("paste.key", pasteKey))
 	sessionlog.Infof(
 		"pasting transcript into window=%s class=%q terminal=%t key=%s",
 		target.WindowID,
@@ -162,6 +191,7 @@ func (i *Injector) paste(ctx context.Context, target Target, text string) error 
 	args := buildPasteArgs(pasteKey)
 
 	if _, err := i.run(ctx, "xdotool", args...); err != nil {
+		telemetry.EndSpan(span, err)
 		return fmt.Errorf("paste text: %w", err)
 	}
 
