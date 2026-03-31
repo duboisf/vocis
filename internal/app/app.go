@@ -46,11 +46,12 @@ type recordingState struct {
 	session   *recorder.Session
 	dictation *openai.DictationSession
 	cancel    context.CancelFunc
-	target      injector.Target
-	liveText    string
-	displayText string
-	span        trace.Span
-	spanCtx     context.Context
+	target       injector.Target
+	liveText     string
+	displayText  string
+	span         trace.Span
+	spanCtx      context.Context
+	activeSpan   trace.Span
 }
 
 type overlayUI interface {
@@ -247,6 +248,8 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		return
 	}
 	state.dictation = dictation
+	_, activeSpan := telemetry.StartSpan(spanCtx, "vocis.recording.active")
+	state.activeSpan = activeSpan
 	a.recording = state
 	a.overlay.ShowListening(target.WindowClass, a.cfg.HotkeyMode)
 	sessionlog.Infof("recording started: %d Hz, %d channel(s), connecting realtime transcription",
@@ -338,6 +341,10 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	defer telemetry.EndSpan(state.span, nil)
 
 	spanCtx := state.spanCtx
+
+	if state.activeSpan != nil {
+		telemetry.EndSpan(state.activeSpan, nil)
+	}
 
 	stopCtx, cancel := context.WithTimeout(spanCtx, 10*time.Second)
 	defer cancel()
