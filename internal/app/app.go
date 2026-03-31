@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"vtt/internal/config"
 	"vtt/internal/hotkeys"
 	"vtt/internal/injector"
@@ -16,6 +19,7 @@ import (
 	"vtt/internal/recorder"
 	"vtt/internal/securestore"
 	"vtt/internal/sessionlog"
+	"vtt/internal/telemetry"
 )
 
 type App struct {
@@ -45,6 +49,8 @@ type recordingState struct {
 	target      injector.Target
 	liveText    string
 	displayText string
+	span        trace.Span
+	spanCtx     context.Context
 }
 
 type overlayUI interface {
@@ -184,20 +190,28 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	a.dismissCompletionOverlay = false
 	a.overlay.ShowListening("")
 
-	session, err := a.recorder.Start(ctx, a.cfg.Recording)
+	spanCtx, recordingSpan := telemetry.StartSpan(ctx, "vtt.dictation")
+
+	session, err := a.recorder.Start(spanCtx, a.cfg.Recording)
 	if err != nil {
+		telemetry.EndSpan(recordingSpan, err)
 		sessionlog.Errorf("start recording: %v", err)
 		a.overlay.ShowError(err)
 		return
 	}
 
-	target, err := a.injector.CaptureTarget(ctx)
+	target, err := a.injector.CaptureTarget(spanCtx)
 	if err != nil {
+		telemetry.EndSpan(recordingSpan, err)
 		sessionlog.Errorf("capture target: %v", err)
 		_ = session.Stop(ctx)
 		a.overlay.ShowError(err)
 		return
 	}
+	recordingSpan.SetAttributes(
+		attribute.String("target.window_id", target.WindowID),
+		attribute.String("target.window_class", target.WindowClass),
+	)
 	if a.cfg.LogWindowTitle {
 		sessionlog.Infof("starting recording for window=%s class=%s title=%q",
 			target.WindowID, target.WindowClass, target.WindowName)
@@ -206,7 +220,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 			target.WindowID, target.WindowClass)
 	}
 
-	recordCtx, cancel := context.WithCancel(ctx)
+	recordCtx, cancel := context.WithCancel(spanCtx)
 
 	a.sequence++
 	state := &recordingState{
@@ -215,6 +229,8 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		session:   session,
 		cancel:    cancel,
 		target:    target,
+		span:      recordingSpan,
+		spanCtx:   spanCtx,
 	}
 	dictation, err := a.transcribe.StartDictation(
 		recordCtx,
@@ -225,6 +241,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	if err != nil {
 		cancel()
 		_ = session.Stop(context.Background())
+		telemetry.EndSpan(recordingSpan, err)
 		sessionlog.Errorf("start dictation: %v", err)
 		a.overlay.ShowError(err)
 		return
@@ -318,28 +335,37 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.mu.Unlock()
 	}()
 	defer state.cancel()
+	defer telemetry.EndSpan(state.span, nil)
 
-	stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	spanCtx := state.spanCtx
+
+	stopCtx, cancel := context.WithTimeout(spanCtx, 10*time.Second)
 	defer cancel()
 
 	if err := state.session.Stop(stopCtx); err != nil {
 		if errors.Is(err, recorder.ErrRecordingTooShort) {
+			state.span.SetAttributes(attribute.Bool("recording.discarded", true))
 			sessionlog.Infof("discarding short recording after %s",
 				state.session.Duration().Round(10*time.Millisecond))
 			state.cancel()
 			a.hideCompletionOverlay()
 			return
 		}
+		state.span.RecordError(err)
 		sessionlog.Errorf("stop recording: %v", err)
 		a.showCompletionError(err)
 		state.cancel()
 		return
 	}
+	state.span.SetAttributes(
+		attribute.Int64("recording.bytes", state.session.BytesCaptured()),
+		attribute.String("recording.duration", state.session.Duration().Round(10*time.Millisecond).String()),
+	)
 	sessionlog.Infof("audio captured successfully: %d bytes streamed over %s",
 		state.session.BytesCaptured(), state.session.Duration().Round(10*time.Millisecond))
 
 	transcribeCtx, transcribeCancel := context.WithTimeout(
-		ctx,
+		spanCtx,
 		time.Duration(a.cfg.OpenAI.RequestLimit)*time.Second,
 	)
 	defer transcribeCancel()
@@ -353,7 +379,9 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.mu.Unlock()
 	}()
 
+	transcribeCtx, transcribeSpan := telemetry.StartSpan(transcribeCtx, "vtt.transcribe.finalize")
 	result, err := state.dictation.Finalize(transcribeCtx)
+	telemetry.EndSpan(transcribeSpan, err)
 	if err != nil {
 		if a.completionOverlayDismissed() {
 			sessionlog.Infof("transcription cancelled by user")
@@ -374,6 +402,11 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		}
 	}
 	text = strings.TrimSpace(text)
+	state.span.SetAttributes(
+		attribute.Int("transcription.total_chars", len(text)),
+		attribute.Int("transcription.live_chars", len(state.liveText)),
+		attribute.Int("transcription.trailing_chars", len(trailing)),
+	)
 	sessionlog.Infof("transcription complete: %d characters (%d live + %d trailing)",
 		len(text), len(state.liveText), len(trailing))
 
@@ -383,7 +416,14 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		return
 	}
 
-	if err := a.injector.Insert(ctx, state.target, text); err != nil {
+	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vtt.inject",
+		attribute.String("target.window_id", state.target.WindowID),
+		attribute.String("target.window_class", state.target.WindowClass),
+		attribute.Int("text.length", len(text)),
+	)
+	err = a.injector.Insert(insertCtx, state.target, text)
+	telemetry.EndSpan(insertSpan, err)
+	if err != nil {
 		sessionlog.Errorf("insert transcript: %v", err)
 		a.showCompletionError(err)
 		return

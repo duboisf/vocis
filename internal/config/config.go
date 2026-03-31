@@ -20,6 +20,12 @@ type Config struct {
 	Streaming      StreamingConfig `json:"streaming"`
 	Insertion      InsertionConfig `json:"insertion"`
 	Overlay        OverlayConfig   `json:"overlay"`
+	Telemetry      TelemetryConfig `json:"telemetry"`
+}
+
+type TelemetryConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Endpoint string `json:"endpoint"`
 }
 
 type OpenAIConfig struct {
@@ -118,6 +124,10 @@ func Default() Config {
 			MarginTop:      44,
 			Opacity:        0.94,
 			AutoHideMillis: 1800,
+		},
+		Telemetry: TelemetryConfig{
+			Enabled:  false,
+			Endpoint: "localhost:4317",
 		},
 	}
 }

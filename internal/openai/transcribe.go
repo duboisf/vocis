@@ -20,8 +20,11 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/realtime"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"vtt/internal/config"
 	"vtt/internal/sessionlog"
+	"vtt/internal/telemetry"
 )
 
 const (
@@ -229,8 +232,15 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 		return nil, errors.New("recording.channels must be greater than zero")
 	}
 
+	ctx, connectSpan := telemetry.StartSpan(ctx, "vtt.openai.connect",
+		attribute.String("openai.model", c.cfg.Model),
+		attribute.Int("audio.sample_rate", sampleRate),
+		attribute.Int("audio.channels", channels),
+	)
+
 	secret, err := c.createClientSecret(ctx)
 	if err != nil {
+		telemetry.EndSpan(connectSpan, err)
 		return nil, err
 	}
 
@@ -239,7 +249,9 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 	}
 	conn, resp, err := c.dialer.DialContext(ctx, c.websocketURL, headers)
 	if err != nil {
-		return nil, formatDialError(err, resp)
+		dialErr := formatDialError(err, resp)
+		telemetry.EndSpan(connectSpan, dialErr)
+		return nil, dialErr
 	}
 
 	stream := &Stream{
@@ -254,9 +266,11 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 
 	if err := stream.sendJSON(ctx, c.sessionUpdateEvent()); err != nil {
 		stream.Close()
+		telemetry.EndSpan(connectSpan, err)
 		return nil, err
 	}
 
+	telemetry.EndSpan(connectSpan, nil)
 	return stream, nil
 }
 

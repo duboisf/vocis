@@ -18,6 +18,7 @@ import (
 	"vtt/internal/recorder"
 	"vtt/internal/securestore"
 	"vtt/internal/sessionlog"
+	"vtt/internal/telemetry"
 )
 
 func main() {
@@ -79,6 +80,16 @@ func runServe() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdownTelemetry, err := telemetry.Init(ctx, cfg.Telemetry)
+	if err != nil {
+		return fmt.Errorf("init telemetry: %w", err)
+	}
+	defer shutdownTelemetry(context.Background())
+
+	if cfg.Telemetry.Enabled {
+		sessionlog.Infof("telemetry enabled, exporting to %s", cfg.Telemetry.Endpoint)
+	}
 
 	sessionlog.Infof("loaded config: %s", path)
 	sessionlog.Infof("hotkey: %s", cfg.Hotkey)

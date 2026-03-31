@@ -53,5 +53,9 @@
     "margin_top": 44,
     "opacity": 0.94,
     "auto_hide_millis": 1800
+  },
+  "telemetry": {
+    "enabled": false,
+    "endpoint": "localhost:4317"
   }
 }
