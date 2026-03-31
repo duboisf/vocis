@@ -43,6 +43,8 @@ type Overlay struct {
 	wavePhase    float64
 	partialToken uint64
 	height       int
+	targetHeight int
+	resizeToken  uint64
 	face         font.Face
 	glyphWidth   int
 }
@@ -235,6 +237,8 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	o.level = 0
 	o.wavePhase = 0
 	o.height = o.cfg.Height
+	o.targetHeight = o.cfg.Height
+	o.resizeToken++
 	o.win.Resize(o.cfg.Width, o.cfg.Height)
 	if state.title == "Listening" {
 		o.liveBody = state.body
@@ -302,9 +306,12 @@ func (o *Overlay) drawLocked() {
 	if needed < o.cfg.Height {
 		needed = o.cfg.Height
 	}
-	if needed != o.height {
-		o.height = needed
-		o.win.Resize(o.cfg.Width, needed)
+	if needed != o.targetHeight {
+		o.targetHeight = needed
+		if o.height != needed {
+			o.resizeToken++
+			go o.animateResize(o.resizeToken)
+		}
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, o.cfg.Width, o.height))
@@ -457,6 +464,40 @@ func writeText(dst *image.RGBA, x, y int, msg string, clr color.Color, face font
 
 func drawRect(dst *image.RGBA, rect image.Rectangle, clr color.Color) {
 	draw.Draw(dst, rect, &image.Uniform{C: clr}, image.Point{}, draw.Src)
+}
+
+const resizeStep = 4
+
+func (o *Overlay) animateResize(token uint64) {
+	ticker := time.NewTicker(12 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		o.mu.Lock()
+		if token != o.resizeToken || !o.visible {
+			o.mu.Unlock()
+			return
+		}
+		target := o.targetHeight
+		if o.height == target {
+			o.mu.Unlock()
+			return
+		}
+		if o.height < target {
+			o.height += resizeStep
+			if o.height > target {
+				o.height = target
+			}
+		} else {
+			o.height -= resizeStep
+			if o.height < target {
+				o.height = target
+			}
+		}
+		o.win.Resize(o.cfg.Width, o.height)
+		o.drawLocked()
+		o.mu.Unlock()
+	}
 }
 
 func (o *Overlay) animateIdleWave(token uint64) {
