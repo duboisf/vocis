@@ -229,39 +229,9 @@ func (i *injectorStub) InsertLive(_ context.Context, _ injector.Target, text str
 type hotkeyStub struct {
 	called   bool
 	duration time.Duration
-	pressed  bool
 }
 
 func (h *hotkeyStub) SuppressReleasesFor(duration time.Duration) {
 	h.called = true
 	h.duration = duration
-}
-
-func (h *hotkeyStub) Pressed() bool {
-	return h.pressed
-}
-
-func TestHandleUpIgnoresReleaseWhileHotkeyStillPressed(t *testing.T) {
-	t.Parallel()
-
-	app := &App{
-		cfg: config.Config{
-			HotkeyMode: "hold",
-		},
-		overlay: &overlayStub{},
-		hotkey:  &hotkeyStub{pressed: true},
-		recording: &recordingState{
-			id:        1,
-			startedAt: time.Now(),
-		},
-	}
-
-	app.handleUp(context.Background())
-
-	if app.recording == nil {
-		t.Fatal("expected recording to remain active")
-	}
-	if app.transcribing {
-		t.Fatal("expected transcribing to remain false")
-	}
 }

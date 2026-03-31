@@ -137,12 +137,13 @@ func TestSuppressedReleaseDoesNotEmitUpWhileTrackedKeyStillDown(t *testing.T) {
 func TestReleaseTimerDoesNotEmitUpWhileTrackedKeyStillDown(t *testing.T) {
 	t.Parallel()
 
+	down := true
 	r := &Registration{
 		down:         make(chan struct{}, 1),
 		up:           make(chan struct{}, 1),
 		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
 		keyState: func() (map[xproto.Keycode]bool, error) {
-			return map[xproto.Keycode]bool{42: true}, nil
+			return map[xproto.Keycode]bool{42: down}, nil
 		},
 	}
 
@@ -152,6 +153,9 @@ func TestReleaseTimerDoesNotEmitUpWhileTrackedKeyStillDown(t *testing.T) {
 	r.handleTrackedRelease(42)
 
 	expectNoEvent(t, r.up, autoRepeatReleaseDelay+80*time.Millisecond)
+
+	down = false
+	expectEventWithin(t, r.up, autoRepeatReleaseDelay+120*time.Millisecond)
 }
 
 func TestSuppressedReleaseEmitsUpAfterTrackedKeysActuallyRelease(t *testing.T) {
@@ -175,8 +179,7 @@ func TestSuppressedReleaseEmitsUpAfterTrackedKeysActuallyRelease(t *testing.T) {
 	expectNoEvent(t, r.up, 220*time.Millisecond)
 
 	down = false
-	r.handleTrackedRelease(42)
-	expectEventWithin(t, r.up, autoRepeatReleaseDelay+80*time.Millisecond)
+	expectEventWithin(t, r.up, autoRepeatReleaseDelay+200*time.Millisecond)
 }
 
 func TestReleaseKeyNamesIncludesModifiersAndTriggerKey(t *testing.T) {

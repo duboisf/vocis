@@ -96,12 +96,6 @@ func (r *Registration) Up() <-chan struct{} {
 	return r.up
 }
 
-func (r *Registration) Pressed() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.anyTrackedKeyDownLocked()
-}
-
 func (r *Registration) SuppressReleasesFor(duration time.Duration) {
 	if duration <= 0 {
 		return
@@ -212,8 +206,24 @@ func (r *Registration) cancelReleaseTimerLocked() {
 	}
 }
 
+func (r *Registration) rearmReleaseCheckLocked() {
+	timer := time.NewTimer(autoRepeatReleaseDelay)
+	r.releaseTimer = timer
+	go r.awaitRelease(timer)
+}
+
 func (r *Registration) suppressionActiveLocked() bool {
 	return !r.suppressUntil.IsZero() && time.Now().Before(r.suppressUntil)
+}
+
+func (r *Registration) rearmSuppressedReleaseLocked(delay time.Duration) {
+	if delay <= 0 {
+		delay = autoRepeatReleaseDelay
+	}
+	if r.suppressTimer != nil {
+		r.suppressTimer.Stop()
+	}
+	r.suppressTimer = time.AfterFunc(delay, r.finishSuppressedRelease)
 }
 
 func (r *Registration) finishSuppressedRelease() {
@@ -230,7 +240,7 @@ func (r *Registration) finishSuppressedRelease() {
 		return
 	}
 	if r.anyTrackedKeyDownLocked() {
-		r.suppressedReleasePending = false
+		r.rearmSuppressedReleaseLocked(autoRepeatReleaseDelay)
 		r.mu.Unlock()
 		return
 	}
@@ -255,6 +265,7 @@ func (r *Registration) awaitRelease(timer *time.Timer) {
 		return
 	}
 	if r.anyTrackedKeyDownLocked() {
+		r.rearmReleaseCheckLocked()
 		r.mu.Unlock()
 		return
 	}
