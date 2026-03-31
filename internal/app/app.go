@@ -185,9 +185,17 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	a.dismissCompletionOverlay = false
 	a.overlay.ShowListening("")
 
+	session, err := a.recorder.Start(ctx, a.cfg.Recording)
+	if err != nil {
+		sessionlog.Errorf("start recording: %v", err)
+		a.overlay.ShowError(err)
+		return
+	}
+
 	target, err := a.injector.CaptureTarget(ctx)
 	if err != nil {
 		sessionlog.Errorf("capture target: %v", err)
+		_ = session.Stop(ctx)
 		a.overlay.ShowError(err)
 		return
 	}
@@ -197,13 +205,6 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	} else {
 		sessionlog.Infof("starting recording for window=%s class=%s",
 			target.WindowID, target.WindowClass)
-	}
-
-	session, err := a.recorder.Start(ctx, a.cfg.Recording)
-	if err != nil {
-		sessionlog.Errorf("start recording: %v", err)
-		a.overlay.ShowError(err)
-		return
 	}
 
 	recordCtx, cancel := context.WithCancel(ctx)
