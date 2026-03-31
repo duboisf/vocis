@@ -65,6 +65,7 @@ type injectorClient interface {
 
 type hotkeyController interface {
 	SuppressReleasesFor(duration time.Duration)
+	Pressed() bool
 }
 
 const minToggleInterval = 250 * time.Millisecond
@@ -134,6 +135,10 @@ func (a *App) handleDown(ctx context.Context) {
 
 func (a *App) handleUp(ctx context.Context) {
 	if a.cfg.HotkeyMode != "hold" {
+		return
+	}
+	if a.hotkey != nil && a.hotkey.Pressed() {
+		sessionlog.Infof("ignoring hotkey up while shortcut is still physically pressed")
 		return
 	}
 	a.handleStop(ctx)

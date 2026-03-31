@@ -324,6 +324,9 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 
 	finalText, err := s.waitForFinalText(ctx)
 	if err != nil {
+		if s.shouldIgnoreMissingTrailingFinal(err, stream) {
+			return FinalizeResult{Text: text}, nil
+		}
 		if s.shouldIgnoreEmptyCommit(err, stream) {
 			return FinalizeResult{Text: text}, nil
 		}
@@ -528,6 +531,11 @@ func (s *DictationSession) drainTrailingText(ctx context.Context, stream *Stream
 }
 
 func (s *DictationSession) waitForFinalText(ctx context.Context) (string, error) {
+	if s.streamingMode == "segment" {
+		waitCtx, cancel := context.WithTimeout(ctx, minDuration(1500*time.Millisecond, s.writeTimeout))
+		defer cancel()
+		ctx = waitCtx
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -546,6 +554,19 @@ func (s *DictationSession) shouldIgnoreEmptyCommit(err error, stream *Stream) bo
 		return false
 	}
 	if !errors.Is(err, ErrInputAudioBufferCommitEmpty) {
+		return false
+	}
+	if s.segmentCountValue() == 0 {
+		return false
+	}
+	return strings.TrimSpace(stream.Partial()) == ""
+}
+
+func (s *DictationSession) shouldIgnoreMissingTrailingFinal(err error, stream *Stream) bool {
+	if err == nil || s.streamingMode != "segment" {
+		return false
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	if s.segmentCountValue() == 0 {

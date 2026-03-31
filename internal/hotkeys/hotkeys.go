@@ -96,6 +96,12 @@ func (r *Registration) Up() <-chan struct{} {
 	return r.up
 }
 
+func (r *Registration) Pressed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.anyTrackedKeyDownLocked()
+}
+
 func (r *Registration) SuppressReleasesFor(duration time.Duration) {
 	if duration <= 0 {
 		return

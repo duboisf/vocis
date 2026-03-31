@@ -356,6 +356,33 @@ func TestStartStreamKeepsFirstWordWhenCompletedTranscriptIsSuffix(t *testing.T) 
 	}
 }
 
+func TestShouldIgnoreMissingTrailingFinal(t *testing.T) {
+	t.Parallel()
+
+	session := &DictationSession{
+		streamingMode: "segment",
+		segmentCount:  1,
+	}
+	stream := &Stream{}
+
+	if !session.shouldIgnoreMissingTrailingFinal(context.DeadlineExceeded, stream) {
+		t.Fatal("expected missing trailing final to be ignored for segmented dictation")
+	}
+}
+
+func TestShouldNotIgnoreMissingTrailingFinalWithoutSegments(t *testing.T) {
+	t.Parallel()
+
+	session := &DictationSession{
+		streamingMode: "segment",
+	}
+	stream := &Stream{}
+
+	if session.shouldIgnoreMissingTrailingFinal(context.DeadlineExceeded, stream) {
+		t.Fatal("expected missing trailing final to fail when no live segments were inserted")
+	}
+}
+
 func TestPCMEncoderUpsamplesAndDownmixes(t *testing.T) {
 	t.Parallel()
 
