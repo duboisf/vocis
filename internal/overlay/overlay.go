@@ -67,8 +67,9 @@ type viewState struct {
 	subtitle     string
 	body         string
 	accent       color.RGBA
-	reactiveWave bool
-	idleWave     bool
+	reactiveWave   bool
+	idleWave       bool
+	heartbeatWave  bool
 }
 
 func New(cfg config.OverlayConfig) (*Overlay, error) {
@@ -194,11 +195,12 @@ func (o *Overlay) ShowFinishing(body, shortcut string) {
 		suffix = fmt.Sprintf(" — press %s to cancel", shortcut)
 	}
 	o.show(viewState{
-		title:       "Finishing",
-		titleSuffix: suffix,
-		subtitle:    "Wrapping up the last few words...",
-		body:        body,
-		accent:      color.RGBA{R: 96, G: 165, B: 250, A: 255},
+		title:         "Finishing",
+		titleSuffix:   suffix,
+		subtitle:      "Wrapping up the last few words...",
+		body:          body,
+		accent:        color.RGBA{R: 96, G: 165, B: 250, A: 255},
+		heartbeatWave: true,
 	}, false)
 }
 
@@ -307,6 +309,9 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	if state.idleWave {
 		go o.animateIdleWave(o.animToken)
 	}
+	if state.heartbeatWave {
+		go o.animateHeartbeat(o.animToken)
+	}
 	o.mu.Unlock()
 
 	go o.animateFadeIn(fadeToken)
@@ -395,6 +400,9 @@ func (o *Overlay) animateCrossFade(token uint64, state viewState, autoHide bool)
 		if state.idleWave {
 			go o.animateIdleWave(animToken)
 		}
+		if state.heartbeatWave {
+			go o.animateHeartbeat(animToken)
+		}
 	}
 	o.mu.Unlock()
 }
@@ -460,6 +468,7 @@ func (o *Overlay) drawLocked() {
 		o.level,
 		o.state.reactiveWave,
 		o.state.idleWave,
+		o.state.heartbeatWave,
 		o.wavePhase,
 	)
 
@@ -572,6 +581,7 @@ func drawBars(
 	level float64,
 	reactive bool,
 	idle bool,
+	heartbeat bool,
 	phase float64,
 ) {
 	width := 10
@@ -583,6 +593,8 @@ func drawBars(
 		height := 14 + i%2*4
 		if reactive {
 			height = 10 + int((level*weight)*54)
+		} else if heartbeat {
+			height = 10 + int(weight*40*heartbeatPulse(phase, float64(i)*0.08))
 		} else if idle {
 			pulse := 0.5 + 0.5*math.Sin(phase+float64(i)*0.75)
 			height = 14 + int((weight*20)*pulse)
@@ -590,6 +602,23 @@ func drawBars(
 		x := rect.Min.X + i*(width+gap)
 		r := image.Rect(x, baseY-height, x+width, baseY)
 		drawRect(dst, r, accent)
+	}
+}
+
+// heartbeatPulse returns a 0..1 amplitude for a heartbeat pattern:
+// two quick beats (lub-dub) followed by a rest period.
+func heartbeatPulse(phase, offset float64) float64 {
+	// Full cycle is 2π; divide into lub, dub, rest
+	t := math.Mod(phase+offset, 2*math.Pi) / (2 * math.Pi) // 0..1
+	switch {
+	case t < 0.1: // first beat (lub): sharp rise and fall
+		return math.Sin(t / 0.1 * math.Pi)
+	case t < 0.15: // brief gap
+		return 0
+	case t < 0.25: // second beat (dub): slightly smaller
+		return 0.7 * math.Sin((t-0.15)/0.1*math.Pi)
+	default: // rest
+		return 0
 	}
 }
 
@@ -617,7 +646,7 @@ func (o *Overlay) captureFrameLocked() *image.RGBA {
 	writeText(img, o.cfg.Width-len("Vocis")*o.glyphWidth-12, 24, "Vocis", color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
 	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
 	drawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level,
-		o.state.reactiveWave, o.state.idleWave, o.wavePhase)
+		o.state.reactiveWave, o.state.idleWave, o.state.heartbeatWave, o.wavePhase)
 
 	writeText(img, 150, 36, o.state.title, o.state.accent, o.face)
 	if o.state.titleSuffix != "" {
@@ -697,6 +726,22 @@ func (o *Overlay) animateIdleWave(token uint64) {
 			return
 		}
 		o.wavePhase += 0.28
+		o.drawLocked()
+		o.mu.Unlock()
+	}
+}
+
+func (o *Overlay) animateHeartbeat(token uint64) {
+	ticker := time.NewTicker(30 * time.Millisecond)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		o.mu.Lock()
+		if token != o.animToken || !o.visible || !o.state.heartbeatWave {
+			o.mu.Unlock()
+			return
+		}
+		o.wavePhase += 0.12
 		o.drawLocked()
 		o.mu.Unlock()
 	}
