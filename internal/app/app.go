@@ -20,17 +20,19 @@ import (
 
 type App struct {
 	cfg        config.Config
-	overlay    *overlay.Overlay
+	overlay    overlayUI
 	recorder   *recorder.Recorder
-	injector   *injector.Injector
+	injector   injectorClient
 	transcribe *openai.Client
 	store      *securestore.Store
 
-	mu           sync.Mutex
-	recording    *recordingState
-	transcribing bool
-	lastToggle   time.Time
-	sequence     uint64
+	mu                         sync.Mutex
+	recording                  *recordingState
+	transcribing               bool
+	dismissCompletionOverlay   bool
+	lastToggle                 time.Time
+	lastLiveInsert             time.Time
+	sequence                   uint64
 }
 
 type recordingState struct {
@@ -45,6 +47,7 @@ type recordingState struct {
 
 	mu                  sync.Mutex
 	liveSegmentDelivery bool
+	deliveredSegments   int
 }
 
 type streamResult struct {
@@ -52,8 +55,28 @@ type streamResult struct {
 	err  error
 }
 
+type overlayUI interface {
+	ShowHint(text string)
+	ShowListening(windowClass string)
+	SetListeningText(windowClass, text string)
+	AnimateChunk(text string)
+	ShowTranscribing()
+	ShowSuccess(text string)
+	ShowError(err error)
+	SetLevel(level float64)
+	Hide()
+	Close()
+}
+
+type injectorClient interface {
+	CaptureTarget(ctx context.Context) (injector.Target, error)
+	Insert(ctx context.Context, target injector.Target, text string) error
+	InsertLive(ctx context.Context, target injector.Target, text string) error
+}
+
 const minToggleInterval = 250 * time.Millisecond
 const segmentDrainGrace = 250 * time.Millisecond
+const syntheticReleaseGuard = 180 * time.Millisecond
 
 func New(cfg config.Config) *App {
 	return &App{
@@ -106,6 +129,9 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) handleDown(ctx context.Context) {
+	if a.dismissInFlightOverlay() {
+		return
+	}
 	if a.cfg.HotkeyMode == "toggle" {
 		a.handleToggle(ctx)
 		return
@@ -115,6 +141,9 @@ func (a *App) handleDown(ctx context.Context) {
 
 func (a *App) handleUp(ctx context.Context) {
 	if a.cfg.HotkeyMode != "hold" {
+		return
+	}
+	if a.shouldIgnoreSyntheticUp() {
 		return
 	}
 	a.handleStop(ctx)
@@ -164,6 +193,7 @@ func (a *App) handleStop(ctx context.Context) {
 }
 
 func (a *App) startRecordingLocked(ctx context.Context) {
+	a.dismissCompletionOverlay = false
 	a.overlay.ShowListening("")
 
 	target, err := a.injector.CaptureTarget(ctx)
@@ -303,11 +333,11 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 			if state.stream != nil {
 				_ = state.stream.Close()
 			}
-			a.overlay.Hide()
+			a.hideCompletionOverlay()
 			return
 		}
 		sessionlog.Errorf("stop recording: %v", err)
-		a.overlay.ShowError(err)
+		a.showCompletionError(err)
 		state.cancel()
 		<-state.pumpDone
 		if state.stream != nil {
@@ -317,7 +347,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	}
 	if err := <-state.pumpDone; err != nil {
 		sessionlog.Errorf("stream audio: %v", err)
-		a.overlay.ShowError(err)
+		a.showCompletionError(err)
 		if state.stream != nil {
 			_ = state.stream.Close()
 		}
@@ -329,21 +359,16 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 
 	if err := a.drainStreamResults(ctx, state); err != nil {
 		sessionlog.Errorf("stream transcription: %v", err)
-		a.overlay.ShowError(err)
+		a.showCompletionError(err)
 		return
 	}
 
 	if a.cfg.Streaming.Mode == "segment" {
 		if err := a.waitForOptionalStreamResults(ctx, state, segmentDrainGrace); err != nil {
 			sessionlog.Errorf("stream transcription: %v", err)
-			a.overlay.ShowError(err)
+			a.showCompletionError(err)
 			return
 		}
-	}
-
-	if a.cfg.Streaming.Mode == "segment" && strings.TrimSpace(state.stream.Partial()) == "" {
-		a.overlay.Hide()
-		return
 	}
 
 	transcribeCtx, transcribeCancel := context.WithTimeout(
@@ -354,39 +379,39 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 
 	if err := state.stream.Commit(transcribeCtx); err != nil {
 		sessionlog.Errorf("transcribe audio: %v", err)
-		a.overlay.ShowError(err)
+		a.showCompletionError(err)
 		return
 	}
 	text, err := a.waitForStreamResult(transcribeCtx, state)
 	if err != nil {
 		sessionlog.Errorf("transcribe audio: %v", err)
-		a.overlay.ShowError(err)
+		a.showCompletionError(err)
 		return
 	}
 	sessionlog.Infof("transcription complete: %d characters", len(text))
 
 	if text == "" {
 		if a.cfg.Streaming.Mode == "segment" {
-			a.overlay.Hide()
+			a.hideCompletionOverlay()
 			return
 		}
 		sessionlog.Warnf("transcription was empty")
-		a.overlay.ShowError(errors.New("transcription came back empty"))
+		a.showCompletionError(errors.New("transcription came back empty"))
 		return
 	}
 
 	if err := a.injector.Insert(ctx, state.target, text); err != nil {
 		sessionlog.Errorf("insert transcript: %v", err)
-		a.overlay.ShowError(err)
+		a.showCompletionError(err)
 		return
 	}
 	sessionlog.Infof("transcript inserted into window=%s", state.target.WindowID)
 
 	if a.cfg.Streaming.Mode == "segment" {
-		a.overlay.Hide()
+		a.hideCompletionOverlay()
 		return
 	}
-	a.overlay.ShowSuccess(text)
+	a.showCompletionSuccess(text)
 }
 
 func (a *App) monitorRecordingLevel(ctx context.Context, id uint64, session *recorder.Session) {
@@ -417,6 +442,45 @@ func (a *App) hotkeyHint(shortcut string) string {
 		return fmt.Sprintf("Press %s to start and press again to stop", shortcut)
 	}
 	return fmt.Sprintf("Hold %s to record, then release to transcribe", shortcut)
+}
+
+func (a *App) dismissInFlightOverlay() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if !a.transcribing {
+		return false
+	}
+
+	a.dismissCompletionOverlay = true
+	a.overlay.Hide()
+	return true
+}
+
+func (a *App) showCompletionSuccess(text string) {
+	if a.completionOverlayDismissed() {
+		a.overlay.Hide()
+		return
+	}
+	a.overlay.ShowSuccess(text)
+}
+
+func (a *App) showCompletionError(err error) {
+	if a.completionOverlayDismissed() {
+		a.overlay.Hide()
+		return
+	}
+	a.overlay.ShowError(err)
+}
+
+func (a *App) hideCompletionOverlay() {
+	a.overlay.Hide()
+}
+
+func (a *App) completionOverlayDismissed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.dismissCompletionOverlay
 }
 
 func (a *App) shutdown() error {
@@ -604,31 +668,53 @@ func (a *App) consumeStreamEvents(ctx context.Context, state *recordingState) {
 			if !ok {
 				return
 			}
-
-			switch event.Type {
-			case openai.StreamEventPartial:
-				if a.cfg.Streaming.ShowPartialOverlay {
-					a.overlay.SetListeningText(state.target.WindowClass, event.Text)
-				}
-			case openai.StreamEventFinal:
-				text := strings.TrimSpace(event.Text)
-				if text == "" {
-					continue
-				}
-				if a.cfg.Streaming.Mode == "segment" && state.liveSegmentsEnabled() {
-					if err := a.injector.Insert(ctx, state.target, text); err != nil {
-						a.pushStreamResult(state, "", err)
-						return
-					}
-					sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
-					continue
-				}
-				a.pushStreamResult(state, text, nil)
-			case openai.StreamEventError:
-				a.pushStreamResult(state, "", event.Err)
+			if err := a.handleStreamEvent(ctx, state, event); err != nil {
+				a.pushStreamResult(state, "", err)
 				return
 			}
 		}
+	}
+}
+
+func (a *App) handleStreamEvent(
+	ctx context.Context,
+	state *recordingState,
+	event openai.StreamEvent,
+) error {
+	switch event.Type {
+	case openai.StreamEventPartial:
+		if a.cfg.Streaming.ShowPartialOverlay {
+			a.overlay.SetListeningText(state.target.WindowClass, event.Text)
+		}
+		return nil
+	case openai.StreamEventFinal:
+		text := strings.TrimSpace(event.Text)
+		if text == "" {
+			return nil
+		}
+		text = state.formatSegmentText(text)
+		if a.cfg.Streaming.Mode == "segment" && state.liveSegmentsEnabled() {
+			if err := a.injector.InsertLive(ctx, state.target, text); err != nil {
+				return err
+			}
+			state.noteDeliveredSegment()
+			a.markLiveInsert()
+			a.overlay.AnimateChunk(text)
+			if a.cfg.Streaming.ShowPartialOverlay {
+				a.overlay.SetListeningText(state.target.WindowClass, text)
+			}
+			sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
+			return nil
+		}
+		a.pushStreamResult(state, text, nil)
+		return nil
+	case openai.StreamEventError:
+		if event.Err != nil {
+			return event.Err
+		}
+		return errors.New("openai stream error")
+	default:
+		return nil
 	}
 }
 
@@ -649,4 +735,61 @@ func (s *recordingState) setLiveSegmentDelivery(enabled bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.liveSegmentDelivery = enabled
+}
+
+func (s *recordingState) noteDeliveredSegment() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deliveredSegments++
+}
+
+func (s *recordingState) formatSegmentText(text string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if s.deliveredSegments == 0 {
+		return text
+	}
+	if strings.HasPrefix(text, " ") || strings.HasPrefix(text, "\n") {
+		return text
+	}
+	if startsWithPunctuation(text) {
+		return text
+	}
+	return " " + text
+}
+
+func (a *App) markLiveInsert() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.lastLiveInsert = time.Now()
+}
+
+func (a *App) shouldIgnoreSyntheticUp() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.cfg.HotkeyMode != "hold" || a.cfg.Streaming.Mode != "segment" {
+		return false
+	}
+	if a.recording == nil {
+		return false
+	}
+	return time.Since(a.lastLiveInsert) < syntheticReleaseGuard
+}
+
+func startsWithPunctuation(text string) bool {
+	if text == "" {
+		return false
+	}
+	switch text[0] {
+	case '.', ',', ';', ':', '!', '?', ')', ']', '}':
+		return true
+	default:
+		return false
+	}
 }
