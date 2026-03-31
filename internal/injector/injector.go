@@ -13,6 +13,7 @@ import (
 	"github.com/atotto/clipboard"
 
 	"vtt/internal/config"
+	"vtt/internal/hotkeys"
 	"vtt/internal/sessionlog"
 )
 
@@ -28,15 +29,26 @@ type Injector struct {
 	mu           sync.Mutex
 	restoreTimer *time.Timer
 	run          commandRunner
+	releaseArgs  []string
 }
 
 type commandRunner func(ctx context.Context, name string, args ...string) (string, error)
 
 var quotedValuePattern = regexp.MustCompile(`"([^"]+)"`)
 
-func New(cfg config.InsertionConfig) *Injector {
+func New(cfg config.InsertionConfig, shortcut string) *Injector {
 	inj := &Injector{cfg: cfg}
 	inj.run = inj.execTrimmed
+	if strings.TrimSpace(shortcut) != "" {
+		if keyNames, err := hotkeys.ReleaseKeyNames(shortcut); err == nil {
+			inj.releaseArgs = append([]string{"keyup"}, keyNames...)
+		} else {
+			sessionlog.Warnf("resolve hotkey release keys: %v", err)
+		}
+	}
+	if len(inj.releaseArgs) == 0 {
+		inj.releaseArgs = buildModifierReleaseArgs()
+	}
 	return inj
 }
 
@@ -230,6 +242,14 @@ func buildModifierReleaseArgs() []string {
 	}
 }
 
+func buildKeyReleaseArgs(shortcut string) ([]string, error) {
+	names, err := hotkeys.ReleaseKeyNames(shortcut)
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{"keyup"}, names...), nil
+}
+
 func normalizeKeyChord(chord string) []string {
 	chord = strings.ReplaceAll(strings.ToLower(chord), "+", "+")
 	return []string{chord}
@@ -249,7 +269,11 @@ func (i *Injector) typeText(
 }
 
 func (i *Injector) releaseHeldModifiers(ctx context.Context) error {
-	if _, err := i.run(ctx, "xdotool", buildModifierReleaseArgs()...); err != nil {
+	args := i.releaseArgs
+	if len(args) == 0 {
+		args = buildModifierReleaseArgs()
+	}
+	if _, err := i.run(ctx, "xdotool", args...); err != nil {
 		return err
 	}
 	return nil

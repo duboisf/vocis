@@ -11,7 +11,7 @@ import (
 func TestTerminalDetectionIsCaseInsensitive(t *testing.T) {
 	t.Parallel()
 
-	inj := New(config.Default().Insertion)
+	inj := New(config.Default().Insertion, "")
 	if !inj.isTerminal("alacritty") {
 		t.Fatal("expected alacritty to be treated as a terminal")
 	}
@@ -91,11 +91,37 @@ func TestBuildModifierReleaseArgs(t *testing.T) {
 	}
 }
 
+func TestBuildKeyReleaseArgsIncludesTriggerKey(t *testing.T) {
+	t.Parallel()
+
+	args, err := buildKeyReleaseArgs("ctrl+shift+space")
+	if err != nil {
+		t.Fatalf("buildKeyReleaseArgs: %v", err)
+	}
+
+	want := []string{
+		"keyup",
+		"Control_L",
+		"Control_R",
+		"Shift_L",
+		"Shift_R",
+		"space",
+	}
+	if len(args) != len(want) {
+		t.Fatalf("len(args) = %d, want %d; args=%v", len(args), len(want), args)
+	}
+	for i := range want {
+		if args[i] != want[i] {
+			t.Fatalf("args[%d] = %q, want %q; args=%v", i, args[i], want[i], args)
+		}
+	}
+}
+
 func TestInsertLiveReleasesModifiersBeforeTyping(t *testing.T) {
 	t.Parallel()
 
 	var calls []string
-	inj := New(config.Default().Insertion)
+	inj := New(config.Default().Insertion, "ctrl+shift+space")
 	inj.run = func(_ context.Context, name string, args ...string) (string, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return "", nil
@@ -117,7 +143,7 @@ func TestInsertLiveReleasesModifiersBeforeTyping(t *testing.T) {
 		t.Fatalf("calls[0] = %q, want %q; calls=%v", got, want, calls)
 	}
 	if got, want := calls[1],
-		"xdotool keyup Control_L Control_R Shift_L Shift_R Alt_L Alt_R Super_L Super_R"; got != want {
+		"xdotool keyup Control_L Control_R Shift_L Shift_R space"; got != want {
 		t.Fatalf("calls[1] = %q, want %q; calls=%v", got, want, calls)
 	}
 	if !strings.HasPrefix(calls[2], "xdotool type --clearmodifiers --delay ") ||
@@ -133,7 +159,7 @@ func TestInsertReleasesModifiersBeforePasting(t *testing.T) {
 	cfg := config.Default().Insertion
 	cfg.Mode = "clipboard"
 
-	inj := New(cfg)
+	inj := New(cfg, "ctrl+shift+space")
 	inj.run = func(_ context.Context, name string, args ...string) (string, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return "", nil
@@ -155,7 +181,7 @@ func TestInsertReleasesModifiersBeforePasting(t *testing.T) {
 		t.Fatalf("calls[0] = %q, want %q; calls=%v", got, want, calls)
 	}
 	if got, want := calls[1],
-		"xdotool keyup Control_L Control_R Shift_L Shift_R Alt_L Alt_R Super_L Super_R"; got != want {
+		"xdotool keyup Control_L Control_R Shift_L Shift_R space"; got != want {
 		t.Fatalf("calls[1] = %q, want %q; calls=%v", got, want, calls)
 	}
 	if got, want := calls[2], "xdotool windowactivate --sync 42"; got != want {

@@ -270,6 +270,31 @@ func (r *Registration) isTrackedKey(code xproto.Keycode) bool {
 	return ok
 }
 
+func ReleaseKeyNames(shortcut string) ([]string, error) {
+	parts := strings.FieldsFunc(strings.ToLower(shortcut), func(r rune) bool {
+		return r == '+' || r == '-'
+	})
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid hotkey %q", shortcut)
+	}
+
+	names := make([]string, 0, len(parts)+4)
+	for _, part := range parts[:len(parts)-1] {
+		modNames := modifierKeyNames(part)
+		if len(modNames) == 0 {
+			return nil, fmt.Errorf("unsupported modifier %q", part)
+		}
+		names = append(names, modNames...)
+	}
+
+	keyName, ok := parseKey(parts[len(parts)-1])
+	if !ok {
+		return nil, fmt.Errorf("unsupported key %q", parts[len(parts)-1])
+	}
+	names = append(names, keyName)
+	return names, nil
+}
+
 func (r *Registration) anyTrackedKeyDownLocked() bool {
 	if r.keyState == nil || len(r.trackedCodes) == 0 {
 		return false

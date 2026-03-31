@@ -90,7 +90,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	a.recorder = recorder.New()
-	a.injector = injector.New(a.cfg.Insertion)
+	a.injector = injector.New(a.cfg.Insertion, a.cfg.Hotkey)
 	a.transcribe = openai.New(apiKey, a.cfg.OpenAI, a.cfg.Streaming)
 
 	a.overlay, err = overlay.New(a.cfg.Overlay)

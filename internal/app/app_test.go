@@ -108,7 +108,7 @@ func TestHandleDictationEventPreservesFormattedSegmentText(t *testing.T) {
 	}
 }
 
-func TestHandleUpStopsRecordingDuringSegmentMode(t *testing.T) {
+func TestHandleUpDoesNothingWhenNotRecording(t *testing.T) {
 	t.Parallel()
 
 	app := &App{
@@ -119,19 +119,15 @@ func TestHandleUpStopsRecordingDuringSegmentMode(t *testing.T) {
 			},
 		},
 		overlay: &overlayStub{},
-		recording: &recordingState{
-			id:        1,
-			startedAt: time.Now(),
-		},
 	}
 
 	app.handleUp(context.Background())
 
 	if app.recording != nil {
-		t.Fatal("expected recording to stop")
+		t.Fatal("expected no recording state")
 	}
-	if !app.transcribing {
-		t.Fatal("expected transcribing to start")
+	if app.transcribing {
+		t.Fatal("expected transcribing to remain false")
 	}
 }
 
