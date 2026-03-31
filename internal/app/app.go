@@ -26,34 +26,22 @@ type App struct {
 	transcribe *openai.Client
 	store      *securestore.Store
 
-	mu                         sync.Mutex
-	recording                  *recordingState
-	transcribing               bool
-	dismissCompletionOverlay   bool
-	lastToggle                 time.Time
-	lastLiveInsert             time.Time
-	sequence                   uint64
+	mu                       sync.Mutex
+	recording                *recordingState
+	transcribing             bool
+	dismissCompletionOverlay bool
+	lastToggle               time.Time
+	lastLiveInsert           time.Time
+	sequence                 uint64
 }
 
 type recordingState struct {
 	id        uint64
 	startedAt time.Time
 	session   *recorder.Session
-	stream    *openai.Stream
-	pumpDone  chan error
-	results   chan streamResult
+	dictation *openai.DictationSession
 	cancel    context.CancelFunc
 	target    injector.Target
-
-	mu                  sync.Mutex
-	liveSegmentDelivery bool
-	deliveredSegments   int
-	pendingFinalCommit  bool
-}
-
-type streamResult struct {
-	text string
-	err  error
 }
 
 type overlayUI interface {
@@ -76,7 +64,6 @@ type injectorClient interface {
 }
 
 const minToggleInterval = 250 * time.Millisecond
-const segmentDrainGrace = 250 * time.Millisecond
 const syntheticReleaseGuard = 180 * time.Millisecond
 
 func New(cfg config.Config) *App {
@@ -222,20 +209,31 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 
 	a.sequence++
 	state := &recordingState{
-		id:                  a.sequence,
-		startedAt:           time.Now(),
-		session:             session,
-		pumpDone:            make(chan error, 1),
-		results:             make(chan streamResult, 8),
-		cancel:              cancel,
-		target:              target,
-		liveSegmentDelivery: a.cfg.Streaming.Mode == "segment",
+		id:        a.sequence,
+		startedAt: time.Now(),
+		session:   session,
+		cancel:    cancel,
+		target:    target,
 	}
+	dictation, err := a.transcribe.StartDictation(
+		recordCtx,
+		a.cfg.Recording.SampleRate,
+		a.cfg.Recording.Channels,
+		session.Samples(),
+	)
+	if err != nil {
+		cancel()
+		_ = session.Stop(context.Background())
+		sessionlog.Errorf("start dictation: %v", err)
+		a.overlay.ShowError(err)
+		return
+	}
+	state.dictation = dictation
 	a.recording = state
 	a.overlay.ShowListening(target.WindowClass)
 	sessionlog.Infof("recording started: %d Hz, %d channel(s), connecting realtime transcription",
 		state.session.SampleRate(), state.session.Channels())
-	go a.pumpAudio(recordCtx, state)
+	go a.consumeDictationEvents(recordCtx, state)
 	go a.monitorRecordingLevel(ctx, state.id, state.session)
 
 	if a.cfg.Recording.MaxDurationSeconds > 0 {
@@ -246,7 +244,6 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 func (a *App) stopRecordingLocked(ctx context.Context) {
 	state := a.recording
 	a.recording = nil
-	state.setLiveSegmentDelivery(false)
 	a.transcribing = true
 	a.overlay.ShowTranscribing()
 	sessionlog.Infof("stopping recording and finalizing transcription after %s",
@@ -305,7 +302,6 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 	}
 	state := a.recording
 	a.recording = nil
-	state.setLiveSegmentDelivery(false)
 	a.transcribing = true
 	a.mu.Unlock()
 
@@ -330,52 +326,16 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 			sessionlog.Infof("discarding short recording after %s",
 				state.session.Duration().Round(10*time.Millisecond))
 			state.cancel()
-			<-state.pumpDone
-			if state.stream != nil {
-				_ = state.stream.Close()
-			}
 			a.hideCompletionOverlay()
 			return
 		}
 		sessionlog.Errorf("stop recording: %v", err)
 		a.showCompletionError(err)
 		state.cancel()
-		<-state.pumpDone
-		if state.stream != nil {
-			_ = state.stream.Close()
-		}
 		return
 	}
-	if err := <-state.pumpDone; err != nil {
-		sessionlog.Errorf("stream audio: %v", err)
-		a.showCompletionError(err)
-		if state.stream != nil {
-			_ = state.stream.Close()
-		}
-		return
-	}
-	defer state.stream.Close()
 	sessionlog.Infof("audio captured successfully: %d bytes streamed over %s",
 		state.session.BytesCaptured(), state.session.Duration().Round(10*time.Millisecond))
-
-	if err := a.drainStreamResults(ctx, state); err != nil {
-		sessionlog.Errorf("stream transcription: %v", err)
-		a.showCompletionError(err)
-		return
-	}
-
-	if a.cfg.Streaming.Mode == "segment" {
-		if err := a.waitForOptionalStreamResults(ctx, state, segmentDrainGrace); err != nil {
-			sessionlog.Errorf("stream transcription: %v", err)
-			a.showCompletionError(err)
-			return
-		}
-		if !state.needsFinalCommit() && strings.TrimSpace(state.stream.Partial()) == "" {
-			sessionlog.Infof("no trailing audio left to finalize after segmented insert")
-			a.hideCompletionOverlay()
-			return
-		}
-	}
 
 	transcribeCtx, transcribeCancel := context.WithTimeout(
 		ctx,
@@ -383,27 +343,13 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	)
 	defer transcribeCancel()
 
-	if err := state.stream.Commit(transcribeCtx); err != nil {
-		if a.shouldIgnoreEmptySegmentCommit(state, err) {
-			sessionlog.Infof("no trailing audio left to finalize after segmented insert")
-			a.hideCompletionOverlay()
-			return
-		}
-		sessionlog.Errorf("transcribe audio: %v", err)
-		a.showCompletionError(err)
-		return
-	}
-	text, err := a.waitForStreamResult(transcribeCtx, state)
+	result, err := state.dictation.Finalize(transcribeCtx)
 	if err != nil {
-		if a.shouldIgnoreEmptySegmentCommit(state, err) {
-			sessionlog.Infof("no trailing audio left to finalize after segmented insert")
-			a.hideCompletionOverlay()
-			return
-		}
 		sessionlog.Errorf("transcribe audio: %v", err)
 		a.showCompletionError(err)
 		return
 	}
+	text := strings.TrimSpace(result.Text)
 	sessionlog.Infof("transcription complete: %d characters", len(text))
 
 	if text == "" {
@@ -499,19 +445,6 @@ func (a *App) completionOverlayDismissed() bool {
 	return a.dismissCompletionOverlay
 }
 
-func (a *App) shouldIgnoreEmptySegmentCommit(state *recordingState, err error) bool {
-	if err == nil || a.cfg.Streaming.Mode != "segment" {
-		return false
-	}
-	if !errors.Is(err, openai.ErrInputAudioBufferCommitEmpty) {
-		return false
-	}
-	if state.deliveredSegmentCount() == 0 {
-		return false
-	}
-	return strings.TrimSpace(state.stream.Partial()) == ""
-}
-
 func (a *App) shutdown() error {
 	a.mu.Lock()
 	state := a.recording
@@ -524,299 +457,59 @@ func (a *App) shutdown() error {
 		if err := state.session.Stop(stopCtx); err != nil {
 			sessionlog.Warnf("shutdown: %v", err)
 		}
-		if state.stream != nil {
-			_ = state.stream.Close()
-		}
+		_, _ = state.dictation.Finalize(stopCtx)
 	}
 
 	return nil
 }
 
-func (a *App) drainStreamResults(ctx context.Context, state *recordingState) error {
-	for {
-		select {
-		case result := <-state.results:
-			if result.err != nil {
-				return result.err
-			}
-			if strings.TrimSpace(result.text) == "" {
-				continue
-			}
-			if err := a.injector.Insert(ctx, state.target, result.text); err != nil {
-				return err
-			}
-			sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
-		default:
-			return nil
-		}
-	}
-}
-
-func (a *App) waitForStreamResult(ctx context.Context, state *recordingState) (string, error) {
-	for {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case result := <-state.results:
-			if result.err != nil {
-				return "", result.err
-			}
-			return strings.TrimSpace(result.text), nil
-		}
-	}
-}
-
-func (a *App) waitForOptionalStreamResults(
-	ctx context.Context,
-	state *recordingState,
-	grace time.Duration,
-) error {
-	timer := time.NewTimer(grace)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
-			return nil
-		case result := <-state.results:
-			if result.err != nil {
-				return result.err
-			}
-			if strings.TrimSpace(result.text) == "" {
-				continue
-			}
-			if err := a.injector.Insert(ctx, state.target, result.text); err != nil {
-				return err
-			}
-			sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(grace)
-		}
-	}
-}
-
-func (a *App) pumpAudio(ctx context.Context, state *recordingState) {
-	type startStreamResult struct {
-		stream *openai.Stream
-		err    error
-	}
-
-	resultCh := make(chan startStreamResult, 1)
-	go func() {
-		stream, err := a.transcribe.StartStream(
-			ctx,
-			a.cfg.Recording.SampleRate,
-			a.cfg.Recording.Channels,
-		)
-		resultCh <- startStreamResult{stream: stream, err: err}
-	}()
-
-	var pending [][]int16
-	samples := state.session.Samples()
-	samplesOpen := true
-
-	for {
-		if state.stream == nil {
-			select {
-			case <-ctx.Done():
-				a.finishPump(state, ctx.Err())
-				return
-			case result := <-resultCh:
-				if result.err != nil {
-					a.finishPump(state, fmt.Errorf("start transcription stream: %w", result.err))
-					return
-				}
-				state.stream = result.stream
-				sessionlog.Infof("realtime transcription stream ready")
-				go a.consumeStreamEvents(ctx, state)
-				for _, chunk := range pending {
-					if err := state.stream.Append(ctx, chunk); err != nil {
-						a.finishPump(state, err)
-						return
-					}
-					state.markAudioAppended()
-				}
-				pending = nil
-				if !samplesOpen {
-					a.finishPump(state, nil)
-					return
-				}
-			case chunk, ok := <-samples:
-				if !ok {
-					samplesOpen = false
-					samples = nil
-					continue
-				}
-				if len(chunk) == 0 {
-					continue
-				}
-				pending = append(pending, chunk)
-			}
-			continue
-		}
-
-		select {
-		case <-ctx.Done():
-			a.finishPump(state, ctx.Err())
-			return
-		case chunk, ok := <-samples:
-			if !ok {
-				a.finishPump(state, nil)
-				return
-			}
-			if len(chunk) == 0 {
-				continue
-			}
-			if err := state.stream.Append(ctx, chunk); err != nil {
-				a.finishPump(state, err)
-				return
-			}
-			state.markAudioAppended()
-		}
-	}
-}
-
-func (a *App) finishPump(state *recordingState, err error) {
-	select {
-	case state.pumpDone <- err:
-	default:
-	}
-}
-
-func (a *App) consumeStreamEvents(ctx context.Context, state *recordingState) {
+func (a *App) consumeDictationEvents(ctx context.Context, state *recordingState) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case event, ok := <-state.stream.Events():
+		case event, ok := <-state.dictation.Events():
 			if !ok {
 				return
 			}
-			if err := a.handleStreamEvent(ctx, state, event); err != nil {
-				a.pushStreamResult(state, "", err)
+			if err := a.handleDictationEvent(ctx, state, event); err != nil {
+				sessionlog.Errorf("live dictation event: %v", err)
+				a.showCompletionError(err)
 				return
 			}
 		}
 	}
 }
 
-func (a *App) handleStreamEvent(
+func (a *App) handleDictationEvent(
 	ctx context.Context,
 	state *recordingState,
-	event openai.StreamEvent,
+	event openai.DictationEvent,
 ) error {
 	switch event.Type {
-	case openai.StreamEventPartial:
+	case openai.DictationEventPartial:
 		if a.cfg.Streaming.ShowPartialOverlay {
 			a.overlay.SetListeningText(state.target.WindowClass, event.Text)
 		}
 		return nil
-	case openai.StreamEventFinal:
+	case openai.DictationEventSegment:
 		text := strings.TrimSpace(event.Text)
 		if text == "" {
 			return nil
 		}
-		text = state.formatSegmentText(text)
-		state.clearPendingFinalCommit()
-		if a.cfg.Streaming.Mode == "segment" && state.liveSegmentsEnabled() {
-			if err := a.injector.InsertLive(ctx, state.target, text); err != nil {
-				return err
-			}
-			state.noteDeliveredSegment()
-			a.markLiveInsert()
-			a.overlay.AnimateChunk(text)
-			if a.cfg.Streaming.ShowPartialOverlay {
-				a.overlay.SetListeningText(state.target.WindowClass, text)
-			}
-			sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
-			return nil
+		if err := a.injector.InsertLive(ctx, state.target, event.Text); err != nil {
+			return err
 		}
-		a.pushStreamResult(state, text, nil)
+		a.markLiveInsert()
+		a.overlay.AnimateChunk(event.Text)
+		if a.cfg.Streaming.ShowPartialOverlay {
+			a.overlay.SetListeningText(state.target.WindowClass, event.Text)
+		}
+		sessionlog.Infof("stream segment inserted into window=%s", state.target.WindowID)
 		return nil
-	case openai.StreamEventError:
-		if event.Err != nil {
-			return event.Err
-		}
-		return errors.New("openai stream error")
 	default:
 		return nil
 	}
-}
-
-func (a *App) pushStreamResult(state *recordingState, text string, err error) {
-	select {
-	case state.results <- streamResult{text: text, err: err}:
-	default:
-	}
-}
-
-func (s *recordingState) liveSegmentsEnabled() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.liveSegmentDelivery
-}
-
-func (s *recordingState) setLiveSegmentDelivery(enabled bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.liveSegmentDelivery = enabled
-}
-
-func (s *recordingState) noteDeliveredSegment() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.deliveredSegments++
-}
-
-func (s *recordingState) deliveredSegmentCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.deliveredSegments
-}
-
-func (s *recordingState) markAudioAppended() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pendingFinalCommit = true
-}
-
-func (s *recordingState) clearPendingFinalCommit() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.pendingFinalCommit = false
-}
-
-func (s *recordingState) needsFinalCommit() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.pendingFinalCommit
-}
-
-func (s *recordingState) formatSegmentText(text string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	if s.deliveredSegments == 0 {
-		return text
-	}
-	if strings.HasPrefix(text, " ") || strings.HasPrefix(text, "\n") {
-		return text
-	}
-	if startsWithPunctuation(text) {
-		return text
-	}
-	return " " + text
 }
 
 func (a *App) markLiveInsert() {
@@ -836,16 +529,4 @@ func (a *App) shouldIgnoreSyntheticUp() bool {
 		return false
 	}
 	return time.Since(a.lastLiveInsert) < syntheticReleaseGuard
-}
-
-func startsWithPunctuation(text string) bool {
-	if text == "" {
-		return false
-	}
-	switch text[0] {
-	case '.', ',', ';', ':', '!', '?', ')', ']', '}':
-		return true
-	default:
-		return false
-	}
 }

@@ -406,6 +406,83 @@ func TestReconcileCompletedTranscriptUsesCompletedWhenItIsIndependent(t *testing
 	}
 }
 
+func TestDictationSessionHandleStreamEventEmitsLiveSegment(t *testing.T) {
+	t.Parallel()
+
+	session := &DictationSession{
+		streamingMode: "segment",
+		liveSegments:  true,
+		events:        make(chan DictationEvent, 1),
+		finals:        make(chan finalResult, 1),
+	}
+
+	err := session.handleStreamEvent(StreamEvent{
+		Type: StreamEventFinal,
+		Text: "hello world",
+	})
+	if err != nil {
+		t.Fatalf("handleStreamEvent: %v", err)
+	}
+
+	select {
+	case event := <-session.events:
+		if event.Type != DictationEventSegment {
+			t.Fatalf("event.Type = %q, want segment", event.Type)
+		}
+		if event.Text != "hello world" {
+			t.Fatalf("event.Text = %q, want hello world", event.Text)
+		}
+	default:
+		t.Fatal("expected live segment event")
+	}
+
+	select {
+	case result := <-session.finals:
+		t.Fatalf("unexpected queued final: %+v", result)
+	default:
+	}
+}
+
+func TestDictationSessionHandleStreamEventQueuesFinalAfterLiveDisabled(t *testing.T) {
+	t.Parallel()
+
+	session := &DictationSession{
+		streamingMode: "segment",
+		liveSegments:  false,
+		events:        make(chan DictationEvent, 1),
+		finals:        make(chan finalResult, 1),
+	}
+
+	err := session.handleStreamEvent(StreamEvent{
+		Type: StreamEventFinal,
+		Text: "hello world",
+	})
+	if err != nil {
+		t.Fatalf("handleStreamEvent: %v", err)
+	}
+
+	select {
+	case result := <-session.finals:
+		if result.text != "hello world" {
+			t.Fatalf("result.text = %q, want hello world", result.text)
+		}
+		if result.err != nil {
+			t.Fatalf("result.err = %v, want nil", result.err)
+		}
+	default:
+		t.Fatal("expected queued final result")
+	}
+}
+
+func TestAppendSegmentTextAddsSpaceBetweenChunks(t *testing.T) {
+	t.Parallel()
+
+	got := appendSegmentText("hello", "world")
+	if got != "hello world" {
+		t.Fatalf("appendSegmentText = %q, want hello world", got)
+	}
+}
+
 func TestDialErrorIncludesHTTPDetails(t *testing.T) {
 	t.Parallel()
 

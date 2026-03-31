@@ -54,6 +54,22 @@ type StreamEvent struct {
 	Err  error
 }
 
+type DictationEventType string
+
+const (
+	DictationEventPartial DictationEventType = "partial"
+	DictationEventSegment DictationEventType = "segment"
+)
+
+type DictationEvent struct {
+	Type DictationEventType
+	Text string
+}
+
+type FinalizeResult struct {
+	Text string
+}
+
 type Stream struct {
 	conn         *websocket.Conn
 	encoder      *pcmEncoder
@@ -71,6 +87,26 @@ type Stream struct {
 	partial   string
 	activeID  string
 	partials  map[string]string
+}
+
+type DictationSession struct {
+	streamingMode string
+	writeTimeout  time.Duration
+
+	events   chan DictationEvent
+	pumpDone chan error
+	finals   chan finalResult
+
+	mu                 sync.Mutex
+	stream             *Stream
+	liveSegments       bool
+	pendingFinalCommit bool
+	segmentCount       int
+}
+
+type finalResult struct {
+	text string
+	err  error
 }
 
 type realtimeEvent struct {
@@ -159,6 +195,30 @@ func New(apiKey string, cfg config.OpenAIConfig, streaming config.StreamingConfi
 	}
 }
 
+func (c *Client) StartDictation(
+	ctx context.Context,
+	sampleRate, channels int,
+	samples <-chan []int16,
+) (*DictationSession, error) {
+	if sampleRate <= 0 {
+		return nil, errors.New("recording.sample_rate must be greater than zero")
+	}
+	if channels <= 0 {
+		return nil, errors.New("recording.channels must be greater than zero")
+	}
+
+	session := &DictationSession{
+		streamingMode: c.streaming.Mode,
+		writeTimeout:  c.writeTimeout,
+		events:        make(chan DictationEvent, 16),
+		pumpDone:      make(chan error, 1),
+		finals:        make(chan finalResult, 8),
+		liveSegments:  c.streaming.Mode == "segment",
+	}
+	go session.run(ctx, c, sampleRate, channels, samples)
+	return session, nil
+}
+
 func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*Stream, error) {
 	if sampleRate <= 0 {
 		return nil, errors.New("recording.sample_rate must be greater than zero")
@@ -225,6 +285,388 @@ func (s *Stream) Partial() string {
 
 func (s *Stream) Events() <-chan StreamEvent {
 	return s.events
+}
+
+func (s *DictationSession) Events() <-chan DictationEvent {
+	return s.events
+}
+
+func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error) {
+	s.setLiveSegments(false)
+
+	err := <-s.pumpDone
+	if err != nil {
+		s.closeStream()
+		return FinalizeResult{}, err
+	}
+	defer s.closeStream()
+
+	stream := s.currentStream()
+	if stream == nil {
+		return FinalizeResult{}, errors.New("realtime transcription stream was not established")
+	}
+
+	text, err := s.drainTrailingText(ctx, stream)
+	if err != nil {
+		return FinalizeResult{}, err
+	}
+
+	if !s.needsFinalCommit() && strings.TrimSpace(stream.Partial()) == "" {
+		return FinalizeResult{Text: text}, nil
+	}
+
+	if err := stream.Commit(ctx); err != nil {
+		if s.shouldIgnoreEmptyCommit(err, stream) {
+			return FinalizeResult{Text: text}, nil
+		}
+		return FinalizeResult{}, err
+	}
+
+	finalText, err := s.waitForFinalText(ctx)
+	if err != nil {
+		if s.shouldIgnoreEmptyCommit(err, stream) {
+			return FinalizeResult{Text: text}, nil
+		}
+		return FinalizeResult{}, err
+	}
+
+	return FinalizeResult{Text: appendSegmentText(text, finalText)}, nil
+}
+
+func (s *DictationSession) run(
+	ctx context.Context,
+	client *Client,
+	sampleRate, channels int,
+	samples <-chan []int16,
+) {
+	type startStreamResult struct {
+		stream *Stream
+		err    error
+	}
+
+	resultCh := make(chan startStreamResult, 1)
+	go func() {
+		stream, err := client.StartStream(ctx, sampleRate, channels)
+		resultCh <- startStreamResult{stream: stream, err: err}
+	}()
+
+	var pending [][]int16
+	samplesOpen := true
+
+	for {
+		if s.currentStream() == nil {
+			select {
+			case <-ctx.Done():
+				s.finishPump(ctx.Err())
+				return
+			case result := <-resultCh:
+				if result.err != nil {
+					s.finishPump(fmt.Errorf("start transcription stream: %w", result.err))
+					return
+				}
+				s.setStream(result.stream)
+				sessionlog.Infof("realtime transcription stream ready")
+				go s.consumeStreamEvents(ctx)
+				for _, chunk := range pending {
+					if err := result.stream.Append(ctx, chunk); err != nil {
+						s.finishPump(err)
+						return
+					}
+					s.markAudioAppended()
+				}
+				pending = nil
+				if !samplesOpen {
+					s.finishPump(nil)
+					return
+				}
+			case chunk, ok := <-samples:
+				if !ok {
+					samplesOpen = false
+					samples = nil
+					continue
+				}
+				if len(chunk) == 0 {
+					continue
+				}
+				pending = append(pending, chunk)
+			}
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			s.finishPump(ctx.Err())
+			return
+		case chunk, ok := <-samples:
+			if !ok {
+				s.finishPump(nil)
+				return
+			}
+			if len(chunk) == 0 {
+				continue
+			}
+			stream := s.currentStream()
+			if stream == nil {
+				s.finishPump(errors.New("realtime transcription stream became unavailable"))
+				return
+			}
+			if err := stream.Append(ctx, chunk); err != nil {
+				s.finishPump(err)
+				return
+			}
+			s.markAudioAppended()
+		}
+	}
+}
+
+func (s *DictationSession) consumeStreamEvents(ctx context.Context) {
+	stream := s.currentStream()
+	if stream == nil {
+		return
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-stream.Events():
+			if !ok {
+				return
+			}
+			if err := s.handleStreamEvent(event); err != nil {
+				s.pushFinal("", err)
+				return
+			}
+		}
+	}
+}
+
+func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
+	switch event.Type {
+	case StreamEventPartial:
+		s.emitPartial(event.Text)
+		return nil
+	case StreamEventFinal:
+		text := strings.TrimSpace(event.Text)
+		if text == "" {
+			return nil
+		}
+		s.clearPendingFinalCommit()
+		text = s.formatSegmentText(text)
+		if s.streamingMode == "segment" && s.liveSegmentsEnabled() {
+			s.emitEvent(DictationEvent{Type: DictationEventSegment, Text: text})
+			return nil
+		}
+		s.pushFinal(text, nil)
+		return nil
+	case StreamEventError:
+		if event.Err != nil {
+			return event.Err
+		}
+		return errors.New("openai stream error")
+	default:
+		return nil
+	}
+}
+
+func (s *DictationSession) emitPartial(text string) {
+	select {
+	case s.events <- DictationEvent{Type: DictationEventPartial, Text: text}:
+	default:
+	}
+}
+
+func (s *DictationSession) emitEvent(event DictationEvent) {
+	select {
+	case s.events <- event:
+	default:
+	}
+}
+
+func (s *DictationSession) pushFinal(text string, err error) {
+	select {
+	case s.finals <- finalResult{text: text, err: err}:
+	default:
+	}
+}
+
+func (s *DictationSession) drainTrailingText(ctx context.Context, stream *Stream) (string, error) {
+	if s.streamingMode != "segment" {
+		return "", nil
+	}
+
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+
+	var text string
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-timer.C:
+			return text, nil
+		case result := <-s.finals:
+			if result.err != nil {
+				return "", result.err
+			}
+			if strings.TrimSpace(result.text) == "" {
+				continue
+			}
+			text = appendSegmentText(text, result.text)
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(250 * time.Millisecond)
+			if !s.needsFinalCommit() && strings.TrimSpace(stream.Partial()) == "" {
+				return text, nil
+			}
+		}
+	}
+}
+
+func (s *DictationSession) waitForFinalText(ctx context.Context) (string, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case result := <-s.finals:
+			if result.err != nil {
+				return "", result.err
+			}
+			return strings.TrimSpace(result.text), nil
+		}
+	}
+}
+
+func (s *DictationSession) shouldIgnoreEmptyCommit(err error, stream *Stream) bool {
+	if err == nil || s.streamingMode != "segment" {
+		return false
+	}
+	if !errors.Is(err, ErrInputAudioBufferCommitEmpty) {
+		return false
+	}
+	if s.segmentCountValue() == 0 {
+		return false
+	}
+	return strings.TrimSpace(stream.Partial()) == ""
+}
+
+func (s *DictationSession) currentStream() *Stream {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stream
+}
+
+func (s *DictationSession) setStream(stream *Stream) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stream = stream
+}
+
+func (s *DictationSession) closeStream() {
+	s.mu.Lock()
+	stream := s.stream
+	s.stream = nil
+	s.mu.Unlock()
+
+	if stream != nil {
+		_ = stream.Close()
+	}
+}
+
+func (s *DictationSession) finishPump(err error) {
+	select {
+	case s.pumpDone <- err:
+	default:
+	}
+}
+
+func (s *DictationSession) liveSegmentsEnabled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.liveSegments
+}
+
+func (s *DictationSession) setLiveSegments(enabled bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveSegments = enabled
+}
+
+func (s *DictationSession) markAudioAppended() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingFinalCommit = true
+}
+
+func (s *DictationSession) clearPendingFinalCommit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingFinalCommit = false
+}
+
+func (s *DictationSession) needsFinalCommit() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pendingFinalCommit
+}
+
+func (s *DictationSession) segmentCountValue() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.segmentCount
+}
+
+func (s *DictationSession) formatSegmentText(text string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if s.segmentCount == 0 {
+		s.segmentCount++
+		return text
+	}
+	s.segmentCount++
+	if strings.HasPrefix(text, " ") || strings.HasPrefix(text, "\n") {
+		return text
+	}
+	if startsWithPunctuation(text) {
+		return text
+	}
+	return " " + text
+}
+
+func appendSegmentText(current, next string) string {
+	switch {
+	case strings.TrimSpace(next) == "":
+		return current
+	case current == "":
+		return next
+	case strings.HasPrefix(next, " ") || strings.HasPrefix(next, "\n"):
+		return current + next
+	case startsWithPunctuation(next):
+		return current + next
+	default:
+		return current + " " + next
+	}
+}
+
+func startsWithPunctuation(text string) bool {
+	if text == "" {
+		return false
+	}
+	switch []rune(text)[0] {
+	case '.', ',', ';', ':', '!', '?', ')', ']', '}':
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Stream) Close() error {
