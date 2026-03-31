@@ -113,6 +113,72 @@ func TestSuppressedRealReleaseEmitsUpAfterWindow(t *testing.T) {
 	expectEventWithin(t, r.up, 220*time.Millisecond)
 }
 
+func TestSuppressedReleaseDoesNotEmitUpWhileTrackedKeyStillDown(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+		keyState: func() (map[xproto.Keycode]bool, error) {
+			return map[xproto.Keycode]bool{42: true}, nil
+		},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.SuppressReleasesFor(120 * time.Millisecond)
+	r.handleTrackedRelease(42)
+
+	expectNoEvent(t, r.up, 220*time.Millisecond)
+}
+
+func TestReleaseTimerDoesNotEmitUpWhileTrackedKeyStillDown(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+		keyState: func() (map[xproto.Keycode]bool, error) {
+			return map[xproto.Keycode]bool{42: true}, nil
+		},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.handleTrackedRelease(42)
+
+	expectNoEvent(t, r.up, autoRepeatReleaseDelay+80*time.Millisecond)
+}
+
+func TestSuppressedReleaseEmitsUpAfterTrackedKeysActuallyRelease(t *testing.T) {
+	t.Parallel()
+
+	down := true
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+		keyState: func() (map[xproto.Keycode]bool, error) {
+			return map[xproto.Keycode]bool{42: down}, nil
+		},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.SuppressReleasesFor(120 * time.Millisecond)
+	r.handleTrackedRelease(42)
+	expectNoEvent(t, r.up, 220*time.Millisecond)
+
+	down = false
+	r.handleTrackedRelease(42)
+	expectEventWithin(t, r.up, autoRepeatReleaseDelay+80*time.Millisecond)
+}
+
 func expectEvent(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
 	expectEventWithin(t, ch, time.Second)

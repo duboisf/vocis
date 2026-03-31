@@ -27,22 +27,27 @@ type Injector struct {
 
 	mu           sync.Mutex
 	restoreTimer *time.Timer
+	run          commandRunner
 }
+
+type commandRunner func(ctx context.Context, name string, args ...string) (string, error)
 
 var quotedValuePattern = regexp.MustCompile(`"([^"]+)"`)
 
 func New(cfg config.InsertionConfig) *Injector {
-	return &Injector{cfg: cfg}
+	inj := &Injector{cfg: cfg}
+	inj.run = inj.execTrimmed
+	return inj
 }
 
 func (i *Injector) CaptureTarget(ctx context.Context) (Target, error) {
-	windowID, err := i.runTrimmed(ctx, "xdotool", "getactivewindow")
+	windowID, err := i.run(ctx, "xdotool", "getactivewindow")
 	if err != nil {
 		return Target{}, fmt.Errorf("active window: %w", err)
 	}
 
-	className, _ := i.runTrimmed(ctx, "xdotool", "getwindowclassname", windowID)
-	windowName, _ := i.runTrimmed(ctx, "xdotool", "getwindowname", windowID)
+	className, _ := i.run(ctx, "xdotool", "getwindowclassname", windowID)
+	windowName, _ := i.run(ctx, "xdotool", "getwindowname", windowID)
 	if className == "" || windowName == "" {
 		fallbackClass, fallbackName := i.readWindowMetadata(ctx, windowID)
 		if className == "" {
@@ -66,13 +71,15 @@ func (i *Injector) Insert(ctx context.Context, target Target, text string) error
 	}
 
 	if target.WindowID != "" {
-		if _, err := i.runTrimmed(ctx, "xdotool", "windowactivate", "--sync", target.WindowID); err != nil {
+		if _, err := i.run(ctx, "xdotool", "windowactivate", "--sync", target.WindowID); err != nil {
 			return fmt.Errorf("restore focus: %w", err)
 		}
 		time.Sleep(120 * time.Millisecond)
 	}
 	if err := i.releaseHeldModifiers(ctx); err != nil {
 		sessionlog.Warnf("release held modifiers: %v", err)
+	} else {
+		time.Sleep(25 * time.Millisecond)
 	}
 
 	mode := i.resolveMode(target.WindowClass)
@@ -93,6 +100,11 @@ func (i *Injector) InsertLive(ctx context.Context, target Target, text string) e
 	}
 	if err := i.focusTarget(ctx, target); err != nil {
 		return err
+	}
+	if err := i.releaseHeldModifiers(ctx); err != nil {
+		sessionlog.Warnf("release held modifiers: %v", err)
+	} else {
+		time.Sleep(25 * time.Millisecond)
 	}
 	sessionlog.Infof(
 		"typing live segment into window=%s class=%q",
@@ -137,7 +149,7 @@ func (i *Injector) paste(ctx context.Context, target Target, text string) error 
 
 	args := buildPasteArgs(pasteKey)
 
-	if _, err := i.runTrimmed(ctx, "xdotool", args...); err != nil {
+	if _, err := i.run(ctx, "xdotool", args...); err != nil {
 		return fmt.Errorf("paste text: %w", err)
 	}
 
@@ -163,7 +175,7 @@ func (i *Injector) focusTarget(ctx context.Context, target Target) error {
 	if target.WindowID == "" {
 		return nil
 	}
-	if _, err := i.runTrimmed(ctx, "xdotool", "windowactivate", "--sync", target.WindowID); err != nil {
+	if _, err := i.run(ctx, "xdotool", "windowactivate", "--sync", target.WindowID); err != nil {
 		return fmt.Errorf("restore focus: %w", err)
 	}
 	time.Sleep(120 * time.Millisecond)
@@ -230,14 +242,14 @@ func (i *Injector) typeText(
 	useWindow bool,
 ) error {
 	args := buildTypeArgs(i.cfg.TypeDelayMS, target, text, useWindow)
-	if _, err := i.runTrimmed(ctx, "xdotool", args...); err != nil {
+	if _, err := i.run(ctx, "xdotool", args...); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (i *Injector) releaseHeldModifiers(ctx context.Context) error {
-	if _, err := i.runTrimmed(ctx, "xdotool", buildModifierReleaseArgs()...); err != nil {
+	if _, err := i.run(ctx, "xdotool", buildModifierReleaseArgs()...); err != nil {
 		return err
 	}
 	return nil
@@ -247,7 +259,7 @@ func hasVisibleText(text string) bool {
 	return strings.TrimSpace(text) != ""
 }
 
-func (i *Injector) runTrimmed(ctx context.Context, name string, args ...string) (string, error) {
+func (i *Injector) execTrimmed(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -264,7 +276,7 @@ func (i *Injector) runTrimmed(ctx context.Context, name string, args ...string) 
 }
 
 func (i *Injector) readWindowMetadata(ctx context.Context, windowID string) (className, windowName string) {
-	output, err := i.runTrimmed(ctx, "xprop", "-id", windowID, "WM_CLASS", "WM_NAME")
+	output, err := i.run(ctx, "xprop", "-id", windowID, "WM_CLASS", "WM_NAME")
 	if err != nil {
 		return "", ""
 	}
