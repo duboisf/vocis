@@ -23,9 +23,12 @@ type Registration struct {
 
 	trackedCodes map[xproto.Keycode]struct{}
 
-	mu           sync.Mutex
-	isDown       bool
-	releaseTimer *time.Timer
+	mu                       sync.Mutex
+	isDown                   bool
+	releaseTimer             *time.Timer
+	suppressUntil            time.Time
+	suppressedReleasePending bool
+	suppressTimer            *time.Timer
 }
 
 func Register(shortcut string) (*Registration, error) {
@@ -91,11 +94,39 @@ func (r *Registration) Up() <-chan struct{} {
 	return r.up
 }
 
+func (r *Registration) SuppressReleasesFor(duration time.Duration) {
+	if duration <= 0 {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	until := time.Now().Add(duration)
+	if until.After(r.suppressUntil) {
+		r.suppressUntil = until
+	}
+	r.suppressedReleasePending = false
+
+	wait := time.Until(r.suppressUntil)
+	if wait < 0 {
+		wait = 0
+	}
+	if r.suppressTimer != nil {
+		r.suppressTimer.Stop()
+	}
+	r.suppressTimer = time.AfterFunc(wait, r.finishSuppressedRelease)
+}
+
 func (r *Registration) Close() error {
 	r.mu.Lock()
 	if r.releaseTimer != nil {
 		r.releaseTimer.Stop()
 		r.releaseTimer = nil
+	}
+	if r.suppressTimer != nil {
+		r.suppressTimer.Stop()
+		r.suppressTimer = nil
 	}
 	r.mu.Unlock()
 
@@ -129,6 +160,9 @@ func (r *Registration) handleTrackedPress(code xproto.Keycode) {
 
 	r.mu.Lock()
 	r.cancelReleaseTimerLocked()
+	if r.suppressionActiveLocked() {
+		r.suppressedReleasePending = false
+	}
 	r.mu.Unlock()
 }
 
@@ -142,7 +176,16 @@ func (r *Registration) handleTrackedRelease(code xproto.Keycode) {
 
 func (r *Registration) scheduleRelease() {
 	r.mu.Lock()
-	if !r.isDown || r.releaseTimer != nil {
+	if !r.isDown {
+		r.mu.Unlock()
+		return
+	}
+	if r.suppressionActiveLocked() {
+		r.suppressedReleasePending = true
+		r.mu.Unlock()
+		return
+	}
+	if r.releaseTimer != nil {
 		r.mu.Unlock()
 		return
 	}
@@ -159,6 +202,30 @@ func (r *Registration) cancelReleaseTimerLocked() {
 		r.releaseTimer.Stop()
 		r.releaseTimer = nil
 	}
+}
+
+func (r *Registration) suppressionActiveLocked() bool {
+	return !r.suppressUntil.IsZero() && time.Now().Before(r.suppressUntil)
+}
+
+func (r *Registration) finishSuppressedRelease() {
+	r.mu.Lock()
+	if r.suppressTimer == nil {
+		r.mu.Unlock()
+		return
+	}
+	r.suppressTimer = nil
+	r.suppressUntil = time.Time{}
+	if !r.suppressedReleasePending || !r.isDown {
+		r.suppressedReleasePending = false
+		r.mu.Unlock()
+		return
+	}
+	r.suppressedReleasePending = false
+	r.isDown = false
+	r.mu.Unlock()
+
+	r.emit(r.up)
 }
 
 func (r *Registration) awaitRelease(timer *time.Timer) {

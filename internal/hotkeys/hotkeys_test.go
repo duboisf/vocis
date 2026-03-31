@@ -75,6 +75,44 @@ func TestUntrackedReleaseDoesNotStopHold(t *testing.T) {
 	expectNoEvent(t, r.up, autoRepeatReleaseDelay+40*time.Millisecond)
 }
 
+func TestSuppressedSyntheticReleaseDoesNotEmitUpWhenTrackedPressReturns(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.SuppressReleasesFor(120 * time.Millisecond)
+	r.handleTrackedRelease(42)
+	time.Sleep(40 * time.Millisecond)
+	r.handleTrackedPress(42)
+
+	expectNoEvent(t, r.up, 180*time.Millisecond)
+}
+
+func TestSuppressedRealReleaseEmitsUpAfterWindow(t *testing.T) {
+	t.Parallel()
+
+	r := &Registration{
+		down:         make(chan struct{}, 1),
+		up:           make(chan struct{}, 1),
+		trackedCodes: map[xproto.Keycode]struct{}{42: {}},
+	}
+
+	r.handlePress()
+	expectEvent(t, r.down)
+
+	r.SuppressReleasesFor(120 * time.Millisecond)
+	r.handleTrackedRelease(42)
+
+	expectEventWithin(t, r.up, 220*time.Millisecond)
+}
+
 func expectEvent(t *testing.T, ch <-chan struct{}) {
 	t.Helper()
 	expectEventWithin(t, ch, time.Second)

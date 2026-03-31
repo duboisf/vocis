@@ -52,6 +52,7 @@ func TestHandleDictationEventInsertsSegmentWhileHolding(t *testing.T) {
 		},
 		overlay:  fakeOverlay,
 		injector: fakeInjector,
+		hotkey:   &hotkeyStub{},
 	}
 	state := &recordingState{
 		target: injector.Target{WindowID: "42", WindowClass: "Gedit"},
@@ -72,8 +73,8 @@ func TestHandleDictationEventInsertsSegmentWhileHolding(t *testing.T) {
 	if len(fakeOverlay.animatedChunks) != 1 || fakeOverlay.animatedChunks[0] != "segment one" {
 		t.Fatalf("animatedChunks = %v, want [segment one]", fakeOverlay.animatedChunks)
 	}
-	if !app.suppressSyntheticUp {
-		t.Fatal("expected synthetic release suppression after live insert")
+	if !app.hotkey.(*hotkeyStub).called {
+		t.Fatal("expected hotkey release suppression after live insert")
 	}
 }
 
@@ -107,7 +108,7 @@ func TestHandleDictationEventPreservesFormattedSegmentText(t *testing.T) {
 	}
 }
 
-func TestHandleUpConsumesSyntheticReleaseSuppressionDuringSegmentMode(t *testing.T) {
+func TestHandleUpStopsRecordingDuringSegmentMode(t *testing.T) {
 	t.Parallel()
 
 	app := &App{
@@ -122,43 +123,15 @@ func TestHandleUpConsumesSyntheticReleaseSuppressionDuringSegmentMode(t *testing
 			id:        1,
 			startedAt: time.Now(),
 		},
-		suppressSyntheticUp:      true,
-		suppressSyntheticUpUntil: time.Now().Add(syntheticReleaseGuard),
 	}
 
 	app.handleUp(context.Background())
 
-	if app.recording == nil {
-		t.Fatal("recording stopped, wanted synthetic release to be ignored")
+	if app.recording != nil {
+		t.Fatal("expected recording to stop")
 	}
-	if app.transcribing {
-		t.Fatal("transcribing started, wanted synthetic release to be ignored")
-	}
-	if app.suppressSyntheticUp {
-		t.Fatal("expected suppression to be consumed")
-	}
-}
-
-func TestConsumeSyntheticUpSuppressionExpires(t *testing.T) {
-	t.Parallel()
-
-	app := &App{
-		cfg: config.Config{
-			HotkeyMode: "hold",
-			Streaming: config.StreamingConfig{
-				Mode: "segment",
-			},
-		},
-		recording:                &recordingState{id: 1},
-		suppressSyntheticUp:      true,
-		suppressSyntheticUpUntil: time.Now().Add(-10 * time.Millisecond),
-	}
-
-	if app.consumeSyntheticUpSuppression() {
-		t.Fatal("expected expired synthetic release guard")
-	}
-	if app.suppressSyntheticUp {
-		t.Fatal("expected expired suppression to be cleared")
+	if !app.transcribing {
+		t.Fatal("expected transcribing to start")
 	}
 }
 
@@ -255,4 +228,14 @@ func (i *injectorStub) InsertLive(_ context.Context, _ injector.Target, text str
 	}
 	i.liveInserted = append(i.liveInserted, text)
 	return nil
+}
+
+type hotkeyStub struct {
+	called   bool
+	duration time.Duration
+}
+
+func (h *hotkeyStub) SuppressReleasesFor(duration time.Duration) {
+	h.called = true
+	h.duration = duration
 }

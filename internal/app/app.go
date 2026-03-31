@@ -21,6 +21,7 @@ import (
 type App struct {
 	cfg        config.Config
 	overlay    overlayUI
+	hotkey     hotkeyController
 	recorder   *recorder.Recorder
 	injector   injectorClient
 	transcribe *openai.Client
@@ -31,8 +32,6 @@ type App struct {
 	transcribing             bool
 	dismissCompletionOverlay bool
 	lastToggle               time.Time
-	suppressSyntheticUp      bool
-	suppressSyntheticUpUntil time.Time
 	sequence                 uint64
 }
 
@@ -62,6 +61,10 @@ type injectorClient interface {
 	CaptureTarget(ctx context.Context) (injector.Target, error)
 	Insert(ctx context.Context, target injector.Target, text string) error
 	InsertLive(ctx context.Context, target injector.Target, text string) error
+}
+
+type hotkeyController interface {
+	SuppressReleasesFor(duration time.Duration)
 }
 
 const minToggleInterval = 250 * time.Millisecond
@@ -101,6 +104,7 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	defer hk.Close()
+	a.hotkey = hk
 
 	a.overlay.ShowHint(a.hotkeyHint(hk.Shortcut()))
 
@@ -130,9 +134,6 @@ func (a *App) handleDown(ctx context.Context) {
 
 func (a *App) handleUp(ctx context.Context) {
 	if a.cfg.HotkeyMode != "hold" {
-		return
-	}
-	if a.consumeSyntheticUpSuppression() {
 		return
 	}
 	a.handleStop(ctx)
@@ -499,9 +500,10 @@ func (a *App) handleDictationEvent(
 		if text == "" {
 			return nil
 		}
-		a.armSyntheticUpSuppression()
+		if a.hotkey != nil {
+			a.hotkey.SuppressReleasesFor(syntheticReleaseGuard)
+		}
 		if err := a.injector.InsertLive(ctx, state.target, event.Text); err != nil {
-			a.clearSyntheticUpSuppression()
 			return err
 		}
 		a.overlay.AnimateChunk(event.Text)
@@ -513,40 +515,4 @@ func (a *App) handleDictationEvent(
 	default:
 		return nil
 	}
-}
-
-func (a *App) armSyntheticUpSuppression() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.suppressSyntheticUp = true
-	a.suppressSyntheticUpUntil = time.Now().Add(syntheticReleaseGuard)
-}
-
-func (a *App) clearSyntheticUpSuppression() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.suppressSyntheticUp = false
-	a.suppressSyntheticUpUntil = time.Time{}
-}
-
-func (a *App) consumeSyntheticUpSuppression() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.cfg.HotkeyMode != "hold" || a.cfg.Streaming.Mode != "segment" {
-		return false
-	}
-	if a.recording == nil {
-		return false
-	}
-	if !a.suppressSyntheticUp {
-		return false
-	}
-	if time.Now().After(a.suppressSyntheticUpUntil) {
-		a.suppressSyntheticUp = false
-		a.suppressSyntheticUpUntil = time.Time{}
-		return false
-	}
-	a.suppressSyntheticUp = false
-	a.suppressSyntheticUpUntil = time.Time{}
-	return true
 }
