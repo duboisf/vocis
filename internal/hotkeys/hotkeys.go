@@ -22,6 +22,7 @@ type Registration struct {
 	up       chan struct{}
 
 	trackedCodes map[xproto.Keycode]struct{}
+	keyState     func() (map[xproto.Keycode]bool, error)
 
 	mu                       sync.Mutex
 	isDown                   bool
@@ -55,6 +56,7 @@ func Register(shortcut string) (*Registration, error) {
 		up:           make(chan struct{}, 1),
 		trackedCodes: trackedCodes,
 	}
+	r.keyState = r.queryTrackedKeyState
 
 	err = keybind.KeyPressFun(func(_ *xgbutil.XUtil, _ xevent.KeyPressEvent) {
 		r.handlePress()
@@ -221,6 +223,11 @@ func (r *Registration) finishSuppressedRelease() {
 		r.mu.Unlock()
 		return
 	}
+	if r.anyTrackedKeyDownLocked() {
+		r.suppressedReleasePending = false
+		r.mu.Unlock()
+		return
+	}
 	r.suppressedReleasePending = false
 	r.isDown = false
 	r.mu.Unlock()
@@ -241,6 +248,10 @@ func (r *Registration) awaitRelease(timer *time.Timer) {
 		r.mu.Unlock()
 		return
 	}
+	if r.anyTrackedKeyDownLocked() {
+		r.mu.Unlock()
+		return
+	}
 	r.isDown = false
 	r.mu.Unlock()
 
@@ -257,6 +268,45 @@ func (r *Registration) emit(ch chan struct{}) {
 func (r *Registration) isTrackedKey(code xproto.Keycode) bool {
 	_, ok := r.trackedCodes[code]
 	return ok
+}
+
+func (r *Registration) anyTrackedKeyDownLocked() bool {
+	if r.keyState == nil || len(r.trackedCodes) == 0 {
+		return false
+	}
+
+	state, err := r.keyState()
+	if err != nil {
+		return false
+	}
+	for code := range r.trackedCodes {
+		if state[code] {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Registration) queryTrackedKeyState() (map[xproto.Keycode]bool, error) {
+	reply, err := xproto.QueryKeymap(r.x.Conn()).Reply()
+	if err != nil {
+		return nil, err
+	}
+
+	state := make(map[xproto.Keycode]bool, len(r.trackedCodes))
+	for code := range r.trackedCodes {
+		state[code] = keycodePressed(reply.Keys, code)
+	}
+	return state, nil
+}
+
+func keycodePressed(keys []byte, code xproto.Keycode) bool {
+	index := int(code) / 8
+	if index < 0 || index >= len(keys) {
+		return false
+	}
+	mask := byte(1 << (uint(code) % 8))
+	return keys[index]&mask != 0
 }
 
 func trackedKeycodes(xu *xgbutil.XUtil, shortcut string) (map[xproto.Keycode]struct{}, error) {
