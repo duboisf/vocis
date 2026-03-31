@@ -401,8 +401,8 @@ const (
 	bodyStartY        = 90
 	lineHeight        = 16
 	bodyPadBot        = 12
-	fadeSlideDistance  = 18
-	fadeDuration      = 180 * time.Millisecond
+	fadeSlideDistance  = 28
+	fadeDuration      = 320 * time.Millisecond
 	crossFadeDuration = 80 * time.Millisecond
 	fadeInterval      = 12 * time.Millisecond
 )
@@ -711,10 +711,10 @@ func (o *Overlay) animateFadeIn(token uint64) {
 			o.mu.Unlock()
 			return
 		}
-		t := float64(i) / float64(steps)
-		t = easeOutCubic(t)
-		o.fadeAlpha = t * o.cfg.Opacity
-		o.fadeOffset = int(float64(fadeSlideDistance) * (1 - t))
+		linear := float64(i) / float64(steps)
+		eased := easeOutCubic(linear)
+		o.fadeAlpha = linear * o.cfg.Opacity
+		o.fadeOffset = int(float64(fadeSlideDistance) * (1 - eased))
 		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
 		o.win.Move(o.baseX, o.baseY-o.fadeOffset)
 		o.mu.Unlock()
@@ -741,10 +741,10 @@ func (o *Overlay) animateFadeOut(token uint64) {
 			o.mu.Unlock()
 			return
 		}
-		t := float64(i) / float64(steps)
-		t = easeInCubic(t)
-		o.fadeAlpha = o.cfg.Opacity * (1 - t)
-		o.fadeOffset = int(float64(fadeSlideDistance) * t)
+		linear := float64(i) / float64(steps)
+		eased := easeInCubic(linear)
+		o.fadeAlpha = o.cfg.Opacity * (1 - linear)
+		o.fadeOffset = int(float64(fadeSlideDistance) * eased)
 		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
 		o.win.Move(o.baseX, o.baseY-o.fadeOffset)
 		o.mu.Unlock()
