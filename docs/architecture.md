@@ -19,12 +19,13 @@ Primary runtime packages:
 - [`internal/injector/injector.go`](/home/fred/git/vtt/internal/injector/injector.go): focus restore, clipboard handling, and paste/type insertion
 - [`internal/securestore/keyring.go`](/home/fred/git/vtt/internal/securestore/keyring.go): keyring-backed API key storage
 - [`internal/sessionlog/sessionlog.go`](/home/fred/git/vtt/internal/sessionlog/sessionlog.go): per-session logs on disk
+- [`internal/telemetry/telemetry.go`](/home/fred/git/vtt/internal/telemetry/telemetry.go): OpenTelemetry tracing (OTLP/gRPC exporter, span helpers)
 
 Package relationships:
 
 - `main` loads config and starts `app`
 - `app` owns the runtime lifecycle
-- `app` depends on `hotkeys`, `overlay`, `recorder`, `openai`, `injector`, and `securestore`
+- `app` depends on `hotkeys`, `overlay`, `recorder`, `openai`, `injector`, `securestore`, and `telemetry`
 - `openai.DictationSession` owns realtime stream readiness, early-audio buffering, segmented turn assembly, and release-time finalization
 - `recorder` and `openai` are the audio/transcription edge
 - `injector` is the desktop automation edge

@@ -34,11 +34,12 @@ Why this matters:
 When the hotkey stops dictation:
 
 1. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) stops local recording.
-2. The overlay switches to the "Finishing" state, showing the accumulated text and "Wrapping up the last few words...".
-3. [`internal/openai/transcribe.go`](/home/fred/git/vtt/internal/openai/transcribe.go) finalizes the `DictationSession`.
-4. The dictation session decides whether there is any trailing audio left that still needs a final commit.
-5. If segmented mode already emitted the spoken chunks and there is no trailing audio left, finalization returns without forcing an extra commit.
-6. Otherwise the OpenAI stream is committed and the final transcription event is awaited.
+2. The overlay switches to the "Finishing" state, showing the accumulated text, "Wrapping up the last few words...", and a hint that the user can press the hotkey again to cancel.
+3. The user can press the hotkey during this state to cancel the in-flight transcription.
+4. [`internal/openai/transcribe.go`](/home/fred/git/vtt/internal/openai/transcribe.go) finalizes the `DictationSession`.
+5. The dictation session decides whether there is any trailing audio left that still needs a final commit.
+6. If segmented mode already emitted the spoken chunks and there is no trailing audio left, finalization returns without forcing an extra commit.
+7. Otherwise the OpenAI stream is committed and the final transcription event is awaited. The trailing timeout is proportional to the trailing audio duration (`max(3s, trailing_duration / 5)`).
 7. The accumulated segment text plus any trailing finalize text is combined and inserted as a single paste.
 
 ## Insert
@@ -48,7 +49,7 @@ After transcription completes:
 1. [`internal/injector/injector.go`](/home/fred/git/vtt/internal/injector/injector.go) restores focus to the original window.
 2. The transcript is inserted via clipboard paste or direct typing depending on config.
 3. Terminal windows use the configured terminal paste shortcut.
-4. The overlay shows success and then hides.
+4. The overlay hides immediately.
 
 ## Segmented Streaming
 

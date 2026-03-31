@@ -51,6 +51,7 @@ type Overlay struct {
 
 type viewState struct {
 	title        string
+	titleSuffix  string
 	subtitle     string
 	body         string
 	accent       color.RGBA
@@ -169,19 +170,16 @@ func (o *Overlay) AnimateChunk(text string) {
 }
 
 func (o *Overlay) ShowFinishing(body, shortcut string) {
+	var suffix string
 	if shortcut != "" {
-		hint := fmt.Sprintf("Press %s to cancel", shortcut)
-		if body != "" {
-			body += "\n" + hint
-		} else {
-			body = hint
-		}
+		suffix = fmt.Sprintf(" — press %s to cancel", shortcut)
 	}
 	o.show(viewState{
-		title:    "Finishing",
-		subtitle: "Wrapping up the last few words...",
-		body:     body,
-		accent:   color.RGBA{R: 96, G: 165, B: 250, A: 255},
+		title:       "Finishing",
+		titleSuffix: suffix,
+		subtitle:    "Wrapping up the last few words...",
+		body:        body,
+		accent:      color.RGBA{R: 96, G: 165, B: 250, A: 255},
 	}, false)
 }
 
@@ -339,6 +337,10 @@ func (o *Overlay) drawLocked() {
 	)
 
 	writeText(img, 150, 36, o.state.title, o.state.accent, o.face)
+	if o.state.titleSuffix != "" {
+		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
+		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
+	}
 	writeText(img, 150, 62, o.state.subtitle, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
 
 	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
