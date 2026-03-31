@@ -47,6 +47,16 @@ type Overlay struct {
 	resizeToken  uint64
 	face         font.Face
 	glyphWidth   int
+
+	baseX      int
+	baseY      int
+	fadeToken  uint64
+	fadeAlpha  float64
+	fadeOffset int
+	slidingIn  bool
+
+	crossFadeT     float64
+	crossPrevFrame *image.RGBA
 }
 
 type viewState struct {
@@ -87,6 +97,9 @@ func New(cfg config.OverlayConfig) (*Overlay, error) {
 		height:     cfg.Height,
 		face:       face,
 		glyphWidth: glyphW,
+		baseX:      x,
+		baseY:      y,
+		fadeAlpha:   1,
 		state: viewState{
 			title:    "Ready",
 			subtitle: "Voice typing is armed",
@@ -204,29 +217,29 @@ func (o *Overlay) Close() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	o.animToken++
-	o.animating = false
-	o.partialToken++
-	if o.hide != nil {
-		o.hide.Stop()
-	}
+	o.hideImmediate()
 	if o.win != nil {
 		o.win.Destroy()
 	}
 }
 
 func (o *Overlay) Hide() {
-	o.mu.Lock()
-	defer o.mu.Unlock()
+	o.fadeOut()
+}
 
+func (o *Overlay) hideImmediate() {
 	o.animToken++
 	o.animating = false
 	o.partialToken++
+	o.fadeToken++
+	o.slidingIn = false
 	if o.hide != nil {
 		o.hide.Stop()
 		o.hide = nil
 	}
 	o.visible = false
+	o.fadeAlpha = 0
+	o.fadeOffset = fadeSlideDistance
 	if o.win != nil {
 		o.win.Unmap()
 	}
@@ -234,8 +247,66 @@ func (o *Overlay) Hide() {
 
 func (o *Overlay) show(state viewState, autoHide bool) {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 
+	o.fadeToken++
+	if o.hide != nil {
+		o.hide.Stop()
+		o.hide = nil
+	}
+
+	if o.visible {
+		if o.slidingIn {
+			// Still sliding in — just update state, let the slide continue
+			o.fadeToken--
+			o.applyStateLocked(state)
+			o.drawLocked()
+			if autoHide {
+				duration := time.Duration(o.cfg.AutoHideMillis) * time.Millisecond
+				o.hide = time.AfterFunc(duration, func() {
+					o.fadeOut()
+				})
+			}
+			o.mu.Unlock()
+			return
+		}
+		o.fadeAlpha = o.cfg.Opacity
+		o.fadeOffset = 0
+		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.cfg.Opacity)
+		o.win.Move(o.baseX, o.baseY)
+		token := o.fadeToken
+		o.mu.Unlock()
+		go o.animateCrossFade(token, state, autoHide)
+		return
+	}
+
+	o.applyStateLocked(state)
+	o.fadeAlpha = 0
+	o.fadeOffset = fadeSlideDistance
+	o.win.Move(o.baseX, o.baseY-fadeSlideDistance)
+	_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, 0)
+	o.drawLocked()
+
+	o.visible = true
+	o.slidingIn = true
+	o.win.Map()
+	o.win.Stack(xproto.StackModeAbove)
+	fadeToken := o.fadeToken
+
+	if autoHide {
+		duration := time.Duration(o.cfg.AutoHideMillis) * time.Millisecond
+		o.hide = time.AfterFunc(duration, func() {
+			o.fadeOut()
+		})
+	}
+	if state.idleWave {
+		go o.animateIdleWave(o.animToken)
+	}
+	o.mu.Unlock()
+
+	go o.animateFadeIn(fadeToken)
+}
+
+func (o *Overlay) applyStateLocked(state viewState) {
 	o.animToken++
 	o.animating = false
 	o.partialToken++
@@ -251,13 +322,22 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	} else {
 		o.liveBody = ""
 	}
-	o.drawLocked()
+}
 
-	if !o.visible {
-		o.visible = true
-		o.win.Map()
-		o.win.Stack(xproto.StackModeAbove)
+func (o *Overlay) animateCrossFade(token uint64, state viewState, autoHide bool) {
+	steps := int(crossFadeDuration / fadeInterval)
+	ticker := time.NewTicker(fadeInterval)
+	defer ticker.Stop()
+
+	// Capture previous frame and apply new state
+	o.mu.Lock()
+	if token != o.fadeToken {
+		o.mu.Unlock()
+		return
 	}
+	o.crossPrevFrame = o.captureFrameLocked()
+	o.crossFadeT = 0
+	o.applyStateLocked(state)
 
 	if o.hide != nil {
 		o.hide.Stop()
@@ -266,15 +346,37 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	if autoHide {
 		duration := time.Duration(o.cfg.AutoHideMillis) * time.Millisecond
 		o.hide = time.AfterFunc(duration, func() {
-			o.mu.Lock()
-			defer o.mu.Unlock()
-			o.visible = false
-			o.win.Unmap()
+			o.fadeOut()
 		})
 	}
-	if state.idleWave {
-		go o.animateIdleWave(o.animToken)
+	animToken := o.animToken
+	o.drawLocked()
+	o.mu.Unlock()
+
+	// Animate blend from old to new
+	for i := 1; i <= steps; i++ {
+		<-ticker.C
+		o.mu.Lock()
+		if token != o.fadeToken {
+			o.crossPrevFrame = nil
+			o.mu.Unlock()
+			return
+		}
+		o.crossFadeT = float64(i) / float64(steps)
+		o.drawLocked()
+		o.mu.Unlock()
 	}
+
+	// Clean up
+	o.mu.Lock()
+	if token == o.fadeToken {
+		o.crossPrevFrame = nil
+		o.crossFadeT = 1
+		if state.idleWave {
+			go o.animateIdleWave(animToken)
+		}
+	}
+	o.mu.Unlock()
 }
 
 func (o *Overlay) SetLevel(level float64) {
@@ -296,9 +398,13 @@ func (o *Overlay) SetLevel(level float64) {
 }
 
 const (
-	bodyStartY = 90
-	lineHeight = 16
-	bodyPadBot = 12
+	bodyStartY        = 90
+	lineHeight        = 16
+	bodyPadBot        = 12
+	fadeSlideDistance  = 18
+	fadeDuration      = 180 * time.Millisecond
+	crossFadeDuration = 80 * time.Millisecond
+	fadeInterval      = 12 * time.Millisecond
 )
 
 func (o *Overlay) drawLocked() {
@@ -346,6 +452,10 @@ func (o *Overlay) drawLocked() {
 	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
 	for i, line := range bodyLines {
 		writeText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
+	}
+
+	if o.crossPrevFrame != nil && o.crossFadeT < 1 {
+		blendFrames(img, o.crossPrevFrame, 1-o.crossFadeT)
 	}
 
 	ximg := xgraphics.NewConvert(o.x, img)
@@ -476,6 +586,49 @@ func drawRect(dst *image.RGBA, rect image.Rectangle, clr color.Color) {
 	draw.Draw(dst, rect, &image.Uniform{C: clr}, image.Point{}, draw.Src)
 }
 
+func (o *Overlay) captureFrameLocked() *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, o.cfg.Width, o.height))
+	bg := color.RGBA{R: 12, G: 18, B: 31, A: 255}
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
+
+	drawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
+	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
+	drawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level,
+		o.state.reactiveWave, o.state.idleWave, o.wavePhase)
+
+	writeText(img, 150, 36, o.state.title, o.state.accent, o.face)
+	if o.state.titleSuffix != "" {
+		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
+		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
+	}
+	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
+	for i, line := range strings.Split(o.state.subtitle, "\n") {
+		writeText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
+	}
+	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
+	for i, line := range wrapLines(o.state.body, o.bodyTextLimit()) {
+		writeText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
+	}
+	return img
+}
+
+func blendFrames(dst, src *image.RGBA, alpha float64) {
+	if alpha <= 0 {
+		return
+	}
+	bounds := dst.Bounds().Intersect(src.Bounds())
+	a := uint32(alpha * 255)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			di := dst.PixOffset(x, y)
+			si := src.PixOffset(x, y)
+			dst.Pix[di+0] = uint8((uint32(dst.Pix[di+0])*(255-a) + uint32(src.Pix[si+0])*a) / 255)
+			dst.Pix[di+1] = uint8((uint32(dst.Pix[di+1])*(255-a) + uint32(src.Pix[si+1])*a) / 255)
+			dst.Pix[di+2] = uint8((uint32(dst.Pix[di+2])*(255-a) + uint32(src.Pix[si+2])*a) / 255)
+		}
+	}
+}
+
 const resizeStep = 4
 
 func (o *Overlay) animateResize(token uint64) {
@@ -524,6 +677,96 @@ func (o *Overlay) animateIdleWave(token uint64) {
 		o.drawLocked()
 		o.mu.Unlock()
 	}
+}
+
+func (o *Overlay) fadeOut() {
+	o.mu.Lock()
+	if !o.visible {
+		o.mu.Unlock()
+		return
+	}
+	o.animToken++
+	o.animating = false
+	o.partialToken++
+	if o.hide != nil {
+		o.hide.Stop()
+		o.hide = nil
+	}
+	o.fadeToken++
+	token := o.fadeToken
+	o.mu.Unlock()
+
+	o.animateFadeOut(token)
+}
+
+func (o *Overlay) animateFadeIn(token uint64) {
+	steps := int(fadeDuration / fadeInterval)
+	ticker := time.NewTicker(fadeInterval)
+	defer ticker.Stop()
+
+	for i := 1; i <= steps; i++ {
+		<-ticker.C
+		o.mu.Lock()
+		if token != o.fadeToken || !o.visible {
+			o.mu.Unlock()
+			return
+		}
+		t := float64(i) / float64(steps)
+		t = easeOutCubic(t)
+		o.fadeAlpha = t * o.cfg.Opacity
+		o.fadeOffset = int(float64(fadeSlideDistance) * (1 - t))
+		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
+		o.win.Move(o.baseX, o.baseY-o.fadeOffset)
+		o.mu.Unlock()
+	}
+
+	o.mu.Lock()
+	o.fadeAlpha = o.cfg.Opacity
+	o.fadeOffset = 0
+	o.slidingIn = false
+	_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.cfg.Opacity)
+	o.win.Move(o.baseX, o.baseY)
+	o.mu.Unlock()
+}
+
+func (o *Overlay) animateFadeOut(token uint64) {
+	steps := int(fadeDuration / fadeInterval)
+	ticker := time.NewTicker(fadeInterval)
+	defer ticker.Stop()
+
+	for i := 1; i <= steps; i++ {
+		<-ticker.C
+		o.mu.Lock()
+		if token != o.fadeToken {
+			o.mu.Unlock()
+			return
+		}
+		t := float64(i) / float64(steps)
+		t = easeInCubic(t)
+		o.fadeAlpha = o.cfg.Opacity * (1 - t)
+		o.fadeOffset = int(float64(fadeSlideDistance) * t)
+		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
+		o.win.Move(o.baseX, o.baseY-o.fadeOffset)
+		o.mu.Unlock()
+	}
+
+	o.mu.Lock()
+	o.visible = false
+	o.fadeAlpha = 0
+	o.fadeOffset = fadeSlideDistance
+	if o.win != nil {
+		o.win.Unmap()
+	}
+	o.mu.Unlock()
+}
+
+func easeOutCubic(t float64) float64 {
+	t--
+	return 1 + t*t*t
+}
+
+func easeInCubic(t float64) float64 {
+	return t * t * t
 }
 
 func listeningSubtitle(windowClass string) string {
