@@ -94,9 +94,6 @@ func (i *Injector) InsertLive(ctx context.Context, target Target, text string) e
 	if err := i.focusTarget(ctx, target); err != nil {
 		return err
 	}
-	if err := i.releaseHeldModifiers(ctx); err != nil {
-		sessionlog.Warnf("release held modifiers: %v", err)
-	}
 	sessionlog.Infof(
 		"typing live segment into window=%s class=%q",
 		target.WindowID,
