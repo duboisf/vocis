@@ -264,6 +264,75 @@ func TestShowCompletionSuccessStaysHiddenAfterDismiss(t *testing.T) {
 	}
 }
 
+func TestShouldIgnoreEmptySegmentCommitAfterDeliveredChunk(t *testing.T) {
+	t.Parallel()
+
+	app := &App{
+		cfg: config.Config{
+			Streaming: config.StreamingConfig{
+				Mode: "segment",
+			},
+		},
+	}
+	state := &recordingState{
+		stream: &openai.Stream{},
+	}
+	state.noteDeliveredSegment()
+
+	err := errors.Join(openai.ErrInputAudioBufferCommitEmpty, errors.New("buffer too small"))
+	if !app.shouldIgnoreEmptySegmentCommit(state, err) {
+		t.Fatal("expected empty commit after delivered segment to be ignored")
+	}
+}
+
+func TestRecordingStateNeedsFinalCommitAfterAudioAppend(t *testing.T) {
+	t.Parallel()
+
+	state := &recordingState{}
+	if state.needsFinalCommit() {
+		t.Fatal("expected new state to not need a final commit")
+	}
+
+	state.markAudioAppended()
+	if !state.needsFinalCommit() {
+		t.Fatal("expected appended audio to require a final commit")
+	}
+
+	state.clearPendingFinalCommit()
+	if state.needsFinalCommit() {
+		t.Fatal("expected completed segment to clear pending final commit")
+	}
+}
+
+func TestHandleStreamEventFinalClearsPendingFinalCommit(t *testing.T) {
+	t.Parallel()
+
+	app := &App{
+		cfg: config.Config{
+			Streaming: config.StreamingConfig{Mode: "segment"},
+		},
+		overlay:  &overlayStub{},
+		injector: &injectorStub{},
+	}
+	state := &recordingState{
+		results: make(chan streamResult, 1),
+		target:  injector.Target{WindowID: "42", WindowClass: "Gedit"},
+	}
+	state.markAudioAppended()
+	state.setLiveSegmentDelivery(false)
+
+	err := app.handleStreamEvent(context.Background(), state, openai.StreamEvent{
+		Type: openai.StreamEventFinal,
+		Text: "tail text",
+	})
+	if err != nil {
+		t.Fatalf("handleStreamEvent: %v", err)
+	}
+	if state.needsFinalCommit() {
+		t.Fatal("expected final event to clear pending final commit")
+	}
+}
+
 type overlayStub struct {
 	windowClass    string
 	listeningText  string

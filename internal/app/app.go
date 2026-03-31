@@ -48,6 +48,7 @@ type recordingState struct {
 	mu                  sync.Mutex
 	liveSegmentDelivery bool
 	deliveredSegments   int
+	pendingFinalCommit  bool
 }
 
 type streamResult struct {
@@ -369,6 +370,11 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 			a.showCompletionError(err)
 			return
 		}
+		if !state.needsFinalCommit() && strings.TrimSpace(state.stream.Partial()) == "" {
+			sessionlog.Infof("no trailing audio left to finalize after segmented insert")
+			a.hideCompletionOverlay()
+			return
+		}
 	}
 
 	transcribeCtx, transcribeCancel := context.WithTimeout(
@@ -378,12 +384,22 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	defer transcribeCancel()
 
 	if err := state.stream.Commit(transcribeCtx); err != nil {
+		if a.shouldIgnoreEmptySegmentCommit(state, err) {
+			sessionlog.Infof("no trailing audio left to finalize after segmented insert")
+			a.hideCompletionOverlay()
+			return
+		}
 		sessionlog.Errorf("transcribe audio: %v", err)
 		a.showCompletionError(err)
 		return
 	}
 	text, err := a.waitForStreamResult(transcribeCtx, state)
 	if err != nil {
+		if a.shouldIgnoreEmptySegmentCommit(state, err) {
+			sessionlog.Infof("no trailing audio left to finalize after segmented insert")
+			a.hideCompletionOverlay()
+			return
+		}
 		sessionlog.Errorf("transcribe audio: %v", err)
 		a.showCompletionError(err)
 		return
@@ -481,6 +497,19 @@ func (a *App) completionOverlayDismissed() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.dismissCompletionOverlay
+}
+
+func (a *App) shouldIgnoreEmptySegmentCommit(state *recordingState, err error) bool {
+	if err == nil || a.cfg.Streaming.Mode != "segment" {
+		return false
+	}
+	if !errors.Is(err, openai.ErrInputAudioBufferCommitEmpty) {
+		return false
+	}
+	if state.deliveredSegmentCount() == 0 {
+		return false
+	}
+	return strings.TrimSpace(state.stream.Partial()) == ""
 }
 
 func (a *App) shutdown() error {
@@ -612,6 +641,7 @@ func (a *App) pumpAudio(ctx context.Context, state *recordingState) {
 						a.finishPump(state, err)
 						return
 					}
+					state.markAudioAppended()
 				}
 				pending = nil
 				if !samplesOpen {
@@ -648,6 +678,7 @@ func (a *App) pumpAudio(ctx context.Context, state *recordingState) {
 				a.finishPump(state, err)
 				return
 			}
+			state.markAudioAppended()
 		}
 	}
 }
@@ -693,6 +724,7 @@ func (a *App) handleStreamEvent(
 			return nil
 		}
 		text = state.formatSegmentText(text)
+		state.clearPendingFinalCommit()
 		if a.cfg.Streaming.Mode == "segment" && state.liveSegmentsEnabled() {
 			if err := a.injector.InsertLive(ctx, state.target, text); err != nil {
 				return err
@@ -741,6 +773,30 @@ func (s *recordingState) noteDeliveredSegment() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deliveredSegments++
+}
+
+func (s *recordingState) deliveredSegmentCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deliveredSegments
+}
+
+func (s *recordingState) markAudioAppended() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingFinalCommit = true
+}
+
+func (s *recordingState) clearPendingFinalCommit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pendingFinalCommit = false
+}
+
+func (s *recordingState) needsFinalCommit() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pendingFinalCommit
 }
 
 func (s *recordingState) formatSegmentText(text string) string {

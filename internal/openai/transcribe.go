@@ -29,6 +29,8 @@ const (
 	streamSampleRate = 24000
 )
 
+var ErrInputAudioBufferCommitEmpty = errors.New("input audio buffer commit empty")
+
 type Client struct {
 	cfg          config.OpenAIConfig
 	streaming    config.StreamingConfig
@@ -67,6 +69,8 @@ type Stream struct {
 
 	partialMu sync.Mutex
 	partial   string
+	activeID  string
+	partials  map[string]string
 }
 
 type realtimeEvent struct {
@@ -78,12 +82,14 @@ type realtimeReadyEvent struct {
 }
 
 type transcriptionDeltaEvent struct {
-	Type  string `json:"type"`
-	Delta string `json:"delta"`
+	Type   string `json:"type"`
+	ItemID string `json:"item_id"`
+	Delta  string `json:"delta"`
 }
 
 type transcriptionCompletedEvent struct {
 	Type       string `json:"type"`
+	ItemID     string `json:"item_id"`
 	Transcript string `json:"transcript"`
 }
 
@@ -281,10 +287,7 @@ func (s *Stream) readLoop() {
 		case "conversation.item.input_audio_transcription.delta":
 			var event transcriptionDeltaEvent
 			if err := raw.decode(&event); err == nil && event.Delta != "" {
-				s.partialMu.Lock()
-				s.partial += event.Delta
-				partial := s.partial
-				s.partialMu.Unlock()
+				partial := s.appendPartial(event.ItemID, event.Delta)
 				s.emitPartial(StreamEvent{Type: StreamEventPartial, Text: partial})
 			}
 		case "conversation.item.input_audio_transcription.completed":
@@ -293,11 +296,11 @@ func (s *Stream) readLoop() {
 				s.emit(StreamEvent{Type: StreamEventError, Err: err})
 				return
 			}
-			s.partialMu.Lock()
-			s.partial = ""
-			s.partialMu.Unlock()
-			s.emitPartial(StreamEvent{Type: StreamEventPartial, Text: ""})
-			s.emit(StreamEvent{Type: StreamEventFinal, Text: strings.TrimSpace(event.Transcript)})
+			final, clearPartial := s.completePartial(event.ItemID, event.Transcript)
+			if clearPartial {
+				s.emitPartial(StreamEvent{Type: StreamEventPartial, Text: ""})
+			}
+			s.emit(StreamEvent{Type: StreamEventFinal, Text: final})
 		case "conversation.item.input_audio_transcription.failed":
 			var event transcriptionFailedEvent
 			if err := raw.decode(&event); err != nil {
@@ -338,6 +341,79 @@ func (s *Stream) emitPartial(event StreamEvent) {
 	case s.events <- event:
 	default:
 	}
+}
+
+func (s *Stream) appendPartial(itemID, delta string) string {
+	s.partialMu.Lock()
+	defer s.partialMu.Unlock()
+
+	if itemID == "" {
+		s.partial += delta
+		return s.partial
+	}
+	if s.partials == nil {
+		s.partials = make(map[string]string)
+	}
+	s.partials[itemID] += delta
+	s.activeID = itemID
+	s.partial = s.partials[itemID]
+	return s.partial
+}
+
+func (s *Stream) completePartial(itemID, transcript string) (string, bool) {
+	s.partialMu.Lock()
+	defer s.partialMu.Unlock()
+
+	tracked := s.partial
+	clearPartial := true
+	if itemID != "" {
+		if s.partials != nil {
+			if value, ok := s.partials[itemID]; ok {
+				tracked = value
+				delete(s.partials, itemID)
+			}
+		}
+		clearPartial = s.activeID == itemID || s.activeID == ""
+		if clearPartial {
+			s.activeID = ""
+			s.partial = ""
+		}
+	} else {
+		s.activeID = ""
+		s.partial = ""
+	}
+
+	return reconcileCompletedTranscript(tracked, transcript), clearPartial
+}
+
+func reconcileCompletedTranscript(partial, transcript string) string {
+	partial = strings.TrimSpace(partial)
+	transcript = strings.TrimSpace(transcript)
+
+	switch {
+	case partial == "":
+		return transcript
+	case transcript == "":
+		return partial
+	}
+
+	if normalizedHasSuffix(partial, transcript) && len([]rune(partial)) > len([]rune(transcript)) {
+		return partial
+	}
+	return transcript
+}
+
+func normalizedHasSuffix(full, suffix string) bool {
+	full = normalizeText(full)
+	suffix = normalizeText(suffix)
+	if full == "" || suffix == "" {
+		return false
+	}
+	return strings.HasSuffix(full, suffix)
+}
+
+func normalizeText(text string) string {
+	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
 }
 
 func (c *Client) sessionUpdateEvent() map[string]any {
@@ -468,6 +544,9 @@ func formatRealtimeError(code, message string) error {
 	code = strings.TrimSpace(code)
 	if code == "" {
 		return errors.New(message)
+	}
+	if code == "input_audio_buffer_commit_empty" {
+		return fmt.Errorf("%w: %s", ErrInputAudioBufferCommitEmpty, message)
 	}
 	return fmt.Errorf("%s (%s)", message, code)
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -242,6 +243,119 @@ func TestStartStreamUsesPromptHintWhenConfigured(t *testing.T) {
 	defer stream.Close()
 }
 
+func TestStartStreamKeepsFirstWordWhenCompletedTranscriptIsSuffix(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/realtime/client_secrets":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"expires_at": 123,
+				"value":      "ek_test",
+				"session": map[string]any{
+					"type": "transcription",
+				},
+			})
+		case "/realtime":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Fatalf("upgrade: %v", err)
+			}
+			defer conn.Close()
+
+			if err := conn.WriteJSON(map[string]any{
+				"type":    "session.created",
+				"session": map[string]any{"type": "transcription"},
+			}); err != nil {
+				t.Fatalf("write created event: %v", err)
+			}
+
+			var sessionUpdate map[string]any
+			if err := conn.ReadJSON(&sessionUpdate); err != nil {
+				t.Fatalf("read session update: %v", err)
+			}
+
+			_ = conn.WriteJSON(map[string]any{"type": "session.updated"})
+
+			var appendEvent map[string]any
+			if err := conn.ReadJSON(&appendEvent); err != nil {
+				t.Fatalf("read append event: %v", err)
+			}
+			if got := appendEvent["type"]; got != "input_audio_buffer.append" {
+				t.Fatalf("append type = %v", got)
+			}
+
+			var commitEvent map[string]any
+			if err := conn.ReadJSON(&commitEvent); err != nil {
+				t.Fatalf("read commit event: %v", err)
+			}
+			if got := commitEvent["type"]; got != "input_audio_buffer.commit" {
+				t.Fatalf("commit type = %v", got)
+			}
+
+			if err := conn.WriteJSON(map[string]any{
+				"type":    "conversation.item.input_audio_transcription.delta",
+				"item_id": "item_123",
+				"delta":   "hello world",
+			}); err != nil {
+				t.Fatalf("write delta event: %v", err)
+			}
+			if err := conn.WriteJSON(map[string]any{
+				"type":       "conversation.item.input_audio_transcription.completed",
+				"item_id":    "item_123",
+				"transcript": "world",
+			}); err != nil {
+				t.Fatalf("write completed event: %v", err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.OpenAI.BaseURL = server.URL
+
+	client := New("test-key", cfg.OpenAI, cfg.Streaming)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := client.StartStream(ctx, 24000, 1)
+	if err != nil {
+		t.Fatalf("start stream: %v", err)
+	}
+	defer stream.Close()
+
+	if err := stream.Append(ctx, []int16{1000, -1000, 2000, -2000}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	if err := stream.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	var gotFinal string
+	for gotFinal == "" {
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case event := <-stream.Events():
+			switch event.Type {
+			case StreamEventFinal:
+				gotFinal = event.Text
+			case StreamEventError:
+				t.Fatalf("stream error: %v", event.Err)
+			}
+		}
+	}
+
+	if gotFinal != "hello world" {
+		t.Fatalf("final transcript = %q, want hello world", gotFinal)
+	}
+}
+
 func TestPCMEncoderUpsamplesAndDownmixes(t *testing.T) {
 	t.Parallel()
 
@@ -262,6 +376,33 @@ func TestPCMEncoderUpsamplesAndDownmixes(t *testing.T) {
 				t.Fatalf("sample %d = %d, want %d", i, gotSamples[i], want[i])
 			}
 		}
+	}
+}
+
+func TestFormatRealtimeErrorMarksEmptyCommit(t *testing.T) {
+	t.Parallel()
+
+	err := formatRealtimeError("input_audio_buffer_commit_empty", "buffer too small")
+	if !errors.Is(err, ErrInputAudioBufferCommitEmpty) {
+		t.Fatalf("errors.Is(err, ErrInputAudioBufferCommitEmpty) = false, err=%v", err)
+	}
+}
+
+func TestReconcileCompletedTranscriptKeepsFullTurnWhenCompletedIsSuffix(t *testing.T) {
+	t.Parallel()
+
+	got := reconcileCompletedTranscript("hello world", "world")
+	if got != "hello world" {
+		t.Fatalf("reconcileCompletedTranscript = %q, want hello world", got)
+	}
+}
+
+func TestReconcileCompletedTranscriptUsesCompletedWhenItIsIndependent(t *testing.T) {
+	t.Parallel()
+
+	got := reconcileCompletedTranscript("hello world", "goodbye world")
+	if got != "goodbye world" {
+		t.Fatalf("reconcileCompletedTranscript = %q, want goodbye world", got)
 	}
 }
 
