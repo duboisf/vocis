@@ -50,8 +50,9 @@ func TestPartialPrependsAccumulatedSegments(t *testing.T) {
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
-		target:   injector.Target{WindowClass: "Gedit"},
-		liveText: "Hello world.",
+		target:      injector.Target{WindowClass: "Gedit"},
+		liveText:    "Hello world.",
+		displayText: "Hello world.",
 	}
 
 	_ = app.handleDictationEvent(context.Background(), state, openai.DictationEvent{
@@ -75,8 +76,9 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
-		target:   injector.Target{WindowClass: "Gedit"},
-		liveText: "Hello world.",
+		target:      injector.Target{WindowClass: "Gedit"},
+		liveText:    "Hello world.",
+		displayText: "Hello world.",
 	}
 
 	// Set initial text so we can detect if it gets cleared.
@@ -88,7 +90,7 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 	})
 
 	if fakeOverlay.listeningText != "Hello world." {
-		t.Fatalf("listeningText = %q, want unchanged accumulated text", fakeOverlay.listeningText)
+		t.Fatalf("listeningText = %q, want unchanged display text", fakeOverlay.listeningText)
 	}
 }
 
@@ -121,8 +123,8 @@ func TestHandleDictationEventAccumulatesSegments(t *testing.T) {
 	if state.liveText != "segment one segment two" {
 		t.Fatalf("liveText = %q, want %q", state.liveText, "segment one segment two")
 	}
-	if fakeOverlay.listeningText != "segment one segment two" {
-		t.Fatalf("listeningText = %q, want accumulated text", fakeOverlay.listeningText)
+	if fakeOverlay.listeningText != "segment one\nsegment two" {
+		t.Fatalf("listeningText = %q, want newline-separated display", fakeOverlay.listeningText)
 	}
 }
 

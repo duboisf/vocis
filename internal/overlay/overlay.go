@@ -491,7 +491,7 @@ func listeningBody(text string) string {
 }
 
 func normalizeListeningText(text string) string {
-	return strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
+	return strings.TrimSpace(text)
 }
 
 func displayedListeningText(body string) string {
@@ -553,6 +553,21 @@ func wrapLines(text string, maxChars int) []string {
 		return []string{text}
 	}
 
+	var lines []string
+	for _, paragraph := range strings.Split(text, "\n") {
+		paragraph = strings.TrimSpace(paragraph)
+		if paragraph == "" {
+			continue
+		}
+		lines = append(lines, wrapParagraph(paragraph, maxChars)...)
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return lines
+}
+
+func wrapParagraph(text string, maxChars int) []string {
 	runes := []rune(text)
 	if len(runes) <= maxChars {
 		return []string{text}
@@ -564,7 +579,6 @@ func wrapLines(text string, maxChars int) []string {
 			lines = append(lines, string(runes))
 			break
 		}
-		// Find last space within limit for word wrap.
 		cut := maxChars
 		for i := maxChars; i > maxChars/2; i-- {
 			if runes[i] == ' ' {
@@ -574,7 +588,6 @@ func wrapLines(text string, maxChars int) []string {
 		}
 		lines = append(lines, string(runes[:cut]))
 		runes = runes[cut:]
-		// Skip leading space on next line.
 		if len(runes) > 0 && runes[0] == ' ' {
 			runes = runes[1:]
 		}

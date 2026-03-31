@@ -40,8 +40,9 @@ type recordingState struct {
 	session   *recorder.Session
 	dictation *openai.DictationSession
 	cancel    context.CancelFunc
-	target    injector.Target
-	liveText  string
+	target      injector.Target
+	liveText    string
+	displayText string
 }
 
 type overlayUI interface {
@@ -488,7 +489,7 @@ func (a *App) handleDictationEvent(
 	switch event.Type {
 	case openai.DictationEventPartial:
 		if a.cfg.Streaming.ShowPartialOverlay {
-			display := state.liveText
+			display := state.displayText
 			if partial := strings.TrimSpace(event.Text); partial != "" {
 				if display != "" {
 					display += " "
@@ -506,7 +507,11 @@ func (a *App) handleDictationEvent(
 			return nil
 		}
 		state.liveText += event.Text
-		a.overlay.SetListeningText(state.target.WindowClass, state.liveText)
+		if state.displayText != "" {
+			state.displayText += "\n"
+		}
+		state.displayText += text
+		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
 		sessionlog.Infof("stream segment accumulated: %d chars total", len(state.liveText))
 		return nil
 	default:
