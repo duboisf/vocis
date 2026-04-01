@@ -59,6 +59,13 @@ type Overlay struct {
 
 	crossFadeT     float64
 	crossPrevFrame *image.RGBA
+
+	countdownReset chan countdownPhase
+}
+
+type countdownPhase struct {
+	label   string
+	timeout time.Duration
 }
 
 type viewState struct {
@@ -194,16 +201,34 @@ func (o *Overlay) ShowFinishing(body, shortcut string, timeout time.Duration) {
 	if shortcut != "" {
 		suffix = fmt.Sprintf(" — press %s to cancel", shortcut)
 	}
+
+	phase := countdownPhase{label: "Wrapping up", timeout: timeout}
 	o.show(viewState{
 		title:         "Finishing",
 		titleSuffix:   suffix,
-		subtitle:      finishingSubtitle(timeout),
+		subtitle:      formatCountdown(phase.label, timeout),
 		body:          body,
 		accent:        color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		heartbeatWave: true,
 	}, false)
-	if timeout > 0 {
-		go o.animateCountdown(timeout)
+
+	o.mu.Lock()
+	o.countdownReset = make(chan countdownPhase, 1)
+	o.mu.Unlock()
+
+	go o.animateCountdown(phase)
+}
+
+func (o *Overlay) SetFinishingPhase(label string, timeout time.Duration) {
+	o.mu.Lock()
+	ch := o.countdownReset
+	o.mu.Unlock()
+
+	if ch != nil {
+		select {
+		case ch <- countdownPhase{label: label, timeout: timeout}:
+		default:
+		}
 	}
 }
 
@@ -218,35 +243,45 @@ func (o *Overlay) SetFinishingText(body string) {
 	o.drawLocked()
 }
 
-func finishingSubtitle(remaining time.Duration) string {
-	secs := int(remaining.Seconds())
-	if secs <= 0 {
-		return "Wrapping up and post-processing..."
+func formatCountdown(label string, remaining time.Duration) string {
+	if remaining <= 0 {
+		return label + "..."
 	}
-	return fmt.Sprintf("Wrapping up and post-processing... (%.1fs)", remaining.Seconds())
+	return fmt.Sprintf("%s... (%.1fs)", label, remaining.Seconds())
 }
 
-func (o *Overlay) animateCountdown(timeout time.Duration) {
-	deadline := time.Now().Add(timeout)
+func (o *Overlay) animateCountdown(phase countdownPhase) {
+	deadline := time.Now().Add(phase.timeout)
+	label := phase.label
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		o.mu.Lock()
-		if !o.visible || o.state.title != "Finishing" {
-			o.mu.Unlock()
-			return
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			o.state.subtitle = "Timed out waiting for transcription"
+	o.mu.Lock()
+	resetCh := o.countdownReset
+	o.mu.Unlock()
+
+	for {
+		select {
+		case newPhase := <-resetCh:
+			label = newPhase.label
+			deadline = time.Now().Add(newPhase.timeout)
+		case <-ticker.C:
+			o.mu.Lock()
+			if !o.visible || o.state.title != "Finishing" {
+				o.mu.Unlock()
+				return
+			}
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				o.state.subtitle = fmt.Sprintf("%s — timed out", label)
+				o.drawLocked()
+				o.mu.Unlock()
+				return
+			}
+			o.state.subtitle = formatCountdown(label, remaining)
 			o.drawLocked()
 			o.mu.Unlock()
-			return
 		}
-		o.state.subtitle = finishingSubtitle(remaining)
-		o.drawLocked()
-		o.mu.Unlock()
 	}
 }
 

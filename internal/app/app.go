@@ -61,6 +61,7 @@ type overlayUI interface {
 	SetListeningText(windowClass, text string)
 	AnimateChunk(text string)
 	ShowFinishing(body, shortcut string, timeout time.Duration)
+	SetFinishingPhase(label string, timeout time.Duration)
 	SetFinishingText(body string)
 	ShowSuccess(text string)
 	ShowError(err error)
@@ -458,6 +459,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	a.overlay.SetFinishingText(displayText)
 
 	if a.cfg.PostProcess.Enabled {
+		a.overlay.SetFinishingPhase("Post-processing", 5*time.Second)
 		_, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
 			attribute.Int("input.length", len(text)),
 			attribute.String("model", a.cfg.PostProcess.Model),
