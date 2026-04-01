@@ -523,7 +523,7 @@ func (o *Overlay) SetLevel(level float64) {
 }
 
 const (
-	bodyStartY        = 90
+	bodyStartY        = 98
 	lineHeight        = 16
 	bodyPadBot        = 12
 	fadeSlideDistance  = 28
