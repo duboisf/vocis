@@ -6,7 +6,7 @@ Top-level entry points:
 
 - [`cmd/vocis/main.go`](/home/fred/git/vtt/cmd/vocis/main.go): CLI entrypoint for `serve`, `init`, `doctor`, and key management
 - [`README.md`](/home/fred/git/vtt/README.md): user-facing setup and usage
-- [`config.example.json`](/home/fred/git/vtt/config.example.json): config shape example
+- [`config.example.yaml`](/home/fred/git/vtt/config.example.yaml): config shape example
 
 Primary runtime packages:
 

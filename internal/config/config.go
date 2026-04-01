@@ -1,15 +1,16 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
-const fileName = "config.json"
+const fileName = "config.yaml"
 
 const DefaultPostProcessPrompt = "Clean up this dictated text. " +
 	"Remove filler words (um, uh, like, you know, I mean, sort of, kind of), false starts, and repetitions. " +
@@ -24,70 +25,70 @@ const DefaultPromptHint = "Transcribe naturally for a programmer. " +
 	"Preserve obvious technical terms, acronyms, and capitalization when the audio supports them."
 
 type Config struct {
-	Hotkey         string            `json:"hotkey"`
-	HotkeyMode     string           `json:"hotkey_mode"`
-	LogWindowTitle bool             `json:"log_window_title"`
-	OpenAI         OpenAIConfig     `json:"openai"`
-	Recording      RecordingConfig  `json:"recording"`
-	Streaming      StreamingConfig  `json:"streaming"`
-	Insertion      InsertionConfig  `json:"insertion"`
-	Overlay        OverlayConfig    `json:"overlay"`
-	PostProcess    PostProcessConfig `json:"postprocess"`
-	Telemetry      TelemetryConfig  `json:"telemetry"`
+	Hotkey         string            `yaml:"hotkey"`
+	HotkeyMode     string           `yaml:"hotkey_mode"`
+	LogWindowTitle bool             `yaml:"log_window_title"`
+	OpenAI         OpenAIConfig     `yaml:"openai"`
+	Recording      RecordingConfig  `yaml:"recording"`
+	Streaming      StreamingConfig  `yaml:"streaming"`
+	Insertion      InsertionConfig  `yaml:"insertion"`
+	Overlay        OverlayConfig    `yaml:"overlay"`
+	PostProcess    PostProcessConfig `yaml:"postprocess"`
+	Telemetry      TelemetryConfig  `yaml:"telemetry"`
 }
 
 type PostProcessConfig struct {
-	Enabled bool   `json:"enabled"`
-	Model   string `json:"model"`
-	Prompt  string `json:"prompt"`
+	Enabled bool   `yaml:"enabled"`
+	Model   string `yaml:"model"`
+	Prompt  string `yaml:"prompt"`
 }
 
 type TelemetryConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Endpoint string `json:"endpoint"`
+	Enabled  bool   `yaml:"enabled"`
+	Endpoint string `yaml:"endpoint"`
 }
 
 type OpenAIConfig struct {
-	BaseURL      string   `json:"base_url"`
-	Model        string   `json:"model"`
-	Organization string   `json:"organization"`
-	Project      string   `json:"project"`
-	Language     string   `json:"language"`
-	PromptHint   string   `json:"prompt_hint"`
-	Vocabulary   []string `json:"vocabulary"`
-	RequestLimit int      `json:"request_timeout_seconds"`
+	BaseURL      string   `yaml:"base_url"`
+	Model        string   `yaml:"model"`
+	Organization string   `yaml:"organization"`
+	Project      string   `yaml:"project"`
+	Language     string   `yaml:"language"`
+	PromptHint   string   `yaml:"prompt_hint"`
+	Vocabulary   []string `yaml:"vocabulary"`
+	RequestLimit int      `yaml:"request_timeout_seconds"`
 }
 
 type RecordingConfig struct {
-	Backend            string `json:"backend"`
-	Device             string `json:"device"`
-	SampleRate         int    `json:"sample_rate"`
-	Channels           int    `json:"channels"`
-	MaxDurationSeconds int    `json:"max_duration_seconds"`
+	Backend            string `yaml:"backend"`
+	Device             string `yaml:"device"`
+	SampleRate         int    `yaml:"sample_rate"`
+	Channels           int    `yaml:"channels"`
+	MaxDurationSeconds int    `yaml:"max_duration_seconds"`
 }
 
 type StreamingConfig struct {
-	ShowPartialOverlay bool    `json:"show_partial_overlay"`
-	PrefixPaddingMS    int     `json:"prefix_padding_ms"`
-	SilenceDurationMS  int     `json:"silence_duration_ms"`
-	Threshold          float64 `json:"threshold"`
+	ShowPartialOverlay bool    `yaml:"show_partial_overlay"`
+	PrefixPaddingMS    int     `yaml:"prefix_padding_ms"`
+	SilenceDurationMS  int     `yaml:"silence_duration_ms"`
+	Threshold          float64 `yaml:"threshold"`
 }
 
 type InsertionConfig struct {
-	Mode             string   `json:"mode"`
-	DefaultPasteKey  string   `json:"default_paste_key"`
-	TerminalPasteKey string   `json:"terminal_paste_key"`
-	TypeDelayMS      int      `json:"type_delay_ms"`
-	RestoreClipboard bool     `json:"restore_clipboard"`
-	TerminalClasses  []string `json:"terminal_classes"`
+	Mode             string   `yaml:"mode"`
+	DefaultPasteKey  string   `yaml:"default_paste_key"`
+	TerminalPasteKey string   `yaml:"terminal_paste_key"`
+	TypeDelayMS      int      `yaml:"type_delay_ms"`
+	RestoreClipboard bool     `yaml:"restore_clipboard"`
+	TerminalClasses  []string `yaml:"terminal_classes"`
 }
 
 type OverlayConfig struct {
-	Width          int     `json:"width"`
-	Height         int     `json:"height"`
-	MarginTop      int     `json:"margin_top"`
-	Opacity        float64 `json:"opacity"`
-	AutoHideMillis int     `json:"auto_hide_millis"`
+	Width          int     `yaml:"width"`
+	Height         int     `yaml:"height"`
+	MarginTop      int     `yaml:"margin_top"`
+	Opacity        float64 `yaml:"opacity"`
+	AutoHideMillis int     `yaml:"auto_hide_millis"`
 }
 
 func Default() Config {
@@ -192,13 +193,13 @@ func Load() (Config, string, error) {
 		}
 	}
 
-	bytes, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, "", err
 	}
 
 	cfg := Default()
-	if err := json.Unmarshal(bytes, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, "", fmt.Errorf("decode %s: %w", path, err)
 	}
 
@@ -210,12 +211,11 @@ func Save(path string, cfg Config) error {
 		return err
 	}
 
-	bytes, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	bytes = append(bytes, '\n')
-	return os.WriteFile(path, bytes, 0o600)
+	return os.WriteFile(path, data, 0o600)
 }
 
 func (c Config) Validate() error {

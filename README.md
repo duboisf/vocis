@@ -19,7 +19,7 @@ It was very much vibe-coded from scratch to... scratch an itch.
 - Overlay appears immediately on hotkey press
 - Local recording starts before target-window lookup finishes
 - Early audio is buffered locally until the OpenAI realtime session is ready
-- XDG config file at `~/.config/vocis/config.json`
+- XDG config file at `~/.config/vocis/config.yaml`
 - OpenAI API keys stored in the system keyring by default
 - Focus restore and paste back into the app that was active when recording
 - Live segmented transcription appears in the overlay as you speak, pasted once on release
@@ -62,8 +62,8 @@ Expected startup behavior on key-down:
 
 ## Config
 
-The first run creates `~/.config/vocis/config.json`. A sample lives at
-`config.example.json`.
+The first run creates `~/.config/vocis/config.yaml`. A sample lives at
+`config.example.yaml`.
 
 Important fields:
 
