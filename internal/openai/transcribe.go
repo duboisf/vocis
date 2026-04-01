@@ -369,7 +369,7 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 		attribute.Int("segment_count", s.segmentCountValue()),
 	)
 	finalText, err := s.waitForFinal(ctx)
-	if err != nil && s.canSkipTrailingTimeout(err, stream) {
+	if err != nil && (s.canSkipTrailingTimeout(err, stream) || s.canSkipEmptyCommit(err, stream)) {
 		waitSpan.SetAttributes(attribute.Bool("trailing.skipped", true))
 		telemetry.EndSpan(waitSpan, nil)
 		return FinalizeResult{Text: text}, nil

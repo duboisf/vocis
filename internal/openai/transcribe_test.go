@@ -787,6 +787,120 @@ func TestFinalizeReceivesTrailingSegmentAfterSamplesClose(t *testing.T) {
 	}
 }
 
+func TestFinalizeSucceedsWhenCommitEmptyArrivesViaFinals(t *testing.T) {
+	t.Parallel()
+
+	// Simulates: all audio consumed by live segments, then Commit succeeds
+	// (WebSocket write ok) but the server responds with "buffer empty" error
+	// via stream events. Finalize should return the accumulated segment text,
+	// not an error.
+
+	upgrader := websocket.Upgrader{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/realtime/client_secrets":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"expires_at": 123,
+				"value":      "ek_test",
+				"session":    map[string]any{"type": "transcription"},
+			})
+		case "/realtime":
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Fatalf("upgrade: %v", err)
+			}
+			defer conn.Close()
+
+			_ = conn.WriteJSON(map[string]any{
+				"type":    "session.created",
+				"session": map[string]any{"type": "transcription"},
+			})
+			var sessionUpdate map[string]any
+			_ = conn.ReadJSON(&sessionUpdate)
+			_ = conn.WriteJSON(map[string]any{"type": "session.updated"})
+
+			// Read audio appends and the final commit.
+			// Emit a segment on the first append only (simulating server VAD
+			// consuming that audio). Later appends are trailing audio that
+			// the server hasn't processed into a segment yet.
+			segmentSent := false
+			var gotCommit bool
+			for !gotCommit {
+				var msg map[string]any
+				if err := conn.ReadJSON(&msg); err != nil {
+					return
+				}
+				switch msg["type"] {
+				case "input_audio_buffer.append":
+					if !segmentSent {
+						segmentSent = true
+						_ = conn.WriteJSON(map[string]any{
+							"type":       "conversation.item.input_audio_transcription.completed",
+							"transcript": "all segments delivered",
+						})
+					}
+				case "input_audio_buffer.commit":
+					gotCommit = true
+				}
+			}
+
+			// Server responds: buffer empty (all audio already consumed).
+			_ = conn.WriteJSON(map[string]any{
+				"type": "error",
+				"error": map[string]any{
+					"code":    "input_audio_buffer_commit_empty",
+					"message": "buffer too small",
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Default()
+	cfg.OpenAI.BaseURL = server.URL
+
+	client := New("test-key", cfg.OpenAI, cfg.Streaming)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	samples := make(chan []int16, 4)
+	samples <- []int16{1000, -1000, 2000, -2000}
+
+	dictation, err := client.StartDictation(ctx, 24000, 1, samples)
+	if err != nil {
+		t.Fatalf("start dictation: %v", err)
+	}
+
+	// Drain live segment events.
+	go func() {
+		for range dictation.Events() {
+		}
+	}()
+
+	// Let stream connect and segment arrive.
+	time.Sleep(300 * time.Millisecond)
+
+	// Send more audio AFTER the segment cleared the trailing flag.
+	// This keeps hasTrailing=true, matching the production scenario
+	// where audio chunks continue arriving after the last segment.
+	samples <- []int16{500, -500}
+	time.Sleep(50 * time.Millisecond)
+
+	// Close samples — simulates user releasing hotkey.
+	close(samples)
+
+	_, err = dictation.Finalize(ctx)
+	if err != nil {
+		t.Fatalf("finalize should succeed (empty commit is expected), got error: %v", err)
+	}
+	// Live segment text is accumulated by the app layer via Events(),
+	// not returned by Finalize. Finalize just needs to not error out.
+}
+
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
