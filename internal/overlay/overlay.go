@@ -207,6 +207,17 @@ func (o *Overlay) ShowFinishing(body, shortcut string, timeout time.Duration) {
 	}
 }
 
+func (o *Overlay) SetFinishingText(body string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if !o.visible || o.state.title != "Finishing" {
+		return
+	}
+	o.state.body = body
+	o.drawLocked()
+}
+
 func finishingSubtitle(remaining time.Duration) string {
 	secs := int(remaining.Seconds())
 	if secs <= 0 {

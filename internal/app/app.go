@@ -60,6 +60,7 @@ type overlayUI interface {
 	SetListeningText(windowClass, text string)
 	AnimateChunk(text string)
 	ShowFinishing(body, shortcut string, timeout time.Duration)
+	SetFinishingText(body string)
 	ShowSuccess(text string)
 	ShowError(err error)
 	SetLevel(level float64)
@@ -428,6 +429,8 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.showCompletionError(errors.New("transcription came back empty"))
 		return
 	}
+
+	a.overlay.SetFinishingText(text)
 
 	if a.cfg.PostProcess.Enabled {
 		_, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
