@@ -60,7 +60,8 @@ type Overlay struct {
 	crossFadeT     float64
 	crossPrevFrame *image.RGBA
 
-	countdownReset chan countdownPhase
+	countdownReset  chan countdownPhase
+	completedPhases []string
 }
 
 type countdownPhase struct {
@@ -202,21 +203,21 @@ func (o *Overlay) ShowFinishing(body, shortcut string, timeout time.Duration) {
 		suffix = fmt.Sprintf(" — press %s to cancel", shortcut)
 	}
 
-	phase := countdownPhase{label: "Wrapping up", timeout: timeout}
 	o.show(viewState{
 		title:         "Finishing",
 		titleSuffix:   suffix,
-		subtitle:      formatCountdown(phase.label, timeout),
+		subtitle:      formatCountdown("Wrapping up", timeout),
 		body:          body,
 		accent:        color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		heartbeatWave: true,
 	}, false)
 
 	o.mu.Lock()
+	o.completedPhases = nil
 	o.countdownReset = make(chan countdownPhase, 1)
 	o.mu.Unlock()
 
-	go o.animateCountdown(phase)
+	go o.animateCountdown(countdownPhase{label: "Wrapping up", timeout: timeout})
 }
 
 func (o *Overlay) SetFinishingPhase(label string, timeout time.Duration) {
@@ -243,6 +244,15 @@ func (o *Overlay) SetFinishingText(body string) {
 	o.drawLocked()
 }
 
+func (o *Overlay) buildSubtitle(activeLine string) string {
+	var lines []string
+	for _, done := range o.completedPhases {
+		lines = append(lines, done+" — done")
+	}
+	lines = append(lines, activeLine)
+	return strings.Join(lines, "\n")
+}
+
 func formatCountdown(label string, remaining time.Duration) string {
 	if remaining <= 0 {
 		return label + "..."
@@ -263,8 +273,13 @@ func (o *Overlay) animateCountdown(phase countdownPhase) {
 	for {
 		select {
 		case newPhase := <-resetCh:
+			o.mu.Lock()
+			o.completedPhases = append(o.completedPhases, label)
 			label = newPhase.label
 			deadline = time.Now().Add(newPhase.timeout)
+			o.state.subtitle = o.buildSubtitle(formatCountdown(label, newPhase.timeout))
+			o.drawLocked()
+			o.mu.Unlock()
 		case <-ticker.C:
 			o.mu.Lock()
 			if !o.visible || o.state.title != "Finishing" {
@@ -273,12 +288,12 @@ func (o *Overlay) animateCountdown(phase countdownPhase) {
 			}
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				o.state.subtitle = fmt.Sprintf("%s — timed out", label)
+				o.state.subtitle = o.buildSubtitle(label + " — timed out")
 				o.drawLocked()
 				o.mu.Unlock()
 				return
 			}
-			o.state.subtitle = formatCountdown(label, remaining)
+			o.state.subtitle = o.buildSubtitle(formatCountdown(label, remaining))
 			o.drawLocked()
 			o.mu.Unlock()
 		}
@@ -559,7 +574,10 @@ func (o *Overlay) drawLocked() {
 		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
 		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.smallFace)
 	}
-	writeText(img, 150, 62, o.state.subtitle, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
+	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
+	for i, line := range strings.Split(o.state.subtitle, "\n") {
+		writeText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
+	}
 
 	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
 	for i, line := range bodyLines {
