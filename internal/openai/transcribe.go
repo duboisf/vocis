@@ -307,7 +307,13 @@ func (s *DictationSession) Events() <-chan DictationEvent {
 func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error) {
 	s.setLiveSegments(false)
 
-	err := <-s.pumpDone
+	var err error
+	select {
+	case err = <-s.pumpDone:
+	case <-ctx.Done():
+		s.closeStream()
+		return FinalizeResult{}, ctx.Err()
+	}
 	if err != nil {
 		s.closeStream()
 		return FinalizeResult{}, err
