@@ -559,7 +559,23 @@ func (a *App) showCompletionError(err error) {
 		a.overlay.Hide()
 		return
 	}
-	a.overlay.ShowError(err)
+	a.overlay.ShowError(userFacingError(err))
+}
+
+func userFacingError(err error) error {
+	msg := err.Error()
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return errors.New("Timed out waiting for transcription")
+	case strings.Contains(msg, "i/o timeout"):
+		return errors.New("Could not connect to OpenAI (network timeout)")
+	case strings.Contains(msg, "stream was not established"):
+		return errors.New("Could not connect to OpenAI")
+	case strings.Contains(msg, "transcription came back empty"):
+		return errors.New("No speech detected")
+	default:
+		return err
+	}
 }
 
 func (a *App) hideCompletionOverlay() {
