@@ -67,6 +67,7 @@ type overlayUI interface {
 	SetFinishingText(body string)
 	ShowSuccess(text string)
 	ShowError(err error)
+	ShowWarning(subtitle string)
 	SetLevel(level float64)
 	Hide()
 	Close()
@@ -463,16 +464,21 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	}
 	a.overlay.SetFinishingText(displayText)
 
+	postProcessSkipped := false
 	if a.cfg.PostProcess.Enabled {
 		a.overlay.SetFinishingPhase("Post-processing", 5*time.Second)
 		_, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
 			attribute.Int("input.length", len(text)),
 			attribute.String("model", a.cfg.PostProcess.Model),
 		)
-		cleaned := a.transcribe.PostProcess(spanCtx, a.cfg.PostProcess, text)
-		ppSpan.SetAttributes(attribute.Int("output.length", len(cleaned)))
+		result := a.transcribe.PostProcess(spanCtx, a.cfg.PostProcess, text)
+		ppSpan.SetAttributes(
+			attribute.Int("output.length", len(result.Text)),
+			attribute.Bool("skipped", result.Skipped),
+		)
 		telemetry.EndSpan(ppSpan, nil)
-		text = cleaned
+		text = result.Text
+		postProcessSkipped = result.Skipped
 	}
 
 	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vocis.inject",
@@ -488,7 +494,11 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		return
 	}
 	sessionlog.Infof("transcript inserted into window=%s", state.target.WindowID)
-	a.showCompletionSuccess(text)
+	if postProcessSkipped {
+		a.overlay.ShowWarning("Raw text pasted — cleanup was skipped due to a timeout or error")
+	} else {
+		a.showCompletionSuccess(text)
+	}
 }
 
 func (a *App) monitorRecordingLevel(ctx context.Context, id uint64, session *recorder.Session) {

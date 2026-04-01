@@ -211,7 +211,8 @@ func (o *overlayStub) SetFinishingText(string)                    {}
 func (o *overlayStub) ShowSuccess(text string) {
 	o.successText = text
 }
-func (o *overlayStub) ShowError(error)  {}
+func (o *overlayStub) ShowError(error)    {}
+func (o *overlayStub) ShowWarning(string) {}
 func (o *overlayStub) SetLevel(float64) {}
 func (o *overlayStub) Hide() {
 	o.hideCalls++

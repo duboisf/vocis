@@ -309,6 +309,14 @@ func (o *Overlay) ShowSuccess(text string) {
 	}, true)
 }
 
+func (o *Overlay) ShowWarning(subtitle string) {
+	o.show(viewState{
+		title:    "Heads up",
+		subtitle: subtitle,
+		accent:   color.RGBA{R: 251, G: 191, B: 36, A: 255},
+	}, true)
+}
+
 func (o *Overlay) ShowError(err error) {
 	o.show(viewState{
 		title:    "Error",
