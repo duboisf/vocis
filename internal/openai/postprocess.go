@@ -24,6 +24,11 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 		return PostProcessResult{Text: text}
 	}
 
+	if len(strings.Fields(text)) < 10 {
+		sessionlog.Infof("postprocess skipped (fewer than 10 words)")
+		return PostProcessResult{Text: text}
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, postProcessTimeout)
 	defer cancel()
 
