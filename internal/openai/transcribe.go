@@ -853,7 +853,11 @@ func (s *Stream) markReady(err error) {
 }
 
 func (s *Stream) emit(event StreamEvent) {
-	s.events <- event
+	select {
+	case s.events <- event:
+	default:
+		sessionlog.Warnf("stream event dropped type=%s (channel full)", event.Type)
+	}
 }
 
 func (s *Stream) emitPartial(event StreamEvent) {
