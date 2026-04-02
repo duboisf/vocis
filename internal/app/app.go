@@ -37,6 +37,7 @@ type App struct {
 	recording                *recordingState
 	transcribing             bool
 	transcribeCancel         context.CancelFunc
+	sessionCancel            context.CancelFunc
 	dismissCompletionOverlay bool
 	lastToggle               time.Time
 	sequence                 uint64
@@ -247,6 +248,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	}
 
 	recordCtx, cancel := context.WithCancel(spanCtx)
+	a.sessionCancel = cancel
 
 	a.sequence++
 	state := &recordingState{
@@ -554,6 +556,9 @@ func (a *App) dismissInFlightOverlay() bool {
 	a.dismissCompletionOverlay = true
 	if a.transcribeCancel != nil {
 		a.transcribeCancel()
+	}
+	if a.sessionCancel != nil {
+		a.sessionCancel()
 	}
 	a.overlay.Hide()
 	sessionlog.Infof("transcription cancelled by user")
