@@ -30,7 +30,7 @@ import (
 const (
 	defaultBaseURL   = "https://api.openai.com/v1"
 	streamSampleRate = 24000
-	connectTimeout   = 5 * time.Second
+	connectTimeout   = 2 * time.Second
 )
 
 var ErrInputAudioBufferCommitEmpty = errors.New("input audio buffer commit empty")
