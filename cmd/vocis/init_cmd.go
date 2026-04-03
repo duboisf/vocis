@@ -58,7 +58,7 @@ func runInit(force bool) error {
 	fmt.Printf("wrote new defaults to %s\n", newPath)
 	fmt.Printf("opening diff: %s (current) vs %s (new defaults)\n", path, newPath)
 
-	cmd := exec.Command("nvim", "-d", path, newPath)
+	cmd := exec.Command("nvim", "-d", "-c", "set diffopt+=iwhite", path, newPath)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
