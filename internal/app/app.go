@@ -514,7 +514,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 
 	postProcessSkipped := false
 	if a.cfg.PostProcess.Enabled {
-		a.overlay.SetFinishingPhase("Post-processing", 5*time.Second)
+		a.overlay.SetFinishingPhase(a.cfg.Overlay.Finishing.PostProcessing, 5*time.Second)
 		_, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
 			attribute.Int("input.length", len(text)),
 			attribute.String("model", a.cfg.PostProcess.Model),
@@ -565,7 +565,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		}
 	}
 	if postProcessSkipped {
-		a.overlay.ShowWarning("Raw text pasted — cleanup was skipped due to a timeout or error")
+		a.overlay.ShowWarning(a.cfg.Overlay.Warning.PostprocessSkipped)
 	} else {
 		a.showCompletionSuccess(text)
 	}
@@ -629,7 +629,7 @@ func (a *App) dismissInFlightOverlay() bool {
 		a.sessionCancel()
 	}
 	a.transcribing = false
-	a.overlay.ShowWarning("Cancelled — transcription discarded")
+	a.overlay.ShowWarning(a.cfg.Overlay.Warning.Cancelled)
 	sessionlog.Infof("transcription cancelled by user")
 	return true
 }
@@ -644,7 +644,7 @@ func (a *App) showCompletionError(err error) {
 		return
 	}
 	if isNoSpeechError(err) {
-		a.overlay.ShowWarning("No speech detected")
+		a.overlay.ShowWarning(a.cfg.Overlay.Warning.NoSpeech)
 		return
 	}
 	a.overlay.ShowError(userFacingError(err))

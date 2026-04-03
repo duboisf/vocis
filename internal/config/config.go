@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"vocis/internal/sessionlog"
 )
 
 const fileName = "config.yaml"
@@ -88,13 +90,59 @@ type InsertionConfig struct {
 }
 
 type OverlayConfig struct {
-	Width          int     `yaml:"width"`
-	Height         int     `yaml:"height"`
-	MarginTop      int     `yaml:"margin_top"`
-	Opacity        float64 `yaml:"opacity"`
-	AutoHideMillis int     `yaml:"auto_hide_millis"`
-	Font           string  `yaml:"font"`
-	FontSize       float64 `yaml:"font_size"`
+	Width          int             `yaml:"width"`
+	Height         int             `yaml:"height"`
+	MarginTop      int             `yaml:"margin_top"`
+	Opacity        float64         `yaml:"opacity"`
+	AutoHideMillis int             `yaml:"auto_hide_millis"`
+	Font           string          `yaml:"font"`
+	FontSize       float64         `yaml:"font_size"`
+	Branding       string          `yaml:"branding"`
+	Ready          OverlayReady    `yaml:"ready"`
+	Listening      OverlayListen   `yaml:"listening"`
+	Finishing      OverlayFinish   `yaml:"finishing"`
+	Success        OverlaySuccess  `yaml:"success"`
+	Error          OverlayError    `yaml:"error"`
+	Warning        OverlayWarning  `yaml:"warning"`
+}
+
+type OverlayReady struct {
+	Title    string `yaml:"title"`
+	Subtitle string `yaml:"subtitle"`
+}
+
+type OverlayListen struct {
+	Title        string `yaml:"title"`
+	Suffix       string `yaml:"suffix"`
+	SubmitHint   string `yaml:"submit_hint"`
+	Connecting   string `yaml:"connecting"`
+	Reconnecting string `yaml:"reconnecting"`
+	Connected    string `yaml:"connected"`
+}
+
+type OverlayFinish struct {
+	Title          string `yaml:"title"`
+	CancelHint     string `yaml:"cancel_hint"`
+	WrappingUp     string `yaml:"wrapping_up"`
+	PostProcessing string `yaml:"post_processing"`
+	TimedOut       string `yaml:"timed_out"`
+	PhaseDone      string `yaml:"phase_done"`
+}
+
+type OverlaySuccess struct {
+	Title    string `yaml:"title"`
+	Subtitle string `yaml:"subtitle"`
+}
+
+type OverlayError struct {
+	Title string `yaml:"title"`
+}
+
+type OverlayWarning struct {
+	Title              string `yaml:"title"`
+	NoSpeech           string `yaml:"no_speech"`
+	Cancelled          string `yaml:"cancelled"`
+	PostprocessSkipped string `yaml:"postprocess_skipped"`
 }
 
 func Default() Config {
@@ -150,6 +198,40 @@ func Default() Config {
 			MarginTop:      44,
 			Opacity:        0.94,
 			AutoHideMillis: 1800,
+			Branding:       "Vocis",
+			Ready: OverlayReady{
+				Title:    "Ready",
+				Subtitle: "Voice typing is armed",
+			},
+			Listening: OverlayListen{
+				Title:        "Listening",
+				Suffix:       "— release to paste",
+				SubmitHint:   "⏎ submit",
+				Connecting:   "○ Connecting...",
+				Reconnecting: "○ Reconnecting... (attempt {attempt}/{max})",
+				Connected:    "● Ready to type into {window}",
+			},
+			Finishing: OverlayFinish{
+				Title:          "Finishing",
+				CancelHint:     "— press {shortcut} to cancel",
+				WrappingUp:     "Wrapping up",
+				PostProcessing: "Post-processing",
+				TimedOut:       "{phase} — timed out",
+				PhaseDone:      "done",
+			},
+			Success: OverlaySuccess{
+				Title:    "Typed",
+				Subtitle: "Transcription inserted into your active app",
+			},
+			Error: OverlayError{
+				Title: "Error",
+			},
+			Warning: OverlayWarning{
+				Title:              "Heads up",
+				NoSpeech:           "No speech detected",
+				Cancelled:          "Cancelled — transcription discarded",
+				PostprocessSkipped: "Raw text pasted — cleanup was skipped due to a timeout or error",
+			},
 		},
 		PostProcess: PostProcessConfig{
 			Enabled:      true,
@@ -295,5 +377,25 @@ func (c Config) Validate() error {
 		return errors.New("overlay dimensions are too small")
 	}
 
+	c.validateOverlayTemplates()
+
 	return nil
+}
+
+func (c Config) validateOverlayTemplates() {
+	templates := []struct {
+		key      string
+		template string
+		expected []string
+	}{
+		{"overlay.listening.connected", c.Overlay.Listening.Connected, []string{"window"}},
+		{"overlay.listening.reconnecting", c.Overlay.Listening.Reconnecting, []string{"attempt", "max"}},
+		{"overlay.finishing.cancel_hint", c.Overlay.Finishing.CancelHint, []string{"shortcut"}},
+		{"overlay.finishing.timed_out", c.Overlay.Finishing.TimedOut, []string{"phase"}},
+	}
+	for _, tt := range templates {
+		for _, w := range ValidateTemplate(tt.template, tt.expected) {
+			sessionlog.Warnf("config %s: %s", tt.key, w)
+		}
+	}
 }

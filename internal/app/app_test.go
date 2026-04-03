@@ -155,10 +155,10 @@ func TestHandleDownDismissesOldOverlayWhileTranscribing(t *testing.T) {
 	t.Parallel()
 
 	fakeOverlay := &overlayStub{}
+	cfg := config.Default()
+	cfg.HotkeyMode = "hold"
 	app := &App{
-		cfg: config.Config{
-			HotkeyMode: "hold",
-		},
+		cfg:          cfg,
 		overlay:      fakeOverlay,
 		transcribing: true,
 	}

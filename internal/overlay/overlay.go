@@ -128,8 +128,8 @@ func New(cfg config.OverlayConfig) (*Overlay, error) {
 		baseY:      y,
 		fadeAlpha:   1,
 		state: viewState{
-			title:    "Ready",
-			subtitle: "Voice typing is armed",
+			title:    cfg.Ready.Title,
+			subtitle: cfg.Ready.Subtitle,
 			body:     "",
 			accent:   color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		},
@@ -138,8 +138,8 @@ func New(cfg config.OverlayConfig) (*Overlay, error) {
 
 func (o *Overlay) ShowHint(text string) {
 	o.show(viewState{
-		title:    "Ready",
-		subtitle: "Voice typing is armed",
+		title:    o.cfg.Ready.Title,
+		subtitle: o.cfg.Ready.Subtitle,
 		body:     text,
 		accent:   color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		idleWave: true,
@@ -149,9 +149,9 @@ func (o *Overlay) ShowHint(text string) {
 func (o *Overlay) ShowListening(windowClass, hotkeyMode string) {
 	body := listeningBody("")
 	o.show(viewState{
-		title:        "Listening",
-		titleSuffix:  listeningHint(hotkeyMode),
-		subtitle:     "○ Connecting...",
+		title:        o.cfg.Listening.Title,
+		titleSuffix:  " " + o.cfg.Listening.Suffix,
+		subtitle:     o.cfg.Listening.Connecting,
 		body:         body,
 		accent:       color.RGBA{R: 34, G: 197, B: 94, A: 255},
 		reactiveWave: true,
@@ -162,10 +162,12 @@ func (o *Overlay) SetConnected(windowClass string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != "Listening" {
+	if !o.visible || o.state.title != o.cfg.Listening.Title {
 		return
 	}
-	o.state.subtitle = "● " + listeningSubtitle(windowClass)
+	o.state.subtitle = config.ExpandTemplate(o.cfg.Listening.Connected, map[string]string{
+		"window": windowClass,
+	})
 	o.drawLocked()
 }
 
@@ -173,13 +175,16 @@ func (o *Overlay) SetConnecting(attempt, max int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != "Listening" {
+	if !o.visible || o.state.title != o.cfg.Listening.Title {
 		return
 	}
 	if attempt > 1 {
-		o.state.subtitle = fmt.Sprintf("○ Reconnecting... (attempt %d/%d)", attempt, max)
+		o.state.subtitle = config.ExpandTemplate(o.cfg.Listening.Reconnecting, map[string]string{
+			"attempt": fmt.Sprintf("%d", attempt),
+			"max":     fmt.Sprintf("%d", max),
+		})
 	} else {
-		o.state.subtitle = "○ Connecting..."
+		o.state.subtitle = o.cfg.Listening.Connecting
 	}
 	o.drawLocked()
 }
@@ -188,10 +193,10 @@ func (o *Overlay) SetSubmitMode(enabled bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != "Listening" {
+	if !o.visible || o.state.title != o.cfg.Listening.Title {
 		return
 	}
-	o.state.titleSuffix = listeningHint("hold")
+	o.state.titleSuffix = " " + o.cfg.Listening.Suffix
 	o.state.submitHint = enabled
 	o.drawLocked()
 }
@@ -200,11 +205,11 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != "Listening" {
+	if !o.visible || o.state.title != o.cfg.Listening.Title {
 		return
 	}
 
-	subtitle := listeningSubtitle(windowClass)
+	subtitle := config.ExpandTemplate(o.cfg.Listening.Connected, map[string]string{"window": windowClass})
 	targetText := normalizeListeningText(text)
 	body := listeningBody(targetText)
 	o.liveBody = body
@@ -234,7 +239,7 @@ func (o *Overlay) AnimateChunk(text string) {
 	}
 
 	o.mu.Lock()
-	if !o.visible || o.state.title != "Listening" {
+	if !o.visible || o.state.title != o.cfg.Listening.Title {
 		o.mu.Unlock()
 		return
 	}
@@ -252,13 +257,15 @@ func (o *Overlay) AnimateChunk(text string) {
 func (o *Overlay) ShowFinishing(body, shortcut string, timeout time.Duration) {
 	var suffix string
 	if shortcut != "" {
-		suffix = fmt.Sprintf(" — press %s to cancel", shortcut)
+		suffix = " " + config.ExpandTemplate(o.cfg.Finishing.CancelHint, map[string]string{
+			"shortcut": shortcut,
+		})
 	}
 
 	o.show(viewState{
-		title:         "Finishing",
+		title:         o.cfg.Finishing.Title,
 		titleSuffix:   suffix,
-		subtitle:      formatCountdown("Wrapping up", timeout),
+		subtitle:      formatCountdown(o.cfg.Finishing.WrappingUp, timeout),
 		body:          body,
 		accent:        color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		heartbeatWave: true,
@@ -269,7 +276,7 @@ func (o *Overlay) ShowFinishing(body, shortcut string, timeout time.Duration) {
 	o.countdownReset = make(chan countdownPhase, 1)
 	o.mu.Unlock()
 
-	go o.animateCountdown(countdownPhase{label: "Wrapping up", timeout: timeout})
+	go o.animateCountdown(countdownPhase{label: o.cfg.Finishing.WrappingUp, timeout: timeout})
 }
 
 func (o *Overlay) SetFinishingPhase(label string, timeout time.Duration) {
@@ -289,7 +296,7 @@ func (o *Overlay) SetFinishingText(body string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != "Finishing" {
+	if !o.visible || o.state.title != o.cfg.Finishing.Title {
 		return
 	}
 	o.state.body = body
@@ -299,7 +306,7 @@ func (o *Overlay) SetFinishingText(body string) {
 func (o *Overlay) buildSubtitle(activeLine string) string {
 	var lines []string
 	for _, done := range o.completedPhases {
-		lines = append(lines, done+" — done")
+		lines = append(lines, done+" — "+o.cfg.Finishing.PhaseDone)
 	}
 	lines = append(lines, activeLine)
 	return strings.Join(lines, "\n")
@@ -334,13 +341,13 @@ func (o *Overlay) animateCountdown(phase countdownPhase) {
 			o.mu.Unlock()
 		case <-ticker.C:
 			o.mu.Lock()
-			if !o.visible || o.state.title != "Finishing" {
+			if !o.visible || o.state.title != o.cfg.Finishing.Title {
 				o.mu.Unlock()
 				return
 			}
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				o.state.subtitle = o.buildSubtitle(label + " — timed out")
+				o.state.subtitle = o.buildSubtitle(config.ExpandTemplate(o.cfg.Finishing.TimedOut, map[string]string{"phase": label}))
 				o.drawLocked()
 				o.mu.Unlock()
 				return
@@ -354,8 +361,8 @@ func (o *Overlay) animateCountdown(phase countdownPhase) {
 
 func (o *Overlay) ShowSuccess(text string) {
 	o.show(viewState{
-		title:    "Typed",
-		subtitle: "Transcription inserted into your active app",
+		title:    o.cfg.Success.Title,
+		subtitle: o.cfg.Success.Subtitle,
 		body:     shorten(strings.ReplaceAll(text, "\n", " "), o.bodyTextLimit()),
 		accent:   color.RGBA{R: 56, G: 189, B: 248, A: 255},
 	}, true)
@@ -363,7 +370,7 @@ func (o *Overlay) ShowSuccess(text string) {
 
 func (o *Overlay) ShowWarning(subtitle string) {
 	o.show(viewState{
-		title:    "Heads up",
+		title:    o.cfg.Warning.Title,
 		subtitle: subtitle,
 		accent:   color.RGBA{R: 251, G: 191, B: 36, A: 255},
 	}, true)
@@ -371,7 +378,7 @@ func (o *Overlay) ShowWarning(subtitle string) {
 
 func (o *Overlay) ShowError(err error) {
 	o.show(viewState{
-		title:    "Error",
+		title:    o.cfg.Error.Title,
 		subtitle: shorten(err.Error(), o.subtitleTextLimit()),
 		accent:   color.RGBA{R: 248, G: 113, B: 113, A: 255},
 	}, true)
@@ -599,7 +606,7 @@ func (o *Overlay) applyStateLocked(state viewState) {
 	o.targetHeight = needed
 	o.resizeToken++
 	o.win.Resize(o.cfg.Width, needed)
-	if state.title == "Listening" {
+	if state.title == o.cfg.Listening.Title {
 		o.liveBody = state.body
 	} else {
 		o.liveBody = ""
@@ -716,7 +723,7 @@ func (o *Overlay) drawLocked() {
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
 
 	drawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
-	writeText(img, o.cfg.Width-len("Vocis")*o.glyphWidth-12, 24, "Vocis", color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
+	writeText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
 	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
 	drawBars(
 		img,
@@ -737,7 +744,7 @@ func (o *Overlay) drawLocked() {
 			hintX := suffixX + len([]rune(o.state.titleSuffix))*o.glyphWidth
 			pulse := 0.5 + 0.5*math.Sin(o.wavePhase*3)
 			alpha := uint8(140 + int(pulse*115))
-			writeText(img, hintX, 36, " ⏎ submit", color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
+			writeText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
 		}
 	}
 	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
@@ -767,7 +774,7 @@ func (o *Overlay) animateChunk(token uint64, text string) {
 		time.Sleep(16 * time.Millisecond)
 
 		o.mu.Lock()
-		if token != o.animToken || !o.visible || o.state.title != "Listening" {
+		if token != o.animToken || !o.visible || o.state.title != o.cfg.Listening.Title {
 			o.mu.Unlock()
 			return
 		}
@@ -781,7 +788,7 @@ func (o *Overlay) animateChunk(token uint64, text string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if token != o.animToken || !o.visible || o.state.title != "Listening" {
+	if token != o.animToken || !o.visible || o.state.title != o.cfg.Listening.Title {
 		return
 	}
 	o.animating = false
@@ -801,7 +808,7 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 		time.Sleep(28 * time.Millisecond)
 
 		o.mu.Lock()
-		if token != o.partialToken || o.animating || !o.visible || o.state.title != "Listening" {
+		if token != o.partialToken || o.animating || !o.visible || o.state.title != o.cfg.Listening.Title {
 			o.mu.Unlock()
 			return
 		}
@@ -909,7 +916,7 @@ func (o *Overlay) captureFrameLocked() *image.RGBA {
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
 
 	drawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
-	writeText(img, o.cfg.Width-len("Vocis")*o.glyphWidth-12, 24, "Vocis", color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
+	writeText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
 	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
 	drawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level,
 		o.state.reactiveWave, o.state.idleWave, o.state.heartbeatWave, o.wavePhase)
@@ -922,7 +929,7 @@ func (o *Overlay) captureFrameLocked() *image.RGBA {
 			hintX := suffixX + len([]rune(o.state.titleSuffix))*o.glyphWidth
 			pulse := 0.5 + 0.5*math.Sin(o.wavePhase*3)
 			alpha := uint8(140 + int(pulse*115))
-			writeText(img, hintX, 36, " ⏎ submit", color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
+			writeText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
 		}
 	}
 	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
@@ -1109,19 +1116,6 @@ func easeInCubic(t float64) float64 {
 	return t * t * t
 }
 
-func listeningHint(hotkeyMode string) string {
-	if hotkeyMode == "toggle" {
-		return " — press to stop"
-	}
-	return " — release to paste"
-}
-
-func listeningSubtitle(windowClass string) string {
-	if strings.TrimSpace(windowClass) != "" {
-		return fmt.Sprintf("Ready to type into %s", windowClass)
-	}
-	return "Recording from your microphone"
-}
 
 func listeningBody(text string) string {
 	text = normalizeListeningText(text)
