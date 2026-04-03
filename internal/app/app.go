@@ -82,6 +82,7 @@ type injectorClient interface {
 	CaptureTarget(ctx context.Context) (injector.Target, error)
 	Insert(ctx context.Context, target injector.Target, text string) error
 	InsertLive(ctx context.Context, target injector.Target, text string) error
+	PressEnter(ctx context.Context, target injector.Target) error
 }
 
 const minToggleInterval = 250 * time.Millisecond
@@ -515,21 +516,28 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		postProcessSkipped = result.Skipped
 	}
 
-	text = applyVoiceCommands(text)
+	text, pressEnter := applyVoiceCommands(text)
 
 	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vocis.inject",
 		attribute.String("target.window_id", state.target.WindowID),
 		attribute.String("target.window_class", state.target.WindowClass),
 		attribute.Int("text.length", len(text)),
+		attribute.Bool("press_enter", pressEnter),
 	)
 	err = a.injector.Insert(insertCtx, state.target, text)
-	telemetry.EndSpan(insertSpan, err)
 	if err != nil {
+		telemetry.EndSpan(insertSpan, err)
 		dictationErr = err
 		sessionlog.Errorf("insert transcript: %v", err)
 		a.showCompletionError(err)
 		return
 	}
+	if pressEnter {
+		if err := a.injector.PressEnter(insertCtx, state.target); err != nil {
+			sessionlog.Warnf("press enter failed: %v", err)
+		}
+	}
+	telemetry.EndSpan(insertSpan, err)
 	sessionlog.Infof("transcript inserted into window=%s", state.target.WindowID)
 	if postProcessSkipped {
 		a.overlay.ShowWarning("Raw text pasted — cleanup was skipped due to a timeout or error")
@@ -630,23 +638,19 @@ var trailingEnterPhrases = []string{
 	"submit",
 }
 
-func applyVoiceCommands(text string) string {
+func applyVoiceCommands(text string) (string, bool) {
 	lower := strings.ToLower(strings.TrimSpace(text))
 	for _, phrase := range trailingEnterPhrases {
-		// Check with and without trailing period/punctuation.
 		for _, suffix := range []string{"", ".", "!", ","} {
 			candidate := phrase + suffix
 			if strings.HasSuffix(lower, candidate) {
 				trimmed := strings.TrimSpace(text[:len(text)-len(candidate)])
-				if trimmed == "" {
-					return "\n"
-				}
 				sessionlog.Infof("voice command detected=%q", phrase)
-				return trimmed + "\n"
+				return trimmed, true
 			}
 		}
 	}
-	return text
+	return text, false
 }
 
 func userFacingError(err error) error {

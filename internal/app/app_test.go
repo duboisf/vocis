@@ -245,6 +245,8 @@ func (i *injectorStub) Insert(_ context.Context, _ injector.Target, text string)
 	return nil
 }
 
+func (i *injectorStub) PressEnter(_ context.Context, _ injector.Target) error { return nil }
+
 func (i *injectorStub) InsertLive(_ context.Context, _ injector.Target, text string) error {
 	if i.err != nil {
 		return i.err
@@ -257,24 +259,27 @@ func TestApplyVoiceCommandsPressEnter(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		input string
-		want  string
+		input     string
+		wantText  string
+		wantEnter bool
 	}{
-		{"Hello world press enter", "Hello world\n"},
-		{"Hello world press enter.", "Hello world\n"},
-		{"Hello world hit enter", "Hello world\n"},
-		{"Run the tests submit", "Run the tests\n"},
-		{"Hello world new line", "Hello world\n"},
-		{"Hello world newline", "Hello world\n"},
-		{"Hello world PRESS ENTER", "Hello world\n"},
-		{"Hello world Press Enter.", "Hello world\n"},
-		{"Hello world", "Hello world"},
-		{"press enter", "\n"},
-		{"", ""},
+		{"Hello world press enter", "Hello world", true},
+		{"Hello world press enter.", "Hello world", true},
+		{"Hello world hit enter", "Hello world", true},
+		{"Run the tests submit", "Run the tests", true},
+		{"Hello world new line", "Hello world", true},
+		{"Hello world newline", "Hello world", true},
+		{"Hello world PRESS ENTER", "Hello world", true},
+		{"Hello world Press Enter.", "Hello world", true},
+		{"Hello world", "Hello world", false},
+		{"press enter", "", true},
+		{"", "", false},
 	}
 	for _, tt := range tests {
-		if got := applyVoiceCommands(tt.input); got != tt.want {
-			t.Errorf("applyVoiceCommands(%q) = %q, want %q", tt.input, got, tt.want)
+		gotText, gotEnter := applyVoiceCommands(tt.input)
+		if gotText != tt.wantText || gotEnter != tt.wantEnter {
+			t.Errorf("applyVoiceCommands(%q) = (%q, %v), want (%q, %v)",
+				tt.input, gotText, gotEnter, tt.wantText, tt.wantEnter)
 		}
 	}
 }
