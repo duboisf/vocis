@@ -379,7 +379,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		telemetry.EndSpan(state.activeSpan, nil)
 	}
 
-	stopCtx, cancel := context.WithTimeout(spanCtx, 10*time.Second)
+	stopCtx, cancel := context.WithTimeout(spanCtx, 2*time.Second)
 	defer cancel()
 
 	if err := state.session.Stop(stopCtx); err != nil {
