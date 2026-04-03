@@ -1,6 +1,13 @@
 package overlay
 
-import "testing"
+import (
+	"os"
+	"testing"
+	"time"
+
+	"github.com/BurntSushi/xgbutil"
+	"github.com/BurntSushi/xgbutil/keybind"
+)
 
 func TestShouldAnimatePartialFromFirstWord(t *testing.T) {
 	t.Parallel()
@@ -87,4 +94,45 @@ func TestShortenUsesASCIIEllipsis(t *testing.T) {
 	if got != "hello..." {
 		t.Fatalf("shorten = %q, want hello...", got)
 	}
+}
+
+func TestEscapeEventLoopExitsCleanlyOnConnectionClose(t *testing.T) {
+	t.Parallel()
+
+	if os.Getenv("DISPLAY") == "" {
+		t.Skip("no DISPLAY set")
+	}
+
+	xu, err := xgbutil.NewConn()
+	if err != nil {
+		t.Skipf("cannot open X connection: %v", err)
+	}
+	keybind.Initialize(xu)
+
+	o := &Overlay{}
+	done := make(chan struct{})
+	go func() {
+		o.escapeEventLoop(xu)
+		close(done)
+	}()
+
+	// Close the connection — escapeEventLoop must exit without panic.
+	xu.Conn().Close()
+
+	select {
+	case <-done:
+		// success
+	case <-time.After(2 * time.Second):
+		t.Fatal("escapeEventLoop did not exit after connection close")
+	}
+}
+
+func TestUngrabEscapeIsIdempotent(t *testing.T) {
+	t.Parallel()
+
+	o := &Overlay{}
+
+	// Should not panic when not grabbed.
+	o.UngrabEscape()
+	o.UngrabEscape()
 }
