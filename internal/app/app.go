@@ -53,6 +53,7 @@ type recordingState struct {
 	target       injector.Target
 	liveText     string
 	displayText  string
+	submitMode   bool
 	span         trace.Span
 	spanCtx      context.Context
 	activeSpan   trace.Span
@@ -63,6 +64,7 @@ type overlayUI interface {
 	ShowListening(windowClass, hotkeyMode string)
 	SetConnected(windowClass string)
 	SetConnecting(attempt, max int)
+	SetSubmitMode(enabled bool)
 	SetListeningText(windowClass, text string)
 	AnimateChunk(text string)
 	ShowFinishing(body, shortcut string, timeout time.Duration)
@@ -82,7 +84,7 @@ type injectorClient interface {
 	CaptureTarget(ctx context.Context) (injector.Target, error)
 	Insert(ctx context.Context, target injector.Target, text string) error
 	InsertLive(ctx context.Context, target injector.Target, text string) error
-
+	PressEnter(ctx context.Context) error
 }
 
 const minToggleInterval = 250 * time.Millisecond
@@ -182,11 +184,31 @@ func (a *App) handleStart(ctx context.Context) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if a.transcribing || a.recording != nil {
+	if a.transcribing {
+		return
+	}
+
+	if a.recording != nil {
+		a.toggleSubmitMode()
 		return
 	}
 
 	a.startRecordingLocked(ctx)
+}
+
+func (a *App) toggleSubmitMode() {
+	state := a.recording
+	if state == nil {
+		return
+	}
+	state.submitMode = !state.submitMode
+	if state.submitMode {
+		sessionlog.Infof("submit mode enabled")
+		a.overlay.SetSubmitMode(true)
+	} else {
+		sessionlog.Infof("submit mode disabled")
+		a.overlay.SetSubmitMode(false)
+	}
 }
 
 func (a *App) handleStop(ctx context.Context) {
@@ -529,7 +551,12 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.showCompletionError(err)
 		return
 	}
-	sessionlog.Infof("transcript inserted into window=%s", state.target.WindowID)
+	sessionlog.Infof("transcript inserted into window=%s submit=%v", state.target.WindowID, state.submitMode)
+	if state.submitMode {
+		if err := a.injector.PressEnter(insertCtx); err != nil {
+			sessionlog.Warnf("press enter failed: %v", err)
+		}
+	}
 	if postProcessSkipped {
 		a.overlay.ShowWarning("Raw text pasted — cleanup was skipped due to a timeout or error")
 	} else {

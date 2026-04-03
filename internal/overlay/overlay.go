@@ -177,6 +177,21 @@ func (o *Overlay) SetConnecting(attempt, max int) {
 	o.drawLocked()
 }
 
+func (o *Overlay) SetSubmitMode(enabled bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	if !o.visible || o.state.title != "Listening" {
+		return
+	}
+	if enabled {
+		o.state.titleSuffix = " ⏎ will submit"
+	} else {
+		o.state.titleSuffix = listeningHint("hold")
+	}
+	o.drawLocked()
+}
+
 func (o *Overlay) SetListeningText(windowClass, text string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()

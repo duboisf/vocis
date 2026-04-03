@@ -309,6 +309,14 @@ func (i *Injector) releaseHeldModifiers(ctx context.Context) error {
 	return nil
 }
 
+func (i *Injector) PressEnter(ctx context.Context) error {
+	time.Sleep(50 * time.Millisecond)
+	if _, err := i.run(ctx, "xdotool", "key", "Return"); err != nil {
+		return fmt.Errorf("press enter: %w", err)
+	}
+	return nil
+}
+
 func hasVisibleText(text string) bool {
 	return strings.TrimSpace(text) != ""
 }
