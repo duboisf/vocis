@@ -55,6 +55,6 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 		return PostProcessResult{Text: text, Skipped: true}
 	}
 
-	sessionlog.Infof("postprocess cleaned=%d raw=%d model=%s", len(cleaned), len(text), cfg.Model)
+	sessionlog.Infof("postprocess cleaned=%d raw=%d model=%s result=%q", len(cleaned), len(text), cfg.Model, cleaned)
 	return PostProcessResult{Text: cleaned}
 }
