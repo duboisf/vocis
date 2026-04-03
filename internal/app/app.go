@@ -593,6 +593,7 @@ func (a *App) dismissInFlightOverlay() bool {
 	if a.sessionCancel != nil {
 		a.sessionCancel()
 	}
+	a.transcribing = false
 	a.overlay.Hide()
 	sessionlog.Infof("transcription cancelled by user")
 	return true
