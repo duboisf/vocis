@@ -641,25 +641,13 @@ var trailingEnterPhrases = []string{
 }
 
 func applyVoiceCommands(text string) (string, bool) {
-	// Check for the [ENTER] token from post-processing.
+	// Only check for the [ENTER] token from post-processing.
+	// Raw phrase matching was too prone to false positives.
 	trimmed := strings.TrimSpace(text)
 	if strings.HasSuffix(trimmed, enterToken) {
 		cleaned := strings.TrimSpace(trimmed[:len(trimmed)-len(enterToken)])
 		sessionlog.Infof("voice command detected=%q", enterToken)
 		return cleaned, true
-	}
-
-	// Fallback: match raw phrases when post-processing is skipped.
-	lower := strings.ToLower(trimmed)
-	for _, phrase := range trailingEnterPhrases {
-		for _, suffix := range []string{"", ".", "!", ","} {
-			candidate := phrase + suffix
-			if strings.HasSuffix(lower, candidate) {
-				cleaned := strings.TrimSpace(text[:len(text)-len(candidate)])
-				sessionlog.Infof("voice command detected=%q", phrase)
-				return cleaned, true
-			}
-		}
 	}
 	return text, false
 }

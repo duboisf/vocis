@@ -266,14 +266,11 @@ func TestApplyVoiceCommandsPressEnter(t *testing.T) {
 		// Token from post-processing.
 		{"Hello world [ENTER]", "Hello world", true},
 		{"Run the tests [ENTER]", "Run the tests", true},
+		{"Deploy to staging. [ENTER]", "Deploy to staging.", true},
 		{"[ENTER]", "", true},
-		// Fallback raw phrases (post-processing skipped).
-		{"Hello world press enter", "Hello world", true},
-		{"Hello world press enter.", "Hello world", true},
-		{"Hello world hit enter", "Hello world", true},
-		{"Run the tests submit", "Run the tests", true},
-		{"Hello world new line", "Hello world", true},
-		{"Hello world PRESS ENTER", "Hello world", true},
+		// Raw phrases are NOT matched (too prone to false positives).
+		{"Hello world press enter", "Hello world press enter", false},
+		{"Hello world submit", "Hello world submit", false},
 		// No command.
 		{"Hello world", "Hello world", false},
 		{"", "", false},
