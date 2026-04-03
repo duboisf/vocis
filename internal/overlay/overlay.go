@@ -70,6 +70,7 @@ type Overlay struct {
 	escapeGrabbed bool
 	escapeKeycode xproto.Keycode
 	escapeConn    *xgb.Conn
+	escapeDone    chan struct{}
 }
 
 type countdownPhase struct {
@@ -90,6 +91,10 @@ type viewState struct {
 }
 
 func New(cfg config.OverlayConfig) (*Overlay, error) {
+	// Suppress xgb's internal logger — it logs "Invalid event/error type: <nil>"
+	// when connections are closed, which is expected and not useful.
+	xgb.Logger.SetOutput(io.Discard)
+
 	xu, err := xgbutil.NewConn()
 	if err != nil {
 		return nil, err
@@ -439,6 +444,7 @@ func (o *Overlay) GrabEscape() <-chan struct{} {
 	}
 
 	o.escapeCh = make(chan struct{}, 1)
+	o.escapeDone = make(chan struct{})
 	o.escapeKeycode = escapeKeycode
 	o.escapeConn = conn
 	o.escapeGrabbed = true
@@ -447,10 +453,11 @@ func (o *Overlay) GrabEscape() <-chan struct{} {
 }
 
 func (o *Overlay) escapeEventLoop(conn *xgb.Conn) {
+	defer close(o.escapeDone)
 	for {
 		ev, err := conn.WaitForEvent()
 		if ev == nil {
-			return // connection closed or error
+			return
 		}
 		if err != nil {
 			return
@@ -475,11 +482,7 @@ func (o *Overlay) UngrabEscape() {
 		xproto.Setup(o.escapeConn).DefaultScreen(o.escapeConn).Root,
 		xproto.ModMaskAny,
 	).Check()
-	// Suppress the "Invalid event/error type: <nil>" log from xgb
-	// when closing the connection unblocks WaitForEvent.
-	xgb.Logger.SetOutput(io.Discard)
 	o.escapeConn.Close()
-	xgb.Logger.SetOutput(os.Stderr)
 	o.escapeConn = nil
 	o.escapeGrabbed = false
 }
