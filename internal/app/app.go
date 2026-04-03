@@ -632,14 +632,6 @@ func isNoSpeechError(err error) bool {
 
 const enterToken = "[ENTER]"
 
-var trailingEnterPhrases = []string{
-	"press enter",
-	"hit enter",
-	"new line",
-	"newline",
-	"submit",
-}
-
 func applyVoiceCommands(text string) (string, bool) {
 	// Only check for the [ENTER] token from post-processing.
 	// Raw phrase matching was too prone to false positives.
