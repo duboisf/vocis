@@ -76,10 +76,10 @@ func New(apiKey string, cfg config.OpenAIConfig, streaming config.StreamingConfi
 		streaming: streaming,
 		client:    openaisdk.NewClient(opts...),
 		dialer: websocket.Dialer{
-			HandshakeTimeout: minDuration(timeout, 10*time.Second),
+			HandshakeTimeout: minDuration(timeout, 5*time.Second),
 		},
 		websocketURL: realtimeWSURL(baseURL),
-		writeTimeout: minDuration(timeout, 15*time.Second),
+		writeTimeout: minDuration(timeout, 5*time.Second),
 	}
 }
 
