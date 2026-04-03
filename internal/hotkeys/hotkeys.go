@@ -27,6 +27,7 @@ type Registration struct {
 
 	mu                       sync.Mutex
 	isDown                   bool
+	wasReleased              bool
 	locked                   bool
 	releaseTimer             *time.Timer
 	suppressUntil            time.Time
@@ -172,17 +173,26 @@ func (r *Registration) handlePress() {
 	r.mu.Lock()
 	r.cancelReleaseTimerLocked()
 	if r.isDown {
-		r.mu.Unlock()
-		r.emit(r.tap)
+		if r.wasReleased {
+			r.wasReleased = false
+			r.mu.Unlock()
+			r.emit(r.tap)
+		} else {
+			r.mu.Unlock()
+		}
 		return
 	}
 	r.isDown = true
+	r.wasReleased = false
 	r.mu.Unlock()
 
 	r.emit(r.down)
 }
 
 func (r *Registration) handleRelease() {
+	r.mu.Lock()
+	r.wasReleased = true
+	r.mu.Unlock()
 	r.scheduleRelease()
 }
 

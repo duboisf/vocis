@@ -165,8 +165,8 @@ func TestHandleDownDismissesOldOverlayWhileTranscribing(t *testing.T) {
 
 	app.handleDown(context.Background())
 
-	if fakeOverlay.hideCalls != 1 {
-		t.Fatalf("hideCalls = %d, want 1", fakeOverlay.hideCalls)
+	if fakeOverlay.warningText == "" {
+		t.Fatal("expected cancellation warning overlay")
 	}
 	if !app.completionOverlayDismissed() {
 		t.Fatal("expected completion overlay to be dismissed")
@@ -197,6 +197,7 @@ type overlayStub struct {
 	listeningText  string
 	animatedChunks []string
 	successText    string
+	warningText    string
 	hideCalls      int
 }
 
@@ -215,7 +216,7 @@ func (o *overlayStub) ShowSuccess(text string) {
 	o.successText = text
 }
 func (o *overlayStub) ShowError(error)    {}
-func (o *overlayStub) ShowWarning(string) {}
+func (o *overlayStub) ShowWarning(text string) { o.warningText = text }
 func (o *overlayStub) GrabEscape() <-chan struct{} { return make(chan struct{}) }
 func (o *overlayStub) UngrabEscape()              {}
 func (o *overlayStub) SetLevel(float64) {}
