@@ -93,6 +93,8 @@ type OverlayConfig struct {
 	MarginTop      int     `yaml:"margin_top"`
 	Opacity        float64 `yaml:"opacity"`
 	AutoHideMillis int     `yaml:"auto_hide_millis"`
+	Font           string  `yaml:"font"`
+	FontSize       float64 `yaml:"font_size"`
 }
 
 func Default() Config {

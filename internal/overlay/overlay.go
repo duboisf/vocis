@@ -108,8 +108,12 @@ func New(cfg config.OverlayConfig) (*Overlay, error) {
 	_ = ewmh.WmWindowOpacitySet(xu, win.Id, cfg.Opacity)
 	win.Stack(xproto.StackModeAbove)
 
-	face, glyphW := loadSystemFont(13)
-	smallFace, smallGlyphW := loadSystemFont(11)
+	fontSize := cfg.FontSize
+	if fontSize <= 0 {
+		fontSize = 13
+	}
+	face, glyphW := loadFont(cfg.Font, fontSize)
+	smallFace, smallGlyphW := loadFont(cfg.Font, fontSize-2)
 
 	return &Overlay{
 		cfg:        cfg,
@@ -1271,8 +1275,8 @@ func wrapParagraph(text string, maxChars int) []string {
 	return lines
 }
 
-func loadSystemFont(size float64) (font.Face, int) {
-	path := findSystemMonoFont()
+func loadFont(name string, size float64) (font.Face, int) {
+	path := findFont(name)
 	if path != "" {
 		data, err := os.ReadFile(path)
 		if err == nil {
@@ -1299,8 +1303,11 @@ func loadSystemFont(size float64) (font.Face, int) {
 	return basicfont.Face7x13, 7
 }
 
-func findSystemMonoFont() string {
-	out, err := exec.Command("fc-match", "monospace", "--format=%{file}").Output()
+func findFont(name string) string {
+	if name == "" {
+		name = "monospace"
+	}
+	out, err := exec.Command("fc-match", name, "--format=%{file}").Output()
 	if err != nil {
 		return ""
 	}
