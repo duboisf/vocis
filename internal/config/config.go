@@ -236,6 +236,7 @@ func Default() Config {
 		PostProcess: PostProcessConfig{
 			Enabled:      true,
 			Model:        "gpt-4o-mini",
+			Prompt:       DefaultPostProcessPrompt,
 			MinWordCount: 10,
 		},
 		Telemetry: TelemetryConfig{
