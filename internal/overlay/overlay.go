@@ -364,8 +364,23 @@ func (o *Overlay) GrabEscape() <-chan struct{} {
 		return o.escapeCh
 	}
 	o.escapeGrabbed = true
-	go xevent.Main(xu)
+	go o.escapeEventLoop(xu)
 	return o.escapeCh
+}
+
+func (o *Overlay) escapeEventLoop(xu *xgbutil.XUtil) {
+	for {
+		ev, err := xu.Conn().WaitForEvent()
+		if ev == nil && err == nil {
+			return // connection closed
+		}
+		if err != nil {
+			return
+		}
+		// Feed the event into xgbutil's event system so keybind handlers fire.
+		xevent.Enqueue(xu, ev, nil)
+		xevent.Read(xu, false)
+	}
 }
 
 func (o *Overlay) UngrabEscape() {
@@ -376,8 +391,7 @@ func (o *Overlay) UngrabEscape() {
 		return
 	}
 	keybind.Detach(o.escapeXU, o.escapeXU.RootWin())
-	xevent.Quit(o.escapeXU)
-	o.escapeXU.Conn().Close()
+	o.escapeXU.Conn().Close() // unblocks escapeEventLoop
 	o.escapeXU = nil
 	o.escapeGrabbed = false
 }
