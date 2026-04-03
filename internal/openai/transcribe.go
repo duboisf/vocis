@@ -31,6 +31,7 @@ const (
 	defaultBaseURL   = "https://api.openai.com/v1"
 	streamSampleRate = 24000
 	connectTimeout   = 2 * time.Second
+	maxConnectRetries = 3
 )
 
 var ErrInputAudioBufferCommitEmpty = errors.New("input audio buffer commit empty")
@@ -428,41 +429,64 @@ func (s *DictationSession) connectAndBuffer(
 		stream *Stream
 		err    error
 	}
-	connectCh := make(chan result, 1)
-	go func() {
-		stream, err := client.StartStream(ctx, sampleRate, channels)
-		connectCh <- result{stream, err}
-	}()
 
 	var buffered [][]int16
-	for {
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case r := <-connectCh:
-			if r.err != nil {
-				return nil, nil, fmt.Errorf("start transcription stream: %w", r.err)
-			}
-			return r.stream, buffered, nil
-		case chunk, ok := <-samples:
-			if !ok {
-				// Samples closed before connect finished. Wait for connect
-				// with a timeout so we don't hang forever.
-				select {
-				case <-ctx.Done():
-					return nil, nil, ctx.Err()
-				case r := <-connectCh:
-					if r.err != nil {
-						return nil, nil, fmt.Errorf("start transcription stream: %w", r.err)
-					}
+	samplesOpen := true
+
+	for attempt := 1; attempt <= maxConnectRetries; attempt++ {
+		connectCh := make(chan result, 1)
+		go func() {
+			stream, err := client.StartStream(ctx, sampleRate, channels)
+			connectCh <- result{stream, err}
+		}()
+
+		waiting := true
+		for waiting {
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case r := <-connectCh:
+				if r.err == nil {
 					return r.stream, buffered, nil
 				}
-			}
-			if len(chunk) > 0 {
-				buffered = append(buffered, chunk)
+				if attempt < maxConnectRetries {
+					sessionlog.Warnf("connect attempt %d/%d failed: %v", attempt, maxConnectRetries, r.err)
+				} else {
+					return nil, nil, fmt.Errorf("start transcription stream: %w", r.err)
+				}
+				waiting = false
+			case chunk, ok := <-samples:
+				if !ok {
+					samplesOpen = false
+					samples = nil
+					// Samples closed — wait for this connect attempt to finish.
+					select {
+					case <-ctx.Done():
+						return nil, nil, ctx.Err()
+					case r := <-connectCh:
+						if r.err == nil {
+							return r.stream, buffered, nil
+						}
+						if attempt < maxConnectRetries {
+							sessionlog.Warnf("connect attempt %d/%d failed: %v", attempt, maxConnectRetries, r.err)
+							waiting = false
+						} else {
+							return nil, nil, fmt.Errorf("start transcription stream: %w", r.err)
+						}
+					}
+				} else if len(chunk) > 0 {
+					buffered = append(buffered, chunk)
+				}
 			}
 		}
+
+		// Don't retry if recording already stopped — just fail.
+		if !samplesOpen {
+			return nil, nil, fmt.Errorf("start transcription stream: all %d attempts failed", maxConnectRetries)
+		}
 	}
+
+	return nil, nil, errors.New("start transcription stream: exhausted retries")
 }
 
 // streamAudio reads from the samples channel and appends to the stream.
