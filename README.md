@@ -124,6 +124,96 @@ Use the system keyring so the API key is not stored in plain text:
 
 For one-off sessions you can also export `OPENAI_API_KEY`.
 
+## Troubleshooting
+
+### Tracing with Jaeger
+
+Tracing is the first place to look when something goes wrong. Enable it in config:
+
+```yaml
+telemetry:
+  enabled: true
+  endpoint: localhost:4317
+```
+
+Start Jaeger locally:
+
+```bash
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4317:4317 \
+  jaegertracing/all-in-one:latest
+```
+
+Open http://localhost:16686, select the `vocis` service, and search for traces.
+
+Each dictation session produces one trace with these spans:
+
+```
+vocis.dictation                    ← root span (entire session lifecycle)
+├── vocis.recorder.start           ← PulseAudio init (~10ms)
+├── vocis.inject.capture_target    ← window ID lookup (~6ms)
+├── vocis.recording.active         ← user speaking (variable)
+├── vocis.openai.connect           ← WebSocket + TLS (~600ms, retries shown separately)
+├── vocis.recorder.stop            ← stream flush (~120ms)
+├── vocis.transcribe.finalize      ← post-recording finalization
+│   ├── vocis.transcribe.drain     ← collect pending segments (250ms window)
+│   ├── vocis.transcribe.commit    ← commit trailing audio to OpenAI
+│   └── vocis.transcribe.wait_final ← wait for trailing transcript
+├── vocis.postprocess              ← LLM cleanup (~1-2s)
+└── vocis.inject                   ← text insertion
+    ├── vocis.inject.focus         ← window activate + modifier release
+    └── vocis.inject.paste         ← clipboard paste or xdotool type
+```
+
+**What to look for:**
+
+- `vocis.openai.connect` with ERROR → network issue connecting to OpenAI
+- `vocis.transcribe.commit` with `commit.skipped=true` → all audio consumed by segments (normal)
+- `vocis.transcribe.wait_final` with `trailing.skipped=true` → no trailing audio to transcribe (normal)
+- `vocis.postprocess` with `skipped=true` → post-processing failed or was cancelled
+- Missing spans → the process hung or was cancelled before reaching that phase
+- Missing `vocis.dictation` root span → `finishRecording` never completed (check if the process was stuck)
+
+**Fetching traces via API:**
+
+```bash
+# Get a specific trace as JSON
+curl -s http://localhost:16686/api/traces/<traceID> | python3 -m json.tool
+
+# List recent traces
+curl -s 'http://localhost:16686/api/traces?service=vocis&limit=10&lookback=1h'
+```
+
+### Session logs
+
+Each `serve` session writes a log file under `~/.local/state/vocis/sessions/`. Check the latest:
+
+```bash
+tail -50 "$(ls -t ~/.local/state/vocis/sessions/*.log | head -1)"
+```
+
+Key log patterns:
+
+- `realtime transcription stream ready` → WebSocket connected successfully
+- `connect attempt 2/3 failed` → retrying after transient failure
+- `transcribe failed` → finalization error (check the trace for details)
+- `postprocess skipped words=N min=M` → text too short for cleanup
+- `submit mode enabled/disabled` → Space tap toggle
+- `transcription cancelled by user` → user pressed hotkey during finishing
+- `voice command detected` → `[ENTER]` token found (legacy, currently disabled)
+
+### Common issues
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Overlay appears but nothing happens | WebSocket connect failed | Check Jaeger trace for `vocis.openai.connect` error |
+| Text pasted in wrong window | Focus shifted during finalization | Target window ID is logged; check if xdotool activated it |
+| Post-processing too aggressive | Prompt removes too much | Edit `postprocess.prompt` in config |
+| Mic volume keeps dropping | External app adjusting gain | Check `wpctl status` for Zoom or other apps |
+| Overlay stuck on "Finishing" | Deadlock or timeout | Press hotkey to cancel; check trace for missing spans |
+| Enter not pressed in submit mode | Focus on wrong window | Check log for `submit mode: pressing Enter on window=` |
+
 ## Notes
 
 - The overlay is intentionally small and non-interactive (except Escape during finishing).
