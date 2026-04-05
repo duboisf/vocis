@@ -13,10 +13,7 @@ import (
 
 	"vocis/internal/audio"
 	"vocis/internal/config"
-	"vocis/internal/hotkeys"
-	"vocis/internal/injector"
 	"vocis/internal/openai"
-	"vocis/internal/overlay"
 	"vocis/internal/platform"
 	"vocis/internal/recorder"
 	"vocis/internal/securestore"
@@ -25,14 +22,15 @@ import (
 )
 
 type App struct {
-	cfg        config.Config
-	overlay    overlayUI
-	recorder   *recorder.Recorder
-	injector   injectorClient
-	transcribe *openai.Client
-	store      *securestore.Store
-	apiKey     string
-	ducker     *audio.Ducker
+	cfg            config.Config
+	overlay        OverlayUI
+	recorder       *recorder.Recorder
+	injector       InjectorClient
+	transcribe     *openai.Client
+	store          *securestore.Store
+	apiKey         string
+	ducker         *audio.Ducker
+	registerHotkey HotkeyRegistrar
 
 	mu                       sync.Mutex
 	recording                *recordingState
@@ -60,7 +58,7 @@ type recordingState struct {
 	activeSpan   trace.Span
 }
 
-type overlayUI interface {
+type OverlayUI interface {
 	ShowHint(text string)
 	ShowListening(windowClass, hotkeyMode string)
 	SetConnected(windowClass string)
@@ -81,19 +79,41 @@ type overlayUI interface {
 	Close()
 }
 
-type injectorClient interface {
+type InjectorClient interface {
 	CaptureTarget(ctx context.Context) (platform.Target, error)
 	Insert(ctx context.Context, target platform.Target, text string) error
 	InsertLive(ctx context.Context, target platform.Target, text string) error
 	PressEnter(ctx context.Context, target platform.Target) error
 }
 
+// HotkeySource provides key events from a registered global hotkey.
+type HotkeySource interface {
+	Down() <-chan struct{}
+	Up() <-chan struct{}
+	Tap() <-chan struct{}
+	Shortcut() string
+	Close() error
+}
+
+// HotkeyRegistrar creates a HotkeySource for the given shortcut string.
+type HotkeyRegistrar func(shortcut string) (HotkeySource, error)
+
 const minToggleInterval = 250 * time.Millisecond
 
-func New(cfg config.Config) *App {
+// Deps holds the platform-specific dependencies injected into the App.
+type Deps struct {
+	Overlay        OverlayUI
+	Injector       InjectorClient
+	RegisterHotkey HotkeyRegistrar
+}
+
+func New(cfg config.Config, deps Deps) *App {
 	return &App{
-		cfg:   cfg,
-		store: securestore.New(),
+		cfg:            cfg,
+		overlay:        deps.Overlay,
+		injector:       deps.Injector,
+		registerHotkey: deps.RegisterHotkey,
+		store:          securestore.New(),
 	}
 }
 
@@ -111,13 +131,8 @@ func (a *App) Run(ctx context.Context) error {
 	a.apiKey = apiKey
 
 	a.recorder = recorder.New()
-	a.injector = injector.New(a.cfg.Insertion, a.cfg.Hotkey)
 	a.transcribe = openai.New(apiKey, a.cfg.OpenAI, a.cfg.Streaming)
 
-	a.overlay, err = overlay.New(a.cfg.Overlay)
-	if err != nil {
-		return err
-	}
 	defer a.overlay.Close()
 
 	hk, err := a.registerHotkeyWithFallback()
@@ -343,7 +358,7 @@ func (a *App) stopRecordingLocked(ctx context.Context) {
 	go a.finishRecording(ctx, state)
 }
 
-func (a *App) registerHotkeyWithFallback() (*hotkeys.Registration, error) {
+func (a *App) registerHotkeyWithFallback() (HotkeySource, error) {
 	candidates := []string{
 		a.cfg.Hotkey,
 		"ctrl+alt+space",
@@ -360,7 +375,7 @@ func (a *App) registerHotkeyWithFallback() (*hotkeys.Registration, error) {
 		}
 		seen[candidate] = struct{}{}
 
-		hk, err := hotkeys.Register(candidate)
+		hk, err := a.registerHotkey(candidate)
 		if err == nil {
 			if candidate != a.cfg.Hotkey {
 				sessionlog.Warnf("hotkey %s unavailable, using %s", a.cfg.Hotkey, candidate)
