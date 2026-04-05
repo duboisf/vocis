@@ -1,0 +1,94 @@
+sequenceDiagram
+    participant User
+    participant App
+    participant Overlay
+    participant Recorder
+    participant OpenAI
+    participant Injector
+    participant PostProcess
+
+    Note over User,PostProcess: Record Start
+
+    User->>App: Ctrl+Shift+Space (Down)
+    App->>App: Reload config
+    App->>App: Duck speaker volume
+    App->>Overlay: ShowListening("○ Connecting...")
+    App->>Recorder: Start capture
+    Recorder-->>App: Audio samples channel
+    App->>Injector: CaptureTarget (window ID)
+    App->>OpenAI: StartDictation (spawns pump)
+
+    par Buffer audio while connecting
+        Recorder->>OpenAI: Audio chunks (buffered)
+    and Connect WebSocket
+        OpenAI->>OpenAI: connectAndBuffer (retry up to 3x)
+        OpenAI-->>App: OnConnected callback
+        App->>Overlay: SetConnected("● Ready to type into kitty")
+    end
+
+    Note over OpenAI: Flush buffered audio, stream live
+
+    loop While recording
+        Recorder->>OpenAI: Audio chunks (live)
+        OpenAI-->>App: Partial events
+        App->>Overlay: SetListeningText (live preview)
+        OpenAI-->>App: Segment events (on VAD pause)
+        App->>App: Accumulate liveText + displayText
+        App->>Overlay: Update overlay (one line per segment)
+    end
+
+    opt Submit mode toggle
+        User->>App: Tap Space (while Ctrl+Shift held)
+        App->>Overlay: SetSubmitMode (⏎ submit throbs yellow)
+    end
+
+    Note over User,PostProcess: Record Stop
+
+    User->>App: Release all keys (Up)
+    App->>Overlay: ShowFinishing (heartbeat + countdown)
+    App->>Overlay: GrabEscape
+    App->>Recorder: Stop capture
+
+    Note over OpenAI: collectTrailing
+
+    OpenAI->>OpenAI: drainPendingSegments (250ms)
+    alt Trailing audio exists
+        OpenAI->>OpenAI: Commit + waitForFinal
+        OpenAI-->>App: Trailing transcript
+    else All consumed by segments
+        OpenAI-->>App: Skip (commit.skipped=true)
+    end
+
+    App->>Overlay: SetFinishingText (full text with newlines)
+
+    alt Post-processing enabled & enough words
+        App->>Overlay: SetFinishingPhase("Post-processing")
+        App->>PostProcess: Clean up text (5s timeout)
+        alt User presses Escape
+            App->>App: Skip, use raw text
+            App->>Overlay: ShowWarning("Raw text pasted...")
+        else GPT responds
+            PostProcess-->>App: Cleaned text
+        else Timeout
+            PostProcess-->>App: Fall back to raw text
+            App->>Overlay: ShowWarning("Raw text pasted...")
+        end
+    end
+
+    Note over User,PostProcess: Insert
+
+    App->>Injector: Insert (paste into target window)
+
+    opt Submit mode on
+        App->>Injector: PressEnter (xdotool key --window Return)
+    end
+
+    App->>App: Restore speaker volume
+    App->>Overlay: UngrabEscape
+    App->>Overlay: Hide
+
+    opt User cancels during finishing
+        User->>App: Ctrl+Shift+Space (Down)
+        App->>App: Cancel transcription
+        App->>Overlay: ShowWarning("Cancelled — transcription discarded")
+    end

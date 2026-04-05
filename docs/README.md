@@ -15,3 +15,4 @@ How to use this set:
 - Read `overview.md` for the product and mental model.
 - Read `architecture.md` when you need to know where behavior lives in the codebase.
 - Read `runtime-flow.md` when you need the detailed dictation lifecycle, error behavior, and timing model.
+- View `recording-flow.mmd` for a Mermaid sequence diagram of the full recording flow.
