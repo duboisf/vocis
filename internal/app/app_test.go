@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"vocis/internal/config"
-	"vocis/internal/injector"
 	"vocis/internal/openai"
+	"vocis/internal/platform"
 )
 
 func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {
@@ -21,7 +21,7 @@ func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
-		target: injector.Target{WindowClass: "Gedit"},
+		target: platform.Target{WindowClass: "Gedit"},
 	}
 
 	err := app.handleDictationEvent(context.Background(), state, openai.DictationEvent{
@@ -51,7 +51,7 @@ func TestPartialPrependsAccumulatedSegments(t *testing.T) {
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
-		target:      injector.Target{WindowClass: "Gedit"},
+		target:      platform.Target{WindowClass: "Gedit"},
 		liveText:    "Hello world.",
 		displayText: "Hello world.",
 	}
@@ -77,7 +77,7 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
-		target:      injector.Target{WindowClass: "Gedit"},
+		target:      platform.Target{WindowClass: "Gedit"},
 		liveText:    "Hello world.",
 		displayText: "Hello world.",
 	}
@@ -107,7 +107,7 @@ func TestHandleDictationEventAccumulatesSegments(t *testing.T) {
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
-		target: injector.Target{WindowID: "42", WindowClass: "Gedit"},
+		target: platform.Target{WindowID: "42", WindowClass: "Gedit"},
 	}
 	app.recording = state
 
@@ -235,11 +235,11 @@ type injectorStub struct {
 	err          error
 }
 
-func (i *injectorStub) CaptureTarget(context.Context) (injector.Target, error) {
-	return injector.Target{}, nil
+func (i *injectorStub) CaptureTarget(context.Context) (platform.Target, error) {
+	return platform.Target{}, nil
 }
 
-func (i *injectorStub) Insert(_ context.Context, _ injector.Target, text string) error {
+func (i *injectorStub) Insert(_ context.Context, _ platform.Target, text string) error {
 	if i.err != nil {
 		return i.err
 	}
@@ -247,9 +247,9 @@ func (i *injectorStub) Insert(_ context.Context, _ injector.Target, text string)
 	return nil
 }
 
-func (i *injectorStub) PressEnter(_ context.Context, _ injector.Target) error { return nil }
+func (i *injectorStub) PressEnter(_ context.Context, _ platform.Target) error { return nil }
 
-func (i *injectorStub) InsertLive(_ context.Context, _ injector.Target, text string) error {
+func (i *injectorStub) InsertLive(_ context.Context, _ platform.Target, text string) error {
 	if i.err != nil {
 		return i.err
 	}

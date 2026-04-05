@@ -17,6 +17,7 @@ import (
 	"vocis/internal/injector"
 	"vocis/internal/openai"
 	"vocis/internal/overlay"
+	"vocis/internal/platform"
 	"vocis/internal/recorder"
 	"vocis/internal/securestore"
 	"vocis/internal/sessionlog"
@@ -50,7 +51,7 @@ type recordingState struct {
 	session   *recorder.Session
 	dictation *openai.DictationSession
 	cancel    context.CancelFunc
-	target       injector.Target
+	target       platform.Target
 	liveText     string
 	displayText  string
 	submitMode   bool
@@ -81,10 +82,10 @@ type overlayUI interface {
 }
 
 type injectorClient interface {
-	CaptureTarget(ctx context.Context) (injector.Target, error)
-	Insert(ctx context.Context, target injector.Target, text string) error
-	InsertLive(ctx context.Context, target injector.Target, text string) error
-	PressEnter(ctx context.Context, target injector.Target) error
+	CaptureTarget(ctx context.Context) (platform.Target, error)
+	Insert(ctx context.Context, target platform.Target, text string) error
+	InsertLive(ctx context.Context, target platform.Target, text string) error
+	PressEnter(ctx context.Context, target platform.Target) error
 }
 
 const minToggleInterval = 250 * time.Millisecond

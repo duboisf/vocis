@@ -15,15 +15,12 @@ import (
 
 	"vocis/internal/config"
 	"vocis/internal/hotkeys"
+	"vocis/internal/platform"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
 )
 
-type Target struct {
-	WindowID    string
-	WindowClass string
-	WindowName  string
-}
+type Target = platform.Target
 
 type Injector struct {
 	cfg config.InsertionConfig
