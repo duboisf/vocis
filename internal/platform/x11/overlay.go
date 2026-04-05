@@ -1,4 +1,4 @@
-package overlay
+package x11
 
 import (
 	"fmt"
@@ -90,7 +90,7 @@ type viewState struct {
 	heartbeatWave  bool
 }
 
-func New(cfg config.OverlayConfig) (*Overlay, error) {
+func NewOverlay(cfg config.OverlayConfig) (*Overlay, error) {
 	// Suppress xgb's internal logger — it logs "Invalid event/error type: <nil>"
 	// when connections are closed, which is expected and not useful.
 	xgb.Logger.SetOutput(io.Discard)

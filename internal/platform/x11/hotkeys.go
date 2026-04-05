@@ -1,4 +1,4 @@
-package hotkeys
+package x11
 
 import (
 	"fmt"

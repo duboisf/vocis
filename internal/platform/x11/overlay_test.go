@@ -1,4 +1,4 @@
-package overlay
+package x11
 
 import (
 	"os"

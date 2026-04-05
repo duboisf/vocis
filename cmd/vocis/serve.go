@@ -11,9 +11,7 @@ import (
 
 	"vocis/internal/app"
 	"vocis/internal/config"
-	"vocis/internal/hotkeys"
-	"vocis/internal/injector"
-	"vocis/internal/overlay"
+	x11 "vocis/internal/platform/x11"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
 )
@@ -56,16 +54,16 @@ func runServe() error {
 	sessionlog.Infof("loaded config: %s", path)
 	sessionlog.Infof("hotkey: %s", cfg.Hotkey)
 
-	ov, err := overlay.New(cfg.Overlay)
+	ov, err := x11.NewOverlay(cfg.Overlay)
 	if err != nil {
 		return fmt.Errorf("init overlay: %w", err)
 	}
 
 	return app.New(cfg, app.Deps{
 		Overlay:  ov,
-		Injector: injector.New(cfg.Insertion, cfg.Hotkey),
+		Injector: x11.NewInjector(cfg.Insertion, cfg.Hotkey),
 		RegisterHotkey: func(shortcut string) (app.HotkeySource, error) {
-			return hotkeys.Register(shortcut)
+			return x11.Register(shortcut)
 		},
 	}).Run(ctx)
 }

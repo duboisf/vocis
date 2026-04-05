@@ -1,4 +1,4 @@
-package injector
+package x11
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 func TestTerminalDetectionIsCaseInsensitive(t *testing.T) {
 	t.Parallel()
 
-	inj := New(config.Default().Insertion, "")
+	inj := NewInjector(config.Default().Insertion, "")
 	if !inj.isTerminal("alacritty") {
 		t.Fatal("expected alacritty to be treated as a terminal")
 	}
@@ -121,7 +121,7 @@ func TestInsertLiveReleasesModifiersBeforeTyping(t *testing.T) {
 	t.Parallel()
 
 	var calls []string
-	inj := New(config.Default().Insertion, "ctrl+shift+space")
+	inj := NewInjector(config.Default().Insertion, "ctrl+shift+space")
 	inj.run = func(_ context.Context, name string, args ...string) (string, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return "", nil
@@ -159,7 +159,7 @@ func TestInsertReleasesModifiersBeforePasting(t *testing.T) {
 	cfg := config.Default().Insertion
 	cfg.Mode = "clipboard"
 
-	inj := New(cfg, "ctrl+shift+space")
+	inj := NewInjector(cfg, "ctrl+shift+space")
 	inj.run = func(_ context.Context, name string, args ...string) (string, error) {
 		calls = append(calls, name+" "+strings.Join(args, " "))
 		return "", nil
