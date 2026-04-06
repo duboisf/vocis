@@ -14,6 +14,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"vocis/internal/config"
+	"vocis/internal/hotkey"
 	"vocis/internal/platform"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
@@ -38,7 +39,7 @@ func NewInjector(cfg config.InsertionConfig, shortcut string) *Injector {
 	inj := &Injector{cfg: cfg}
 	inj.run = inj.execTrimmed
 	if strings.TrimSpace(shortcut) != "" {
-		if keyNames, err := ReleaseKeyNames(shortcut); err == nil {
+		if keyNames, err := hotkey.ReleaseKeyNames(shortcut); err == nil {
 			inj.releaseArgs = append([]string{"keyup"}, keyNames...)
 		} else {
 			sessionlog.Warnf("resolve hotkey release keys: %v", err)
@@ -269,7 +270,7 @@ func buildModifierReleaseArgs() []string {
 }
 
 func buildKeyReleaseArgs(shortcut string) ([]string, error) {
-	names, err := ReleaseKeyNames(shortcut)
+	names, err := hotkey.ReleaseKeyNames(shortcut)
 	if err != nil {
 		return nil, err
 	}
