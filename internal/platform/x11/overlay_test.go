@@ -5,12 +5,14 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/xgbutil"
+
+	"vocis/internal/ui"
 )
 
 func TestShouldAnimatePartialFromFirstWord(t *testing.T) {
 	t.Parallel()
 
-	if !shouldAnimatePartial("", "hello world") {
+	if !ui.ShouldAnimatePartial("", "hello world") {
 		t.Fatal("expected first partial to animate")
 	}
 }
@@ -18,12 +20,12 @@ func TestShouldAnimatePartialFromFirstWord(t *testing.T) {
 func TestShouldAnimatePartialFromHelperBody(t *testing.T) {
 	t.Parallel()
 
-	current := displayedListeningText(listeningBody(""))
+	current := ui.DisplayedListeningText(ui.ListeningBody(""))
 	if current != "" {
-		t.Fatalf("displayedListeningText(helper) = %q, want empty", current)
+		t.Fatalf("ui.DisplayedListeningText(helper) = %q, want empty", current)
 	}
 
-	if !shouldAnimatePartial(current, "hello world") {
+	if !ui.ShouldAnimatePartial(current, "hello world") {
 		t.Fatal("expected first transcript words to animate from helper body")
 	}
 }
@@ -31,13 +33,13 @@ func TestShouldAnimatePartialFromHelperBody(t *testing.T) {
 func TestShouldAnimatePartialOnlyWhenTextExtends(t *testing.T) {
 	t.Parallel()
 
-	if !shouldAnimatePartial("hello", "hello world") {
+	if !ui.ShouldAnimatePartial("hello", "hello world") {
 		t.Fatal("expected growing partial to animate")
 	}
-	if shouldAnimatePartial("hello world", "hello") {
+	if ui.ShouldAnimatePartial("hello world", "hello") {
 		t.Fatal("expected shrinking/revised partial not to animate")
 	}
-	if shouldAnimatePartial("hello world", "goodbye world") {
+	if ui.ShouldAnimatePartial("hello world", "goodbye world") {
 		t.Fatal("expected unrelated partial not to animate")
 	}
 }
@@ -45,18 +47,18 @@ func TestShouldAnimatePartialOnlyWhenTextExtends(t *testing.T) {
 func TestDisplayedListeningTextTreatsHelperAsEmpty(t *testing.T) {
 	t.Parallel()
 
-	if got := displayedListeningText(listeningBody("")); got != "" {
-		t.Fatalf("displayedListeningText(helper) = %q, want empty", got)
+	if got := ui.DisplayedListeningText(ui.ListeningBody("")); got != "" {
+		t.Fatalf("ui.DisplayedListeningText(helper) = %q, want empty", got)
 	}
-	if got := displayedListeningText(listeningBody("hello world")); got != "hello world" {
-		t.Fatalf("displayedListeningText(transcript) = %q, want hello world", got)
+	if got := ui.DisplayedListeningText(ui.ListeningBody("hello world")); got != "hello world" {
+		t.Fatalf("ui.DisplayedListeningText(transcript) = %q, want hello world", got)
 	}
 }
 
 func TestWrapLinesShortTextSingleLine(t *testing.T) {
 	t.Parallel()
 
-	lines := wrapLines("hello world", 60)
+	lines := ui.WrapLines("hello world", 60)
 	if len(lines) != 1 || lines[0] != "hello world" {
 		t.Fatalf("wrapLines = %v, want [hello world]", lines)
 	}
@@ -65,7 +67,7 @@ func TestWrapLinesShortTextSingleLine(t *testing.T) {
 func TestWrapLinesLongTextWraps(t *testing.T) {
 	t.Parallel()
 
-	lines := wrapLines("the quick brown fox jumps over the lazy dog", 20)
+	lines := ui.WrapLines("the quick brown fox jumps over the lazy dog", 20)
 	if len(lines) < 2 {
 		t.Fatalf("expected multiple lines, got %v", lines)
 	}
@@ -79,7 +81,7 @@ func TestWrapLinesLongTextWraps(t *testing.T) {
 func TestWrapLinesEmptyReturnsNil(t *testing.T) {
 	t.Parallel()
 
-	lines := wrapLines("", 60)
+	lines := ui.WrapLines("", 60)
 	if lines != nil {
 		t.Fatalf("wrapLines empty = %v, want nil", lines)
 	}
@@ -88,7 +90,7 @@ func TestWrapLinesEmptyReturnsNil(t *testing.T) {
 func TestShortenUsesASCIIEllipsis(t *testing.T) {
 	t.Parallel()
 
-	got := shorten("hello world", 8)
+	got := ui.Shorten("hello world", 8)
 	if got != "hello..." {
 		t.Fatalf("shorten = %q, want hello...", got)
 	}

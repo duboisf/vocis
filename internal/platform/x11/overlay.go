@@ -23,10 +23,10 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/font/opentype"
-	"golang.org/x/image/math/fixed"
 
 	"vocis/internal/config"
 	"vocis/internal/sessionlog"
+	"vocis/internal/ui"
 )
 
 type Overlay struct {
@@ -152,7 +152,7 @@ func (o *Overlay) ShowHint(text string) {
 }
 
 func (o *Overlay) ShowListening(windowClass, hotkeyMode string) {
-	body := listeningBody("")
+	body := ui.ListeningBody("")
 	o.show(viewState{
 		title:        o.cfg.Listening.Title,
 		titleSuffix:  " " + o.cfg.Listening.Suffix,
@@ -215,10 +215,10 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 	}
 
 	subtitle := config.ExpandTemplate(o.cfg.Listening.Connected, map[string]string{"window": windowClass})
-	targetText := normalizeListeningText(text)
-	body := listeningBody(targetText)
+	targetText := ui.NormalizeListeningText(text)
+	body := ui.ListeningBody(targetText)
 	o.liveBody = body
-	currentText := displayedListeningText(o.state.body)
+	currentText := ui.DisplayedListeningText(o.state.body)
 	if o.state.subtitle == subtitle && currentText == targetText {
 		return
 	}
@@ -227,7 +227,7 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 	if o.animating {
 		return
 	}
-	if shouldAnimatePartial(currentText, targetText) {
+	if ui.ShouldAnimatePartial(currentText, targetText) {
 		o.partialToken++
 		token := o.partialToken
 		go o.animateListeningText(token, currentText, targetText)
@@ -256,7 +256,7 @@ func (o *Overlay) AnimateChunk(text string) {
 	o.drawLocked()
 	o.mu.Unlock()
 
-	go o.animateChunk(token, shorten(text, o.bodyTextLimit()))
+	go o.animateChunk(token, ui.Shorten(text, o.bodyTextLimit()))
 }
 
 func (o *Overlay) ShowFinishing(body, shortcut string, timeout time.Duration) {
@@ -368,7 +368,7 @@ func (o *Overlay) ShowSuccess(text string) {
 	o.show(viewState{
 		title:    o.cfg.Success.Title,
 		subtitle: o.cfg.Success.Subtitle,
-		body:     shorten(strings.ReplaceAll(text, "\n", " "), o.bodyTextLimit()),
+		body:     ui.Shorten(strings.ReplaceAll(text, "\n", " "), o.bodyTextLimit()),
 		accent:   color.RGBA{R: 56, G: 189, B: 248, A: 255},
 	}, true)
 }
@@ -384,7 +384,7 @@ func (o *Overlay) ShowWarning(subtitle string) {
 func (o *Overlay) ShowError(err error) {
 	o.show(viewState{
 		title:    o.cfg.Error.Title,
-		subtitle: shorten(err.Error(), o.subtitleTextLimit()),
+		subtitle: ui.Shorten(err.Error(), o.subtitleTextLimit()),
 		accent:   color.RGBA{R: 248, G: 113, B: 113, A: 255},
 	}, true)
 }
@@ -585,7 +585,7 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 }
 
 func (o *Overlay) neededHeight(state viewState) int {
-	bodyLines := wrapLines(state.body, o.bodyTextLimit())
+	bodyLines := ui.WrapLines(state.body, o.bodyTextLimit())
 	needed := o.cfg.Height
 	if len(bodyLines) > 1 {
 		needed = bodyStartY + len(bodyLines)*lineHeight + bodyPadBot
@@ -704,7 +704,7 @@ const (
 
 func (o *Overlay) drawLocked() {
 	charsPerLine := o.bodyTextLimit()
-	bodyLines := wrapLines(o.state.body, charsPerLine)
+	bodyLines := ui.WrapLines(o.state.body, charsPerLine)
 
 	needed := o.cfg.Height
 	if len(bodyLines) > 1 {
@@ -725,10 +725,10 @@ func (o *Overlay) drawLocked() {
 	bg := color.RGBA{R: 12, G: 18, B: 31, A: 255}
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
 
-	drawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
-	writeText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
-	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
-	drawBars(
+	ui.DrawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
+	ui.WriteText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
+	ui.DrawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
+	ui.DrawBars(
 		img,
 		image.Rect(26, 42, 132, 98),
 		o.state.accent,
@@ -739,29 +739,29 @@ func (o *Overlay) drawLocked() {
 		o.wavePhase,
 	)
 
-	writeText(img, 150, 36, o.state.title, o.state.accent, o.face)
+	ui.WriteText(img, 150, 36, o.state.title, o.state.accent, o.face)
 	if o.state.titleSuffix != "" {
 		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
-		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
+		ui.WriteText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
 		if o.state.submitHint {
 			hintX := suffixX + len([]rune(o.state.titleSuffix))*o.glyphWidth
 			pulse := 0.5 + 0.5*math.Sin(o.wavePhase*3)
 			alpha := uint8(140 + int(pulse*115))
-			writeText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
+			ui.WriteText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
 		}
 	}
 	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
 	for i, line := range strings.Split(o.state.subtitle, "\n") {
-		writeText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
+		ui.WriteText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
 	}
 
 	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
 	for i, line := range bodyLines {
-		writeText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
+		ui.WriteText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
 	}
 
 	if o.crossPrevFrame != nil && o.crossFadeT < 1 {
-		blendFrames(img, o.crossPrevFrame, 1-o.crossFadeT)
+		ui.BlendFrames(img, o.crossPrevFrame, 1-o.crossFadeT)
 	}
 
 	ximg := xgraphics.NewConvert(o.x, img)
@@ -807,7 +807,7 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 	}
 
 	for currentLen < len(targetRunes) {
-		next := nextWordBoundary(targetRunes, currentLen)
+		next := ui.NextWordBoundary(targetRunes, currentLen)
 		time.Sleep(28 * time.Millisecond)
 
 		o.mu.Lock()
@@ -815,7 +815,7 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 			o.mu.Unlock()
 			return
 		}
-		o.state.body = listeningBody(string(targetRunes[:next]))
+		o.state.body = ui.ListeningBody(string(targetRunes[:next]))
 		o.drawLocked()
 		o.mu.Unlock()
 
@@ -823,145 +823,45 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 	}
 }
 
-func shouldAnimatePartial(current, target string) bool {
-	current = normalizeListeningText(current)
-	target = normalizeListeningText(target)
-	if target == "" {
-		return false
-	}
-	if current == "" {
-		return true
-	}
-	if !strings.HasPrefix(target, current) {
-		return false
-	}
-	return target != current
-}
-
-func nextWordBoundary(runes []rune, start int) int {
-	if start >= len(runes) {
-		return len(runes)
-	}
-	for i := start + 1; i < len(runes); i++ {
-		if runes[i] == ' ' {
-			return i + 1
-		}
-	}
-	return len(runes)
-}
-
-func drawBars(
-	dst *image.RGBA,
-	rect image.Rectangle,
-	accent color.RGBA,
-	level float64,
-	reactive bool,
-	idle bool,
-	heartbeat bool,
-	phase float64,
-) {
-	width := 10
-	gap := 6
-	baseY := rect.Max.Y
-	profile := []float64{0.38, 0.62, 0.92, 0.82, 0.58, 0.34}
-
-	for i, weight := range profile {
-		height := 14 + i%2*4
-		if reactive {
-			height = 10 + int((level*weight)*54)
-		} else if heartbeat {
-			height = 10 + int(weight*40*heartbeatPulse(phase, float64(i)*0.08))
-		} else if idle {
-			pulse := 0.5 + 0.5*math.Sin(phase+float64(i)*0.75)
-			height = 14 + int((weight*20)*pulse)
-		}
-		x := rect.Min.X + i*(width+gap)
-		r := image.Rect(x, baseY-height, x+width, baseY)
-		drawRect(dst, r, accent)
-	}
-}
-
-// heartbeatPulse returns a 0..1 amplitude for a heartbeat pattern:
-// two quick beats (lub-dub) followed by a rest period.
-func heartbeatPulse(phase, offset float64) float64 {
-	// Full cycle is 2π; divide into lub, dub, rest
-	t := math.Mod(phase+offset, 2*math.Pi) / (2 * math.Pi) // 0..1
-	switch {
-	case t < 0.1: // first beat (lub): sharp rise and fall
-		return math.Sin(t / 0.1 * math.Pi)
-	case t < 0.15: // brief gap
-		return 0
-	case t < 0.25: // second beat (dub): slightly smaller
-		return 0.7 * math.Sin((t-0.15)/0.1*math.Pi)
-	default: // rest
-		return 0
-	}
-}
-
-func writeText(dst *image.RGBA, x, y int, msg string, clr color.Color, face font.Face) {
-	d := &font.Drawer{
-		Dst:  dst,
-		Src:  image.NewUniform(clr),
-		Face: face,
-		Dot:  fixed.P(x, y),
-	}
-	d.DrawString(msg)
-}
 
 
-func drawRect(dst *image.RGBA, rect image.Rectangle, clr color.Color) {
-	draw.Draw(dst, rect, &image.Uniform{C: clr}, image.Point{}, draw.Src)
-}
+
+
+
 
 func (o *Overlay) captureFrameLocked() *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, o.cfg.Width, o.height))
 	bg := color.RGBA{R: 12, G: 18, B: 31, A: 255}
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
 
-	drawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
-	writeText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
-	drawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
-	drawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level,
+	ui.DrawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
+	ui.WriteText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
+	ui.DrawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
+	ui.DrawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level,
 		o.state.reactiveWave, o.state.idleWave, o.state.heartbeatWave, o.wavePhase)
 
-	writeText(img, 150, 36, o.state.title, o.state.accent, o.face)
+	ui.WriteText(img, 150, 36, o.state.title, o.state.accent, o.face)
 	if o.state.titleSuffix != "" {
 		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
-		writeText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
+		ui.WriteText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
 		if o.state.submitHint {
 			hintX := suffixX + len([]rune(o.state.titleSuffix))*o.glyphWidth
 			pulse := 0.5 + 0.5*math.Sin(o.wavePhase*3)
 			alpha := uint8(140 + int(pulse*115))
-			writeText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
+			ui.WriteText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
 		}
 	}
 	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
 	for i, line := range strings.Split(o.state.subtitle, "\n") {
-		writeText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
+		ui.WriteText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
 	}
 	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
-	for i, line := range wrapLines(o.state.body, o.bodyTextLimit()) {
-		writeText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
+	for i, line := range ui.WrapLines(o.state.body, o.bodyTextLimit()) {
+		ui.WriteText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
 	}
 	return img
 }
 
-func blendFrames(dst, src *image.RGBA, alpha float64) {
-	if alpha <= 0 {
-		return
-	}
-	bounds := dst.Bounds().Intersect(src.Bounds())
-	a := uint32(alpha * 255)
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			di := dst.PixOffset(x, y)
-			si := src.PixOffset(x, y)
-			dst.Pix[di+0] = uint8((uint32(dst.Pix[di+0])*(255-a) + uint32(src.Pix[si+0])*a) / 255)
-			dst.Pix[di+1] = uint8((uint32(dst.Pix[di+1])*(255-a) + uint32(src.Pix[si+1])*a) / 255)
-			dst.Pix[di+2] = uint8((uint32(dst.Pix[di+2])*(255-a) + uint32(src.Pix[si+2])*a) / 255)
-		}
-	}
-}
 
 const resizeStep = 4
 
@@ -1062,7 +962,7 @@ func (o *Overlay) animateFadeIn(token uint64) {
 			return
 		}
 		linear := float64(i) / float64(steps)
-		eased := easeOutCubic(linear)
+		eased := ui.EaseOutCubic(linear)
 		o.fadeAlpha = linear * o.cfg.Opacity
 		o.fadeOffset = int(float64(fadeSlideDistance) * (1 - eased))
 		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
@@ -1092,7 +992,7 @@ func (o *Overlay) animateFadeOut(token uint64) {
 			return
 		}
 		linear := float64(i) / float64(steps)
-		eased := easeInCubic(linear)
+		eased := ui.EaseInCubic(linear)
 		o.fadeAlpha = o.cfg.Opacity * (1 - linear)
 		o.fadeOffset = int(float64(fadeSlideDistance) * eased)
 		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
@@ -1110,35 +1010,9 @@ func (o *Overlay) animateFadeOut(token uint64) {
 	o.mu.Unlock()
 }
 
-func easeOutCubic(t float64) float64 {
-	t--
-	return 1 + t*t*t
-}
-
-func easeInCubic(t float64) float64 {
-	return t * t * t
-}
 
 
-func listeningBody(text string) string {
-	text = normalizeListeningText(text)
-	if text == "" {
-		return "Speak naturally. Release when you want it pasted."
-	}
-	return text
-}
 
-func normalizeListeningText(text string) string {
-	return strings.TrimSpace(text)
-}
-
-func displayedListeningText(body string) string {
-	text := normalizeListeningText(body)
-	if text == normalizeListeningText(listeningBody("")) {
-		return ""
-	}
-	return text
-}
 
 func (o *Overlay) repositionLocked() {
 	x, y := position(o.x, o.cfg)
@@ -1193,84 +1067,15 @@ func activeMonitor(xu *xgbutil.XUtil) (x, y, w, h int) {
 }
 
 func (o *Overlay) subtitleTextLimit() int {
-	return textLimit(o.cfg.Width, 20, o.glyphWidth)
+	return ui.TextLimit(o.cfg.Width, 20, o.glyphWidth)
 }
 
 func (o *Overlay) bodyTextLimit() int {
-	return textLimit(o.cfg.Width, 20, o.glyphWidth)
+	return ui.TextLimit(o.cfg.Width, 20, o.glyphWidth)
 }
 
-func textLimit(width, rightPadding, glyphWidth int) int {
-	const (
-		textLeft = 150
-		minChars = 12
-	)
-	if glyphWidth <= 0 {
-		glyphWidth = 7
-	}
 
-	available := width - textLeft - rightPadding
-	if available <= 0 {
-		return minChars
-	}
 
-	chars := available / glyphWidth
-	if chars < minChars {
-		return minChars
-	}
-	return chars
-}
-
-func wrapLines(text string, maxChars int) []string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return nil
-	}
-	if maxChars <= 0 {
-		return []string{text}
-	}
-
-	var lines []string
-	for _, paragraph := range strings.Split(text, "\n") {
-		paragraph = strings.TrimSpace(paragraph)
-		if paragraph == "" {
-			continue
-		}
-		lines = append(lines, wrapParagraph(paragraph, maxChars)...)
-	}
-	if len(lines) == 0 {
-		return nil
-	}
-	return lines
-}
-
-func wrapParagraph(text string, maxChars int) []string {
-	runes := []rune(text)
-	if len(runes) <= maxChars {
-		return []string{text}
-	}
-
-	var lines []string
-	for len(runes) > 0 {
-		if len(runes) <= maxChars {
-			lines = append(lines, string(runes))
-			break
-		}
-		cut := maxChars
-		for i := maxChars; i > maxChars/2; i-- {
-			if runes[i] == ' ' {
-				cut = i
-				break
-			}
-		}
-		lines = append(lines, string(runes[:cut]))
-		runes = runes[cut:]
-		if len(runes) > 0 && runes[0] == ' ' {
-			runes = runes[1:]
-		}
-	}
-	return lines
-}
 
 func loadFont(name string, size float64) (font.Face, int) {
 	path := findFont(name)
@@ -1315,14 +1120,3 @@ func findFont(name string) string {
 	return path
 }
 
-func shorten(s string, max int) string {
-	s = strings.TrimSpace(s)
-	runes := []rune(s)
-	if len(runes) <= max {
-		return s
-	}
-	if max <= 3 {
-		return string(runes[:max])
-	}
-	return string(runes[:max-3]) + "..."
-}
