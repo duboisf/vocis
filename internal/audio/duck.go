@@ -11,8 +11,8 @@ import (
 
 // Ducker lowers the default audio sink volume while recording and restores it after.
 type Ducker struct {
-	savedVolume string
-	duckLevel   float64
+	savedVolumes map[string]string
+	duckLevel    float64
 }
 
 // NewDucker creates a ducker that will lower the default sink to the given level (0.0–1.0).
@@ -21,50 +21,81 @@ func NewDucker(duckLevel float64) *Ducker {
 	return &Ducker{duckLevel: duckLevel}
 }
 
-// Duck saves the current default sink volume and lowers it.
+// Duck saves the current volume of all sinks and lowers them.
 func (d *Ducker) Duck() {
 	if d.duckLevel <= 0 {
 		return
 	}
 
-	out, err := exec.Command("wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@").Output()
-	if err != nil {
-		sessionlog.Warnf("duck: failed to get volume: %v", err)
-		return
-	}
-	d.savedVolume = parseVolume(strings.TrimSpace(string(out)))
-	if d.savedVolume == "" {
+	sinks := listSinkIDs()
+	if len(sinks) == 0 {
+		sessionlog.Warnf("duck: no sinks found")
 		return
 	}
 
-	// If the volume is already at or below the duck level, it's likely
-	// stale from a previous crash that didn't restore. Don't save it.
-	if parseFloat(d.savedVolume) <= d.duckLevel {
-		sessionlog.Warnf("duck: current volume=%s already at duck level, skipping", d.savedVolume)
-		d.savedVolume = ""
-		return
+	d.savedVolumes = make(map[string]string, len(sinks))
+	for _, id := range sinks {
+		out, err := exec.Command("wpctl", "get-volume", id).Output()
+		if err != nil {
+			continue
+		}
+		vol := parseVolume(strings.TrimSpace(string(out)))
+		if vol == "" || parseFloat(vol) <= d.duckLevel {
+			continue
+		}
+		d.savedVolumes[id] = vol
+		if err := exec.Command("wpctl", "set-volume", id, fmt.Sprintf("%.2f", d.duckLevel)).Run(); err != nil {
+			sessionlog.Warnf("duck: failed to lower sink %s: %v", id, err)
+			delete(d.savedVolumes, id)
+			continue
+		}
+		sessionlog.Infof("ducked sink=%s volume=%s → %.0f%%", id, vol, d.duckLevel*100)
 	}
-
-	if err := exec.Command("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", fmt.Sprintf("%.2f", d.duckLevel)).Run(); err != nil {
-		sessionlog.Warnf("duck: failed to lower volume: %v", err)
-		d.savedVolume = ""
-		return
-	}
-	sessionlog.Infof("ducked audio volume=%s → %.0f%%", d.savedVolume, d.duckLevel*100)
 }
 
-// Restore returns the default sink volume to its pre-duck level.
+// Restore returns all ducked sinks to their pre-duck levels.
 func (d *Ducker) Restore() {
-	if d.savedVolume == "" {
-		return
+	for id, vol := range d.savedVolumes {
+		if err := exec.Command("wpctl", "set-volume", id, vol).Run(); err != nil {
+			sessionlog.Warnf("duck: failed to restore sink %s: %v", id, err)
+			continue
+		}
+		sessionlog.Infof("restored sink=%s volume=%s", id, vol)
 	}
+	d.savedVolumes = nil
+}
 
-	if err := exec.Command("wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", d.savedVolume).Run(); err != nil {
-		sessionlog.Warnf("duck: failed to restore volume: %v", err)
-		return
+// listSinkIDs returns wpctl IDs for all audio sinks.
+func listSinkIDs() []string {
+	out, err := exec.Command("wpctl", "status").Output()
+	if err != nil {
+		return nil
 	}
-	sessionlog.Infof("restored audio volume=%s", d.savedVolume)
-	d.savedVolume = ""
+	var ids []string
+	inSinks := false
+	for _, line := range strings.Split(string(out), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "Sinks:") {
+			inSinks = true
+			continue
+		}
+		if inSinks {
+			if trimmed == "" || strings.Contains(trimmed, ":") && !strings.Contains(trimmed, "[vol:") {
+				break
+			}
+			// Lines look like: "*   47. Built-in Audio Analog Stereo        [vol: 0.84]"
+			// or:               "   118. Dell D3100 ..."
+			cleaned := strings.TrimLeft(trimmed, "│ *")
+			cleaned = strings.TrimSpace(cleaned)
+			if dot := strings.Index(cleaned, "."); dot > 0 {
+				id := strings.TrimSpace(cleaned[:dot])
+				if _, err := strconv.Atoi(id); err == nil {
+					ids = append(ids, id)
+				}
+			}
+		}
+	}
+	return ids
 }
 
 func parseFloat(s string) float64 {
