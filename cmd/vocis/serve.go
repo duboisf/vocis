@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"vocis/internal/app"
+	"vocis/internal/audio"
 	"vocis/internal/config"
 	x11 "vocis/internal/platform/x11"
 	"vocis/internal/sessionlog"
@@ -62,6 +63,7 @@ func runServe() error {
 	return app.New(cfg, app.Deps{
 		Overlay:  ov,
 		Injector: x11.NewInjector(cfg.Insertion, cfg.Hotkey),
+		Ducker:   audio.NewDucker(cfg.Recording.DuckVolume),
 		RegisterHotkey: func(shortcut string) (app.HotkeySource, error) {
 			return x11.Register(shortcut)
 		},

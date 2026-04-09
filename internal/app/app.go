@@ -11,7 +11,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"vocis/internal/audio"
 	"vocis/internal/config"
 	"vocis/internal/openai"
 	"vocis/internal/platform"
@@ -29,7 +28,7 @@ type App struct {
 	transcribe     *openai.Client
 	store          *securestore.Store
 	apiKey         string
-	ducker         *audio.Ducker
+	ducker         AudioDucker
 	registerHotkey HotkeyRegistrar
 
 	mu                       sync.Mutex
@@ -86,6 +85,11 @@ type InjectorClient interface {
 	PressEnter(ctx context.Context, target platform.Target) error
 }
 
+type AudioDucker interface {
+	Duck()
+	Restore()
+}
+
 // HotkeySource provides key events from a registered global hotkey.
 type HotkeySource interface {
 	Down() <-chan struct{}
@@ -104,6 +108,7 @@ const minToggleInterval = 250 * time.Millisecond
 type Deps struct {
 	Overlay        OverlayUI
 	Injector       InjectorClient
+	Ducker         AudioDucker
 	RegisterHotkey HotkeyRegistrar
 }
 
@@ -112,6 +117,7 @@ func New(cfg config.Config, deps Deps) *App {
 		cfg:            cfg,
 		overlay:        deps.Overlay,
 		injector:       deps.Injector,
+		ducker:         deps.Ducker,
 		registerHotkey: deps.RegisterHotkey,
 		store:          securestore.New(),
 	}
@@ -262,7 +268,6 @@ func (a *App) reloadConfig() {
 
 func (a *App) startRecordingLocked(ctx context.Context) {
 	a.reloadConfig()
-	a.ducker = audio.NewDucker(a.cfg.Recording.DuckVolume)
 	a.ducker.Duck()
 	a.dismissCompletionOverlay = false
 	a.overlay.ShowListening("", a.cfg.HotkeyMode)
