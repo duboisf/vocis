@@ -419,7 +419,6 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	escapeCh := a.overlay.GrabEscape()
 	defer a.overlay.UngrabEscape()
-	defer a.ducker.Restore()
 	defer func() {
 		a.mu.Lock()
 		a.transcribing = false
@@ -439,6 +438,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	defer cancel()
 
 	if err := state.session.Stop(stopCtx); err != nil {
+		a.ducker.Restore()
 		if errors.Is(err, recorder.ErrRecordingTooShort) {
 			state.span.SetAttributes(attribute.Bool("recording.discarded", true))
 			sessionlog.Infof("discarding short recording duration=%s",
@@ -453,6 +453,8 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		state.cancel()
 		return
 	}
+	a.ducker.Restore()
+
 	state.span.SetAttributes(
 		attribute.Int64("recording.bytes", state.session.BytesCaptured()),
 		attribute.String("recording.duration", state.session.Duration().Round(10*time.Millisecond).String()),
