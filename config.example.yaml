@@ -3,7 +3,17 @@ hotkey_mode: hold
 log_window_title: false
 
 openai:
+  # backend: "openai" (default) uses the OpenAI realtime API with an API key.
+  # Set to "lemonade" to use a local Lemonade Server instead. With Lemonade:
+  #   base_url:     REST API, default port 13305 (used for postprocess)
+  #                 e.g. http://localhost:13305/api/v1
+  #   realtime_url: WebSocket endpoint (default ws://localhost:9000).
+  #                 Lemonade assigns the WS port dynamically; check
+  #                 /api/v1/health for the websocket_port field if 9000 is wrong.
+  # Lemonade requires no API key.
+  backend: openai
   base_url: https://api.openai.com/v1
+  realtime_url: ""
   model: gpt-4o-mini-transcribe
   organization: ""
   project: ""

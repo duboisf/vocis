@@ -383,7 +383,7 @@ func TestCannotSkipTrailingTimeoutWithoutSegments(t *testing.T) {
 func TestPCMEncoderUpsamplesAndDownmixes(t *testing.T) {
 	t.Parallel()
 
-	encoder := newPCMEncoder(16000, 2)
+	encoder := newPCMEncoder(16000, 24000, 2)
 	got := encoder.Encode([]int16{
 		1000, 3000,
 		-1000, -3000,

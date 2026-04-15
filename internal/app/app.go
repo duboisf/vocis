@@ -131,14 +131,19 @@ func (a *App) Run(ctx context.Context) error {
 	sessionlog.Infof("starting vocis session")
 	recorder.CleanupStale()
 
-	apiKey, err := a.store.APIKey()
-	if err != nil {
-		return err
+	if a.cfg.OpenAI.Backend == config.BackendLemonade {
+		// Lemonade runs locally with no auth.
+		a.apiKey = ""
+	} else {
+		apiKey, err := a.store.APIKey()
+		if err != nil {
+			return err
+		}
+		a.apiKey = apiKey
 	}
-	a.apiKey = apiKey
 
 	a.recorder = recorder.New()
-	a.transcribe = openai.New(apiKey, a.cfg.OpenAI, a.cfg.Streaming)
+	a.transcribe = openai.New(a.apiKey, a.cfg.OpenAI, a.cfg.Streaming)
 
 	defer a.overlay.Close()
 

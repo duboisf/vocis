@@ -57,7 +57,9 @@ type TelemetryConfig struct {
 }
 
 type OpenAIConfig struct {
+	Backend      string   `yaml:"backend"`
 	BaseURL      string   `yaml:"base_url"`
+	RealtimeURL  string   `yaml:"realtime_url"`
 	Model        string   `yaml:"model"`
 	Organization string   `yaml:"organization"`
 	Project      string   `yaml:"project"`
@@ -66,6 +68,11 @@ type OpenAIConfig struct {
 	Vocabulary   []string `yaml:"vocabulary"`
 	RequestLimit int      `yaml:"request_timeout_seconds"`
 }
+
+const (
+	BackendOpenAI   = "openai"
+	BackendLemonade = "lemonade"
+)
 
 type RecordingConfig struct {
 	Backend            string  `yaml:"backend"`
@@ -155,6 +162,7 @@ func Default() Config {
 		Hotkey:     "ctrl+shift+space",
 		HotkeyMode: "hold",
 		OpenAI: OpenAIConfig{
+			Backend:    BackendOpenAI,
 			BaseURL:    "https://api.openai.com/v1",
 			Model:      "gpt-4o-mini-transcribe",
 			PromptHint: DefaultPromptHint,
@@ -331,6 +339,12 @@ func (c Config) Validate() error {
 
 	if strings.TrimSpace(c.OpenAI.Model) == "" {
 		return errors.New("openai.model must not be empty")
+	}
+
+	switch c.OpenAI.Backend {
+	case "", BackendOpenAI, BackendLemonade:
+	default:
+		return fmt.Errorf("openai.backend must be %q or %q", BackendOpenAI, BackendLemonade)
 	}
 
 	switch c.HotkeyMode {

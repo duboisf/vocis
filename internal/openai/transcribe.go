@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -18,7 +17,6 @@ import (
 	"github.com/gorilla/websocket"
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
-	"github.com/openai/openai-go/v3/realtime"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -28,9 +26,8 @@ import (
 )
 
 const (
-	defaultBaseURL   = "https://api.openai.com/v1"
-	streamSampleRate = 24000
-	connectTimeout   = 2 * time.Second
+	defaultBaseURL    = "https://api.openai.com/v1"
+	connectTimeout    = 2 * time.Second
 	maxConnectRetries = 3
 )
 
@@ -44,9 +41,8 @@ type Client struct {
 	cfg          config.OpenAIConfig
 	streaming    config.StreamingConfig
 	client       openaisdk.Client
-	chatStreamer  chatCompletionStreamer
-	dialer       websocket.Dialer
-	websocketURL string
+	chatStreamer chatCompletionStreamer
+	transport    Transport
 	writeTimeout time.Duration
 }
 
@@ -57,7 +53,7 @@ func New(apiKey string, cfg config.OpenAIConfig, streaming config.StreamingConfi
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	if baseURL != defaultBaseURL {
+	if cfg.Backend != config.BackendLemonade && baseURL != defaultBaseURL {
 		sessionlog.Warnf("openai base_url is non-default: %s", baseURL)
 	}
 
@@ -74,15 +70,21 @@ func New(apiKey string, cfg config.OpenAIConfig, streaming config.StreamingConfi
 	}
 
 	sdkClient := openaisdk.NewClient(opts...)
+
+	var transport Transport
+	switch cfg.Backend {
+	case config.BackendLemonade:
+		transport = newLemonadeTransport(cfg, streaming, timeout)
+	default:
+		transport = newOpenAITransport(cfg, streaming, sdkClient, baseURL, timeout)
+	}
+
 	return &Client{
-		cfg:         cfg,
-		streaming:   streaming,
-		client:      sdkClient,
+		cfg:          cfg,
+		streaming:    streaming,
+		client:       sdkClient,
 		chatStreamer: &sdkChatStreamer{completions: &sdkClient.Chat.Completions},
-		dialer: websocket.Dialer{
-			HandshakeTimeout: minDuration(timeout, 5*time.Second),
-		},
-		websocketURL: realtimeWSURL(baseURL),
+		transport:    transport,
 		writeTimeout: minDuration(timeout, 5*time.Second),
 	}
 }
@@ -136,30 +138,21 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 	defer connectCancel()
 
 	ctx, connectSpan := telemetry.StartSpan(connectCtx, "vocis.openai.connect",
+		attribute.String("openai.backend", string(c.backendName())),
 		attribute.String("openai.model", c.cfg.Model),
 		attribute.Int("audio.sample_rate", sampleRate),
 		attribute.Int("audio.channels", channels),
 	)
 
-	secret, err := c.createClientSecret(ctx)
+	conn, err := c.transport.Dial(ctx)
 	if err != nil {
 		telemetry.EndSpan(connectSpan, err)
 		return nil, err
 	}
 
-	headers := http.Header{
-		"Authorization": []string{"Bearer " + secret},
-	}
-	conn, resp, err := c.dialer.DialContext(ctx, c.websocketURL, headers)
-	if err != nil {
-		dialErr := formatDialError(err, resp)
-		telemetry.EndSpan(connectSpan, dialErr)
-		return nil, dialErr
-	}
-
 	stream := &Stream{
 		conn:         conn,
-		encoder:      newPCMEncoder(sampleRate, channels),
+		encoder:      newPCMEncoder(sampleRate, c.transport.SampleRate(), channels),
 		writeTimeout: c.writeTimeout,
 		readyCh:      make(chan error, 1),
 		events:       make(chan StreamEvent, 16),
@@ -167,7 +160,7 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 	}
 	go stream.readLoop()
 
-	if err := stream.sendJSON(ctx, c.sessionUpdateEvent()); err != nil {
+	if err := stream.sendJSON(ctx, c.transport.SessionUpdate()); err != nil {
 		stream.Close()
 		telemetry.EndSpan(connectSpan, err)
 		return nil, err
@@ -175,6 +168,13 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 
 	telemetry.EndSpan(connectSpan, nil)
 	return stream, nil
+}
+
+func (c *Client) backendName() string {
+	if c.cfg.Backend == "" {
+		return config.BackendOpenAI
+	}
+	return c.cfg.Backend
 }
 
 func (s *Stream) Append(ctx context.Context, samples []int16) error {
@@ -1042,139 +1042,27 @@ func (m jsonMessage) decode(dst any) error {
 	return json.Unmarshal(data, dst)
 }
 
-func (c *Client) sessionUpdateEvent() map[string]any {
-	transcription := map[string]any{
-		"model": c.cfg.Model,
-	}
-	if language := strings.TrimSpace(c.cfg.Language); language != "" {
-		transcription["language"] = language
-	}
-	if prompt := c.prompt(); prompt != "" {
-		transcription["prompt"] = prompt
-	}
-
-	return map[string]any{
-		"type": "session.update",
-		"session": map[string]any{
-			"type": "transcription",
-			"audio": map[string]any{
-				"input": map[string]any{
-					"format": map[string]any{
-						"type": "audio/pcm",
-						"rate": 24000,
-					},
-					"transcription":  transcription,
-					"turn_detection": c.turnDetectionPayload(),
-				},
-			},
-		},
-	}
-}
-
-func (c *Client) prompt() string {
-	if hint := strings.TrimSpace(c.cfg.PromptHint); hint != "" {
-		return hint
-	}
-	return config.DefaultPromptHint
-}
-
-func (c *Client) turnDetectionPayload() any {
-	return map[string]any{
-		"type":                "server_vad",
-		"prefix_padding_ms":   c.streaming.PrefixPaddingMS,
-		"silence_duration_ms": c.streaming.SilenceDurationMS,
-		"threshold":           c.streaming.Threshold,
-	}
-}
-
-func (c *Client) turnDetectionParam() *realtime.RealtimeTranscriptionSessionAudioInputTurnDetectionUnionParam {
-	return &realtime.RealtimeTranscriptionSessionAudioInputTurnDetectionUnionParam{
-		OfServerVad: &realtime.RealtimeTranscriptionSessionAudioInputTurnDetectionServerVadParam{
-			Type:              "server_vad",
-			PrefixPaddingMs:   openaisdk.Int(int64(c.streaming.PrefixPaddingMS)),
-			SilenceDurationMs: openaisdk.Int(int64(c.streaming.SilenceDurationMS)),
-			Threshold:         openaisdk.Float(c.streaming.Threshold),
-		},
-	}
-}
-
-func (c *Client) createClientSecret(ctx context.Context) (string, error) {
-	resp, err := c.client.Realtime.ClientSecrets.New(ctx, c.clientSecretParams())
-	if err != nil {
-		var apiErr *openaisdk.Error
-		if errors.As(err, &apiErr) {
-			return "", fmt.Errorf(
-				"openai realtime session: status %d%s: %s",
-				apiErr.StatusCode,
-				requestIDSuffix(requestID(apiErr)),
-				strings.TrimSpace(apiErr.Message),
-			)
-		}
-		return "", err
-	}
-	if strings.TrimSpace(resp.Value) == "" {
-		return "", errors.New("openai realtime session did not return a client secret")
-	}
-	return strings.TrimSpace(resp.Value), nil
-}
-
-func (c *Client) clientSecretParams() realtime.ClientSecretNewParams {
-	input := realtime.RealtimeTranscriptionSessionAudioInputParam{
-		Format: realtime.RealtimeAudioFormatsUnionParam{
-			OfAudioPCM: &realtime.RealtimeAudioFormatsAudioPCMParam{
-				Type: "audio/pcm",
-				Rate: 24000,
-			},
-		},
-		Transcription: c.audioTranscriptionParam(),
-	}
-	if turnDetection := c.turnDetectionParam(); turnDetection != nil {
-		input.TurnDetection = *turnDetection
-	}
-
-	return realtime.ClientSecretNewParams{
-		Session: realtime.ClientSecretNewParamsSessionUnion{
-			OfTranscription: &realtime.RealtimeTranscriptionSessionCreateRequestParam{
-				Audio: realtime.RealtimeTranscriptionSessionAudioParam{
-					Input: input,
-				},
-			},
-		},
-	}
-}
-
-func (c *Client) audioTranscriptionParam() realtime.AudioTranscriptionParam {
-	param := realtime.AudioTranscriptionParam{
-		Model: realtime.AudioTranscriptionModel(c.cfg.Model),
-	}
-	if language := strings.TrimSpace(c.cfg.Language); language != "" {
-		param.Language = openaisdk.String(language)
-	}
-	if prompt := c.prompt(); prompt != "" {
-		param.Prompt = openaisdk.String(prompt)
-	}
-	return param
-}
-
 // ---------------------------------------------------------------------------
-// PCM encoder — resamples and downmixes to 24kHz mono
+// PCM encoder — resamples and downmixes mono PCM16 to a target sample rate.
 // ---------------------------------------------------------------------------
 
 type pcmEncoder struct {
-	inputRate int64
-	channels  int
-	accum     int64
+	inputRate  int64
+	outputRate int64
+	channels   int
+	accum      int64
 }
 
-func newPCMEncoder(sampleRate, channels int) *pcmEncoder {
+func newPCMEncoder(inputSampleRate, outputSampleRate, channels int) *pcmEncoder {
 	return &pcmEncoder{
-		inputRate: int64(sampleRate),
-		channels:  channels,
+		inputRate:  int64(inputSampleRate),
+		outputRate: int64(outputSampleRate),
+		channels:   channels,
 	}
 }
 
 func (e *pcmEncoder) Encode(samples []int16) []byte {
-	if e == nil || e.inputRate <= 0 || e.channels <= 0 {
+	if e == nil || e.inputRate <= 0 || e.outputRate <= 0 || e.channels <= 0 {
 		return nil
 	}
 
@@ -1183,12 +1071,12 @@ func (e *pcmEncoder) Encode(samples []int16) []byte {
 		return nil
 	}
 
-	estimate := int((int64(frames)*streamSampleRate)/e.inputRate + 2)
+	estimate := int((int64(frames)*e.outputRate)/e.inputRate + 2)
 	out := make([]byte, 0, estimate*2)
 
 	for frame := 0; frame < frames; frame++ {
 		sample := mixToMono(samples[frame*e.channels : frame*e.channels+e.channels])
-		e.accum += streamSampleRate
+		e.accum += e.outputRate
 		for e.accum >= e.inputRate {
 			out = binary.LittleEndian.AppendUint16(out, uint16(sample))
 			e.accum -= e.inputRate
@@ -1215,22 +1103,6 @@ func mixToMono(frame []int16) int16 {
 // ---------------------------------------------------------------------------
 // Misc helpers
 // ---------------------------------------------------------------------------
-
-func realtimeWSURL(baseURL string) string {
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return ""
-	}
-	switch u.Scheme {
-	case "http":
-		u.Scheme = "ws"
-	case "https":
-		u.Scheme = "wss"
-	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/realtime"
-	u.RawQuery = ""
-	return u.String()
-}
 
 func formatDialError(err error, resp *http.Response) error {
 	if resp == nil {
