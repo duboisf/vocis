@@ -46,6 +46,11 @@ streaming:
   prefix_padding_ms: 300
   silence_duration_ms: 500
   threshold: 0.5
+  # Minimum seconds to wait for the trailing transcript after Finalize
+  # commits the audio buffer. Cloud backends answer in under a second;
+  # bump this to 10-15 if you're using a local backend where Whisper
+  # inference takes longer than 3s.
+  wait_final_seconds: 3
 
 insertion:
   mode: auto

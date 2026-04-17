@@ -88,6 +88,12 @@ type StreamingConfig struct {
 	PrefixPaddingMS    int     `yaml:"prefix_padding_ms"`
 	SilenceDurationMS  int     `yaml:"silence_duration_ms"`
 	Threshold          float64 `yaml:"threshold"`
+	// WaitFinalSeconds is the minimum time to wait for the trailing transcript
+	// after Finalize commits the audio buffer. Cloud backends answer in under
+	// a second; local backends running Whisper on CPU commonly need 5-15s for
+	// first-request model load + inference. Scaled timeout is max(this,
+	// trailing_duration / 5).
+	WaitFinalSeconds int `yaml:"wait_final_seconds"`
 }
 
 type InsertionConfig struct {
@@ -186,6 +192,7 @@ func Default() Config {
 			PrefixPaddingMS:    300,
 			SilenceDurationMS:  500,
 			Threshold:          0.5,
+			WaitFinalSeconds:   3,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
@@ -395,6 +402,10 @@ func (c Config) Validate() error {
 
 	if c.Streaming.Threshold < 0 || c.Streaming.Threshold > 1 {
 		return errors.New("streaming.threshold must be between 0 and 1")
+	}
+
+	if c.Streaming.WaitFinalSeconds < 1 || c.Streaming.WaitFinalSeconds > 60 {
+		return errors.New("streaming.wait_final_seconds must be between 1 and 60")
 	}
 
 	if c.Overlay.Width < 200 || c.Overlay.Height < 80 {

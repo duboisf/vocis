@@ -19,6 +19,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"vocis/internal/config"
 	"vocis/internal/sessionlog"
@@ -116,6 +117,13 @@ type Stream struct {
 	encoder      *pcmEncoder
 	writeTimeout time.Duration
 
+	// sessionSpan stays open for the full lifetime of the WebSocket so every
+	// interesting inbound/outbound message can be recorded as a span event.
+	// High-rate messages (input_audio_buffer.append) are intentionally skipped
+	// to keep the trace readable.
+	sessionSpan  trace.Span
+	sessionStart time.Time
+
 	writeMu   sync.Mutex
 	closeOnce sync.Once
 	readyOnce sync.Once
@@ -138,37 +146,47 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 		return nil, errors.New("recording.channels must be greater than zero")
 	}
 
-	connectCtx, connectCancel := context.WithTimeout(ctx, connectTimeout)
-	defer connectCancel()
-
-	ctx, connectSpan := telemetry.StartSpan(connectCtx, "vocis.transcribe.connect",
+	// Parent span: lives from connect through Close(), one per dictation
+	// session. All realtime message events are attached here.
+	sessionCtx, sessionSpan := telemetry.StartSpan(ctx, "vocis.transcribe.session",
 		attribute.String("transcribe.backend", string(c.backendName())),
 		attribute.String("transcribe.model", c.cfg.Model),
 		attribute.Int("audio.sample_rate", sampleRate),
 		attribute.Int("audio.channels", channels),
 	)
 
-	conn, err := c.transport.Dial(ctx)
+	connectCtx, connectCancel := context.WithTimeout(sessionCtx, connectTimeout)
+	defer connectCancel()
+
+	connectCtx, connectSpan := telemetry.StartSpan(connectCtx, "vocis.transcribe.connect")
+
+	conn, err := c.transport.Dial(connectCtx)
 	if err != nil {
 		telemetry.EndSpan(connectSpan, err)
+		telemetry.EndSpan(sessionSpan, err)
 		return nil, err
 	}
+	connectSpan.AddEvent("websocket.dialed")
 
 	stream := &Stream{
 		conn:         conn,
 		encoder:      newPCMEncoder(sampleRate, c.transport.SampleRate(), channels),
 		writeTimeout: c.writeTimeout,
+		sessionSpan:  sessionSpan,
+		sessionStart: time.Now(),
 		readyCh:      make(chan error, 1),
 		events:       make(chan StreamEvent, 16),
 		readDone:     make(chan struct{}),
 	}
 	go stream.readLoop()
 
-	if err := stream.sendJSON(ctx, c.transport.SessionUpdate()); err != nil {
+	if err := stream.sendJSON(connectCtx, c.transport.SessionUpdate()); err != nil {
 		stream.Close()
 		telemetry.EndSpan(connectSpan, err)
 		return nil, err
 	}
+	connectSpan.AddEvent("session.update.sent")
+	stream.recordOutbound("session.update")
 
 	telemetry.EndSpan(connectSpan, nil)
 	return stream, nil
@@ -193,7 +211,11 @@ func (s *Stream) Append(ctx context.Context, samples []int16) error {
 }
 
 func (s *Stream) Commit(ctx context.Context) error {
-	return s.sendJSON(ctx, map[string]any{"type": "input_audio_buffer.commit"})
+	err := s.sendJSON(ctx, map[string]any{"type": "input_audio_buffer.commit"})
+	if err == nil {
+		s.recordOutbound("input_audio_buffer.commit")
+	}
+	return err
 }
 
 func (s *Stream) Partial() string {
@@ -213,8 +235,39 @@ func (s *Stream) Close() error {
 			time.Now().Add(2*time.Second),
 		)
 		err = s.conn.Close()
+		if s.sessionSpan != nil {
+			telemetry.EndSpan(s.sessionSpan, nil)
+			s.sessionSpan = nil
+		}
 	})
 	return err
+}
+
+// recordInbound attaches a span event for a realtime message received from
+// the backend. Called from readLoop. Audio-buffer state and transcription
+// messages are recorded; unknown events are surfaced under a shared name so
+// they're distinguishable from ones we handle.
+func (s *Stream) recordInbound(msgType string) {
+	if s.sessionSpan == nil {
+		return
+	}
+	s.sessionSpan.AddEvent("realtime.inbound", trace.WithAttributes(
+		attribute.String("message.type", msgType),
+		attribute.String("elapsed", time.Since(s.sessionStart).Round(time.Millisecond).String()),
+	))
+}
+
+// recordOutbound mirrors recordInbound for messages vocis sends to the
+// backend. input_audio_buffer.append is intentionally skipped — it fires
+// too often to be useful in a span.
+func (s *Stream) recordOutbound(msgType string) {
+	if s.sessionSpan == nil {
+		return
+	}
+	s.sessionSpan.AddEvent("realtime.outbound", trace.WithAttributes(
+		attribute.String("message.type", msgType),
+		attribute.String("elapsed", time.Since(s.sessionStart).Round(time.Millisecond).String()),
+	))
 }
 
 func (s *Stream) waitReady(ctx context.Context) error {
@@ -268,9 +321,10 @@ type ConnectCallbacks struct {
 }
 
 type DictationSession struct {
-	writeTimeout time.Duration
-	cancel       context.CancelFunc
-	callbacks    ConnectCallbacks
+	writeTimeout          time.Duration
+	waitFinalFloorSeconds int
+	cancel                context.CancelFunc
+	callbacks             ConnectCallbacks
 
 	events   chan DictationEvent
 	pumpDone chan error
@@ -305,13 +359,14 @@ func (c *Client) StartDictation(
 
 	pumpCtx, cancel := context.WithCancel(ctx)
 	session := &DictationSession{
-		writeTimeout: c.writeTimeout,
-		cancel:       cancel,
-		callbacks:    callbacks,
-		events:       make(chan DictationEvent, 16),
-		pumpDone:     make(chan error, 1),
-		finals:       make(chan finalResult, 8),
-		liveSegments: true,
+		writeTimeout:          c.writeTimeout,
+		waitFinalFloorSeconds: c.streaming.WaitFinalSeconds,
+		cancel:                cancel,
+		callbacks:             callbacks,
+		events:                make(chan DictationEvent, 16),
+		pumpDone:              make(chan error, 1),
+		finals:                make(chan finalResult, 8),
+		liveSegments:          true,
 	}
 	go session.run(pumpCtx, c, sampleRate, channels, samples)
 	return session, nil
@@ -630,10 +685,17 @@ func (s *DictationSession) drainPendingSegments(ctx context.Context, stream *Str
 }
 
 // waitForFinal waits for the trailing transcript with a proportional timeout.
+// The floor is streaming.wait_final_seconds (default 3); raise for local
+// backends where Whisper model load + CPU inference can run 5-15s on the
+// first request.
 func (s *DictationSession) waitForFinal(ctx context.Context) (string, error) {
 	timeout := s.trailingDuration() / 5
-	if timeout < 3*time.Second {
-		timeout = 3 * time.Second
+	floor := time.Duration(s.waitFinalFloorSeconds) * time.Second
+	if floor <= 0 {
+		floor = 3 * time.Second
+	}
+	if timeout < floor {
+		timeout = floor
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -848,14 +910,17 @@ func (s *Stream) readLoop() {
 			return
 		}
 
-		switch raw.Type() {
+		msgType := raw.Type()
+		s.recordInbound(msgType)
+		switch msgType {
 		case "session.created", "session.updated":
+			sessionlog.Debugf("realtime: %s", msgType)
 			s.markReady(nil)
 		case "input_audio_buffer.speech_started",
 			"input_audio_buffer.speech_stopped",
 			"input_audio_buffer.committed",
 			"input_audio_buffer.cleared":
-			sessionlog.Debugf("realtime: %s", raw.Type())
+			sessionlog.Debugf("realtime: %s", msgType)
 		case "conversation.item.input_audio_transcription.delta":
 			var event transcriptionDeltaEvent
 			if err := raw.decode(&event); err == nil && event.Delta != "" {
@@ -894,6 +959,11 @@ func (s *Stream) readLoop() {
 			s.markReady(err)
 			s.emit(StreamEvent{Type: StreamEventError, Err: err})
 			return
+		default:
+			// Surface anything the backend emits that we don't handle. Catches
+			// backend-specific event names (e.g. Lemonade variants) so they
+			// show up in the session log instead of being silently dropped.
+			sessionlog.Debugf("realtime: unhandled event type=%q", msgType)
 		}
 	}
 }

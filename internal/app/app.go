@@ -669,8 +669,17 @@ func (a *App) monitorRecordingLevel(ctx context.Context, id uint64, session *rec
 
 func (a *App) estimateFinishTimeout(state *recordingState) time.Duration {
 	estimate := state.session.Duration() / 5
-	if estimate < 5*time.Second {
-		estimate = 5 * time.Second
+	// Floor must accommodate the inner wait_final budget plus a small margin
+	// for the drain (250ms) and commit round-trip. Otherwise the outer
+	// context cancels waitForFinal before it can reach its own floor — the
+	// failure mode looks like "context deadline exceeded at exactly 5s"
+	// regardless of what you set wait_final_seconds to.
+	innerFloor := time.Duration(a.cfg.Streaming.WaitFinalSeconds)*time.Second + 2*time.Second
+	if innerFloor < 5*time.Second {
+		innerFloor = 5 * time.Second
+	}
+	if estimate < innerFloor {
+		estimate = innerFloor
 	}
 	cap := time.Duration(a.cfg.OpenAI.RequestLimit) * time.Second
 	if estimate > cap {

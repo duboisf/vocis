@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -86,7 +90,84 @@ func runDoctor() error {
 		}
 	}
 
+	if cfg, _, err := config.Load(); err == nil && cfg.OpenAI.Backend == config.BackendLemonade {
+		checkLemonadeModels(cfg)
+	}
+
 	return nil
+}
+
+// checkLemonadeModels hits the Lemonade REST /models endpoint and reports
+// whether the configured transcribe + postprocess model IDs are present.
+// Lemonade's realtime WS silently accepts any model name at session.update,
+// so a typo in config surfaces only as "no transcript ever arrives". This
+// check turns that into a boot-time diagnostic.
+func checkLemonadeModels(cfg config.Config) {
+	baseURL := strings.TrimRight(cfg.OpenAI.BaseURL, "/")
+	if baseURL == "" {
+		fmt.Printf("%-14s missing (openai.base_url is empty; set it to the Lemonade REST endpoint, e.g. http://localhost:13305/api/v1)\n", "lemonade")
+		return
+	}
+	url := baseURL + "/models"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		fmt.Printf("%-14s missing (build request: %v)\n", "lemonade", err)
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("%-14s missing (GET %s: %v)\n", "lemonade", url, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("%-14s missing (GET %s: status %d)\n", "lemonade", url, resp.StatusCode)
+		return
+	}
+
+	var payload struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Downloaded bool   `json:"downloaded"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		fmt.Printf("%-14s missing (decode models: %v)\n", "lemonade", err)
+		return
+	}
+
+	available := make(map[string]bool, len(payload.Data))
+	for _, m := range payload.Data {
+		if m.Downloaded {
+			available[m.ID] = true
+		}
+	}
+	fmt.Printf("%-14s ok (%d downloaded model(s) at %s)\n", "lemonade", len(available), url)
+
+	reportModel("lemonade-tx", cfg.OpenAI.Model, available)
+	if cfg.PostProcess.Enabled {
+		reportModel("lemonade-pp", cfg.PostProcess.Model, available)
+	}
+}
+
+func reportModel(label, model string, available map[string]bool) {
+	if model == "" {
+		fmt.Printf("%-14s missing (model name is empty)\n", label)
+		return
+	}
+	if available[model] {
+		fmt.Printf("%-14s ok (%s)\n", label, model)
+		return
+	}
+	names := make([]string, 0, len(available))
+	for id := range available {
+		names = append(names, id)
+	}
+	fmt.Printf("%-14s missing (%q not in downloaded models: %s)\n", label, model, strings.Join(names, ", "))
 }
 
 func isWaylandLikeSession() bool {

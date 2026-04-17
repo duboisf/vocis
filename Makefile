@@ -12,6 +12,9 @@ build:
 	mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(APP) ./cmd/vocis
 
+install:
+	go install -ldflags "$(LDFLAGS)" ./cmd/vocis
+
 test:
 	go test ./...
 
