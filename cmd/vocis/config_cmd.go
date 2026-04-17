@@ -194,6 +194,14 @@ func detectLemonade() (string, string, bool) {
 type modelChoice struct {
 	ID   string
 	Note string
+	// Group is an optional section key used by pickModel to break the list
+	// into visual sections. Choices with the same Group value are printed
+	// together; an empty Group disables grouping for that backend.
+	Group string
+	// sortKey is an internal opaque string used to order choices within
+	// their group. Set by the backend fetch function so pickModel itself
+	// stays backend-agnostic.
+	sortKey string
 }
 
 func runConfigModels() error {
@@ -383,8 +391,12 @@ func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {
 			continue
 		}
 		labels := labelSet(m.Labels)
-		note := lemonadeNote(m.Size, m.Recipe, m.Downloaded)
-		choice := modelChoice{ID: m.ID, Note: note}
+		choice := modelChoice{
+			ID:      m.ID,
+			Note:    lemonadeNote(m.Size),
+			Group:   lemonadeGroup(m.Downloaded, m.Recipe),
+			sortKey: lemonadeSortKey(m.Downloaded, m.Recipe, m.ID),
+		}
 		if labels["transcription"] {
 			tx = append(tx, choice)
 		}
@@ -392,8 +404,8 @@ func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {
 			pp = append(pp, choice)
 		}
 	}
-	sort.Slice(tx, lemonadeLess(tx))
-	sort.Slice(pp, lemonadeLess(pp))
+	sort.Slice(tx, func(i, j int) bool { return tx[i].sortKey < tx[j].sortKey })
+	sort.Slice(pp, func(i, j int) bool { return pp[i].sortKey < pp[j].sortKey })
 	return tx, pp, nil
 }
 
@@ -418,36 +430,55 @@ func labelSet(ls []string) map[string]bool {
 	return m
 }
 
-func lemonadeNote(sizeGB float64, recipe string, downloaded bool) string {
+func lemonadeNote(sizeGB float64) string {
+	if sizeGB > 0 {
+		return fmt.Sprintf("%.2fGB", sizeGB)
+	}
+	return ""
+}
+
+func lemonadeGroup(downloaded bool, recipe string) string {
 	status := "available"
 	if downloaded {
 		status = "downloaded"
 	}
-	if sizeGB > 0 {
-		return fmt.Sprintf("%.2fGB %s %s", sizeGB, recipe, status)
+	if recipe == "" {
+		return status
 	}
-	return fmt.Sprintf("%s %s", recipe, status)
+	return status + " / " + recipe
 }
 
-// lemonadeLess sorts downloaded models first, then alpha by id.
-func lemonadeLess(s []modelChoice) func(i, j int) bool {
-	return func(i, j int) bool {
-		di := strings.Contains(s[i].Note, "downloaded")
-		dj := strings.Contains(s[j].Note, "downloaded")
-		if di != dj {
-			return di
-		}
-		return s[i].ID < s[j].ID
+// lemonadeSortKey builds an opaque string that orders choices the way the
+// picker should display them: downloaded models first, then alpha by recipe,
+// then alpha by id. Using a string key keeps the sort.Slice call in the
+// fetch function simple.
+func lemonadeSortKey(downloaded bool, recipe, id string) string {
+	dl := "b"
+	if downloaded {
+		dl = "a"
 	}
+	return fmt.Sprintf("%s|%s|%s", dl, recipe, id)
 }
 
 // pickModel prints a numbered list of choices and reads a 1-based selection from
-// stdin. An empty reply keeps the current model.
+// stdin. An empty reply keeps the current model. When choices carry a non-empty
+// Group, a header line is printed whenever the group changes so the user sees
+// the list broken into sections (e.g. downloaded vs available, flm vs llamacpp).
 func pickModel(choices []modelChoice, current string) (string, error) {
 	currentIdx := -1
+	lastGroup := ""
+	printedAnyGroup := false
 	for i, c := range choices {
 		if c.ID == current {
 			currentIdx = i
+		}
+		if c.Group != "" && c.Group != lastGroup {
+			if printedAnyGroup {
+				fmt.Println()
+			}
+			fmt.Printf("  -- %s --\n", c.Group)
+			lastGroup = c.Group
+			printedAnyGroup = true
 		}
 		marker := " "
 		if c.ID == current {
