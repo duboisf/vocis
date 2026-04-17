@@ -74,7 +74,12 @@ func TestLemonadeTransportSessionUpdateShape(t *testing.T) {
 		Model:    "Whisper-Tiny",
 		Language: "en",
 	}
-	transport := newLemonadeTransport(cfg, config.StreamingConfig{}, time.Second)
+	streaming := config.StreamingConfig{
+		PrefixPaddingMS:   300,
+		SilenceDurationMS: 500,
+		Threshold:         0.02,
+	}
+	transport := newLemonadeTransport(cfg, streaming, time.Second)
 
 	payload := transport.SessionUpdate()
 	if got := payload["type"]; got != "session.update" {
@@ -93,6 +98,24 @@ func TestLemonadeTransportSessionUpdateShape(t *testing.T) {
 	// Lemonade's payload is flat — must NOT contain OpenAI's nested audio/transcription wrappers.
 	if _, exists := session["audio"]; exists {
 		t.Fatalf("session.audio should not be present in lemonade payload, got %v", session["audio"])
+	}
+
+	td, ok := session["turn_detection"].(map[string]any)
+	if !ok {
+		t.Fatalf("session.turn_detection = %T, want map[string]any", session["turn_detection"])
+	}
+	if got := td["threshold"]; got != 0.02 {
+		t.Fatalf("turn_detection.threshold = %v, want 0.02", got)
+	}
+	if got := td["silence_duration_ms"]; got != 500 {
+		t.Fatalf("turn_detection.silence_duration_ms = %v, want 500", got)
+	}
+	if got := td["prefix_padding_ms"]; got != 300 {
+		t.Fatalf("turn_detection.prefix_padding_ms = %v, want 300", got)
+	}
+	// Lemonade's turn_detection must NOT carry OpenAI's `type: server_vad` field.
+	if _, exists := td["type"]; exists {
+		t.Fatalf("turn_detection.type should not be present in lemonade payload")
 	}
 }
 

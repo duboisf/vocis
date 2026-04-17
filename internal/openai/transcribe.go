@@ -74,6 +74,10 @@ func New(apiKey string, cfg config.OpenAIConfig, streaming config.StreamingConfi
 	var transport Transport
 	switch cfg.Backend {
 	case config.BackendLemonade:
+		if streaming.Threshold > 0.1 {
+			sessionlog.Warnf("streaming.threshold=%.2f is likely too high for Lemonade (RMS energy 0-1, default 0.01) — speech may never trigger transcription; try 0.01-0.05",
+				streaming.Threshold)
+		}
 		transport = newLemonadeTransport(cfg, streaming, timeout)
 	default:
 		transport = newOpenAITransport(cfg, streaming, sdkClient, baseURL, timeout)
@@ -847,6 +851,11 @@ func (s *Stream) readLoop() {
 		switch raw.Type() {
 		case "session.created", "session.updated":
 			s.markReady(nil)
+		case "input_audio_buffer.speech_started",
+			"input_audio_buffer.speech_stopped",
+			"input_audio_buffer.committed",
+			"input_audio_buffer.cleared":
+			sessionlog.Debugf("realtime: %s", raw.Type())
 		case "conversation.item.input_audio_transcription.delta":
 			var event transcriptionDeltaEvent
 			if err := raw.decode(&event); err == nil && event.Delta != "" {

@@ -85,7 +85,8 @@ func (t *lemonadeTransport) buildURL() (string, error) {
 
 func (t *lemonadeTransport) SessionUpdate() map[string]any {
 	session := map[string]any{
-		"model": t.cfg.Model,
+		"model":          t.cfg.Model,
+		"turn_detection": t.turnDetectionPayload(),
 	}
 	if language := strings.TrimSpace(t.cfg.Language); language != "" {
 		session["language"] = language
@@ -93,5 +94,20 @@ func (t *lemonadeTransport) SessionUpdate() map[string]any {
 	return map[string]any{
 		"type":    "session.update",
 		"session": session,
+	}
+}
+
+// turnDetectionPayload builds Lemonade's VAD config. Note that Lemonade's
+// `threshold` is RMS energy (0-1, default 0.01), NOT the 0-1 probability
+// OpenAI uses — they share a field name but not semantics. We pass
+// streaming.Threshold through unchanged so the user can tune it in config,
+// but vocis warns if the configured value looks like an OpenAI-shaped
+// threshold (> 0.1) that will almost certainly reject all speech against
+// Lemonade's RMS scale.
+func (t *lemonadeTransport) turnDetectionPayload() map[string]any {
+	return map[string]any{
+		"threshold":           t.streaming.Threshold,
+		"silence_duration_ms": t.streaming.SilenceDurationMS,
+		"prefix_padding_ms":   t.streaming.PrefixPaddingMS,
 	}
 }
