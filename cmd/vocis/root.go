@@ -21,7 +21,7 @@ transcribe and paste into the focused application.`,
 
 func init() {
 	rootCmd.AddCommand(serveCmd)
-	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.AddCommand(keyCmd)
 }

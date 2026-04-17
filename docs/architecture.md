@@ -26,7 +26,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 
 ## Top-level entry points
 
-- [`cmd/vocis/`](/home/fred/git/vtt/cmd/vocis/): Cobra-based CLI with one file per command (`root.go`, `serve.go`, `init_cmd.go`, `doctor.go`, `key.go`)
+- [`cmd/vocis/`](/home/fred/git/vtt/cmd/vocis/): Cobra-based CLI with one file per command group (`root.go`, `serve.go`, `config_cmd.go`, `doctor.go`, `key.go`). `config_cmd.go` hosts the `config` parent plus `config init|backend|models` subcommands.
 - [`README.md`](/home/fred/git/vtt/README.md): user-facing setup and usage
 - [`config.example.yaml`](/home/fred/git/vtt/config.example.yaml): config shape example
 

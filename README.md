@@ -50,7 +50,7 @@ XWayland and inherit its limitations.
 
 ```bash
 make build
-./bin/vocis init
+./bin/vocis config init
 ./bin/vocis key set
 ./bin/vocis serve
 ```
@@ -85,8 +85,17 @@ and paste the raw transcription immediately.
 ## Config
 
 The first run creates `~/.config/vocis/config.yaml`. A sample lives at
-`config.example.yaml`. Running `vocis init` when a config exists opens
+`config.example.yaml`. Running `vocis config init` when a config exists opens
 Neovim in diff mode so you can merge new defaults.
+
+Other `config` subcommands:
+
+- `vocis config backend` — interactively pick `openai` or `lemonade`; autodetects
+  a running Lemonade Server on localhost and sets the right URLs.
+- `vocis config models` — list models from the configured backend and pick one
+  for transcription and one for post-processing. OpenAI is filtered by naming
+  heuristic (TX = `*-transcribe` / `whisper*`, PP = `gpt-*` / `o[0-9]*`);
+  Lemonade shows all models with download status.
 
 Important fields:
 
