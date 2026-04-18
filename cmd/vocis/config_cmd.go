@@ -65,11 +65,24 @@ var configModelsCmd = &cobra.Command{
 	},
 }
 
+var configEditCmd = &cobra.Command{
+	Use:   "edit",
+	Short: "Open the config file in $EDITOR",
+	Long: `Open the config file in the user's editor. Resolution order: $VISUAL,
+$EDITOR, then nvim/vim/nano if found on PATH. Creates the config with
+defaults first if it doesn't exist yet, so the editor never opens an
+empty buffer.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runConfigEdit()
+	},
+}
+
 func init() {
 	configInitCmd.Flags().BoolVar(&configInitForce, "force", false, "overwrite existing config with defaults")
 	configCmd.AddCommand(configInitCmd)
 	configCmd.AddCommand(configBackendCmd)
 	configCmd.AddCommand(configModelsCmd)
+	configCmd.AddCommand(configEditCmd)
 }
 
 // runConfigInit is the former top-level `vocis init`, moved under `vocis config init`.
@@ -115,6 +128,57 @@ func runConfigInit(force bool) error {
 	}
 	fmt.Println("cleaned up", newPath)
 	return nil
+}
+
+// runConfigEdit opens the config file in the user's preferred editor.
+// We do not validate or rewrite the file afterwards — the next time vocis
+// loads the config it will run Validate() and surface errors there.
+func runConfigEdit() error {
+	path, err := config.Path()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := config.Save(path, config.Default()); err != nil {
+			return err
+		}
+		fmt.Printf("created %s with defaults\n", path)
+	}
+
+	editorArgv, source, err := resolveEditor()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("opening %s with %s (%s)\n", path, strings.Join(editorArgv, " "), source)
+
+	argv := append(append([]string{}, editorArgv...), path)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%s: %w", argv[0], err)
+	}
+	return nil
+}
+
+// resolveEditor picks an editor command in this order: $VISUAL, $EDITOR,
+// then a hardcoded fallback list. Whitespace in the env value is treated
+// as argv separators (so VISUAL="code --wait" works). The returned source
+// string is shown to the user so they can tell where the choice came
+// from when debugging.
+func resolveEditor() ([]string, string, error) {
+	for _, env := range []string{"VISUAL", "EDITOR"} {
+		if v := strings.TrimSpace(os.Getenv(env)); v != "" {
+			return strings.Fields(v), "$" + env, nil
+		}
+	}
+	for _, candidate := range []string{"nvim", "vim", "nano"} {
+		if _, ok := findExecutable(candidate); ok {
+			return []string{candidate}, "fallback", nil
+		}
+	}
+	return nil, "", errors.New("no editor found: set $VISUAL or $EDITOR, or install nvim/vim/nano")
 }
 
 func runConfigBackend() error {
