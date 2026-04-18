@@ -11,6 +11,11 @@
 // Deactivated. Polling is gated to only the time between Activated and
 // Deactivated, so steady-state cost is zero.
 //
+// The extension also exposes window/keyboard/clipboard primitives so the
+// daemon can paste text, restore focus, and synthesize Enter without
+// shelling out to xdotool / xclip — both of which are unreliable on
+// Wayland and which are missing entirely on GNOME-only setups.
+//
 // D-Bus surface (well-known name `io.github.duboisf.Vocis.Hotkey`,
 // path `/io/github/duboisf/Vocis/Hotkey`,
 // interface `io.github.duboisf.Vocis.Hotkey`):
@@ -18,12 +23,18 @@
 //   signal Deactivated(s shortcut)
 //   method GetShortcut() -> s
 //   method GetFocusedWindow() -> (s wm_class, s title, s id)
+//   method ActivateWindow(s id) -> b ok
+//   method SendKeys(s combo) -> b ok
+//   method ReleaseModifiers(as keys) -> b ok
+//   method SetClipboard(s text)
+//   method GetClipboard() -> s text
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
 import Meta from 'gi://Meta';
 import Shell from 'gi://Shell';
 import Clutter from 'gi://Clutter';
+import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
@@ -53,8 +64,56 @@ const INTERFACE_XML = `
       <arg direction="out" type="s" name="title"/>
       <arg direction="out" type="s" name="id"/>
     </method>
+    <method name="ActivateWindow">
+      <arg direction="in" type="s" name="id"/>
+      <arg direction="out" type="b" name="ok"/>
+    </method>
+    <method name="SendKeys">
+      <arg direction="in" type="s" name="combo"/>
+      <arg direction="out" type="b" name="ok"/>
+    </method>
+    <method name="ReleaseModifiers">
+      <arg direction="in" type="as" name="keys"/>
+      <arg direction="out" type="b" name="ok"/>
+    </method>
+    <method name="SetClipboard">
+      <arg direction="in" type="s" name="text"/>
+    </method>
+    <method name="GetClipboard">
+      <arg direction="out" type="s" name="text"/>
+    </method>
   </interface>
 </node>`;
+
+// Maps a vocis-config key name (case-insensitive) to a Clutter keysym. Only
+// keys actually used by vocis insertion paths are listed — extending later
+// is cheap. Single ASCII characters (a-z, A-Z, 0-9, punctuation) are
+// resolved separately via Clutter.unicode_to_keysym at call time.
+const KEY_ALIASES = {
+    'ctrl': Clutter.KEY_Control_L,
+    'control': Clutter.KEY_Control_L,
+    'shift': Clutter.KEY_Shift_L,
+    'alt': Clutter.KEY_Alt_L,
+    'meta': Clutter.KEY_Super_L,
+    'super': Clutter.KEY_Super_L,
+    'win': Clutter.KEY_Super_L,
+    'return': Clutter.KEY_Return,
+    'enter': Clutter.KEY_Return,
+    'tab': Clutter.KEY_Tab,
+    'space': Clutter.KEY_space,
+    'escape': Clutter.KEY_Escape,
+    'esc': Clutter.KEY_Escape,
+    'backspace': Clutter.KEY_BackSpace,
+    'delete': Clutter.KEY_Delete,
+    'home': Clutter.KEY_Home,
+    'end': Clutter.KEY_End,
+    'pageup': Clutter.KEY_Page_Up,
+    'pagedown': Clutter.KEY_Page_Down,
+    'up': Clutter.KEY_Up,
+    'down': Clutter.KEY_Down,
+    'left': Clutter.KEY_Left,
+    'right': Clutter.KEY_Right,
+};
 
 export default class VocisHotkeyExtension extends Extension {
     enable() {
@@ -64,6 +123,7 @@ export default class VocisHotkeyExtension extends Extension {
         this._busOwnerId = 0;
         this._dbusImpl = null;
         this._isHeld = false;
+        this._keyboardDevice = null;
 
         this._exportDbus();
         this._registerAccelerator();
@@ -73,6 +133,7 @@ export default class VocisHotkeyExtension extends Extension {
         this._stopPolling();
         this._unregisterAccelerator();
         this._unexportDbus();
+        this._keyboardDevice = null;
     }
 
     // -- D-Bus -------------------------------------------------------------
@@ -81,6 +142,11 @@ export default class VocisHotkeyExtension extends Extension {
         this._dbusImpl = Gio.DBusExportedObject.wrapJSObject(INTERFACE_XML, {
             GetShortcut: () => SHORTCUT_LABEL,
             GetFocusedWindow: () => this._getFocusedWindow(),
+            ActivateWindow: (id) => this._activateWindow(id),
+            SendKeys: (combo) => this._sendKeys(combo),
+            ReleaseModifiers: (keys) => this._releaseModifiers(keys),
+            SetClipboard: (text) => this._setClipboard(text),
+            GetClipboardAsync: (params, invocation) => this._getClipboardAsync(invocation),
         });
         this._dbusImpl.export(Gio.DBus.session, OBJECT_PATH);
 
@@ -126,6 +192,115 @@ export default class VocisHotkeyExtension extends Extension {
         const title = win.get_title() || '';
         const id = String(win.get_id());
         return [wmClass, title, id];
+    }
+
+    // Re-focuses the Mutter window with the given stringified id (as
+    // returned by GetFocusedWindow). Returns false if no such window is
+    // currently mapped — the daemon should treat that as "user moved on,
+    // skip insertion" rather than retry.
+    _activateWindow(id) {
+        if (!id) return false;
+        const target = String(id);
+        for (const win of global.get_window_actors().map(a => a.meta_window)) {
+            if (!win) continue;
+            if (String(win.get_id()) === target) {
+                win.activate(global.get_current_time());
+                return true;
+            }
+        }
+        console.warn(`[vocis] ActivateWindow: no window with id=${target}`);
+        return false;
+    }
+
+    // Synthesizes a key combo such as "ctrl+v", "ctrl+shift+v", or
+    // "Return" via Mutter's virtual keyboard. All non-final tokens are
+    // treated as modifiers; the final token is the action key. Returns
+    // false on parse error (unknown key) so the daemon can log and
+    // surface the failure rather than silently dropping the paste.
+    _sendKeys(combo) {
+        const parts = combo.split('+').map(p => p.trim()).filter(Boolean);
+        if (parts.length === 0) {
+            console.warn('[vocis] SendKeys: empty combo');
+            return false;
+        }
+
+        const keyvals = [];
+        for (const part of parts) {
+            const keyval = this._resolveKeyval(part);
+            if (keyval === 0) {
+                console.warn(`[vocis] SendKeys: unknown key "${part}" in combo "${combo}"`);
+                return false;
+            }
+            keyvals.push(keyval);
+        }
+
+        const device = this._virtualKeyboard();
+        const time = global.get_current_time();
+
+        // Press in left-to-right order, release in reverse — same shape as
+        // xdotool's `key` so apps see the same event sequence they would
+        // from a real keyboard.
+        for (const k of keyvals) {
+            device.notify_keyval(time, k, Clutter.KeyState.PRESSED);
+        }
+        for (let i = keyvals.length - 1; i >= 0; i--) {
+            device.notify_keyval(time, keyvals[i], Clutter.KeyState.RELEASED);
+        }
+        return true;
+    }
+
+    // Releases each named modifier without pressing it first. Mirrors
+    // `xdotool keyup` and is used after dictation to drop the still-held
+    // hotkey modifiers so the synthesized paste shortcut isn't combined
+    // with them by the focused app.
+    _releaseModifiers(keys) {
+        if (!keys || keys.length === 0) return true;
+        const device = this._virtualKeyboard();
+        const time = global.get_current_time();
+        for (const key of keys) {
+            const keyval = this._resolveKeyval(key);
+            if (keyval === 0) {
+                console.warn(`[vocis] ReleaseModifiers: unknown key "${key}"`);
+                continue;
+            }
+            device.notify_keyval(time, keyval, Clutter.KeyState.RELEASED);
+        }
+        return true;
+    }
+
+    _setClipboard(text) {
+        St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text || '');
+    }
+
+    // GetClipboard is async because St.Clipboard.get_text uses a callback
+    // — GJS lets us complete the D-Bus invocation manually so the caller
+    // sees a normal sync method.
+    _getClipboardAsync(invocation) {
+        St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_clipboard, text) => {
+            invocation.return_value(GLib.Variant.new('(s)', [text || '']));
+        });
+    }
+
+    _virtualKeyboard() {
+        if (!this._keyboardDevice) {
+            const seat = Clutter.get_default_backend().get_default_seat();
+            this._keyboardDevice = seat.create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
+        }
+        return this._keyboardDevice;
+    }
+
+    // Resolves a vocis-config-style key name to a Clutter keysym. Returns
+    // 0 on failure so callers can detect parse errors. Aliases are looked
+    // up case-insensitively; single Unicode chars fall through to
+    // Clutter.unicode_to_keysym.
+    _resolveKeyval(key) {
+        const lower = key.toLowerCase();
+        if (KEY_ALIASES[lower] !== undefined) return KEY_ALIASES[lower];
+        if (key.length === 1) {
+            const ksym = Clutter.unicode_to_keysym(key.charCodeAt(0));
+            return ksym || 0;
+        }
+        return 0;
     }
 
     // -- Accelerator -------------------------------------------------------
