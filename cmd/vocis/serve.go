@@ -15,6 +15,7 @@ import (
 	"vocis/internal/config"
 	"vocis/internal/platform"
 	"vocis/internal/platform/gnome"
+	"vocis/internal/platform/inject"
 	x11 "vocis/internal/platform/x11"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
@@ -64,28 +65,34 @@ func runServe() error {
 		return fmt.Errorf("init overlay: %w", err)
 	}
 
+	compositor, compositorBackend := pickCompositor()
+	sessionlog.Infof("compositor backend: %s", compositorBackend)
+
 	registrar, backend := pickHotkeyRegistrar()
 	return app.New(cfg, app.Deps{
 		Overlay:        ov,
-		Injector:       x11.NewInjector(cfg.Insertion, cfg.Hotkey, pickTargetCapture()),
+		Injector:       inject.New(cfg.Insertion, compositor, cfg.Hotkey),
 		Ducker:         audio.NewDucker(cfg.Recording.DuckVolume),
 		RegisterHotkey: registrar,
 		HotkeyBackend:  backend,
 	}).Run(ctx)
 }
 
-// pickTargetCapture returns an override for the injector's CaptureTarget on
-// systems where xdotool can't see the focused window. On Wayland we ask the
-// vocis-gnome shell extension. On X11 (or when the extension is missing) we
-// return nil and let the injector use its default xdotool path.
-func pickTargetCapture() x11.TargetCapture {
-	if !isWaylandSession() || !gnome.Available() {
-		return nil
+// pickCompositor returns the platform.Compositor matching the current
+// session. On Wayland with the vocis-gnome extension reachable we use
+// the gnome compositor (no xdotool/xclip dependency). Otherwise we use
+// the X11 compositor which shells out to xdotool/xclip.
+func pickCompositor() (platform.Compositor, string) {
+	if isWaylandSession() {
+		if c, err := gnome.NewCompositor(); err == nil {
+			return c, "gnome-extension"
+		} else if !gnome.IsExtensionUnreachable(err) {
+			sessionlog.Warnf("gnome compositor: %v — falling back to x11", err)
+		} else {
+			sessionlog.Warnf("compositor: vocis-gnome extension not detected on session bus, falling back to x11/xdotool")
+		}
 	}
-	sessionlog.Infof("target capture: vocis-gnome extension")
-	return func(ctx context.Context) (platform.Target, error) {
-		return gnome.FocusedWindow(ctx)
-	}
+	return x11.NewCompositor(), "x11"
 }
 
 // pickHotkeyRegistrar selects a global hotkey backend based on the running
