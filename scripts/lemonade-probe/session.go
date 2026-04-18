@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/term"
 )
 
 // Event is a single WS frame crossing the session boundary, used for
@@ -32,6 +34,7 @@ type Config struct {
 	VADms      int       // turn_detection.silence_duration_ms; -1 disables turn_detection
 	Log        io.Writer // event log destination; nil → silent
 	Transcript io.Writer // receives each turn's text the moment `completed` arrives (one line per turn); nil → silent
+	Live       io.Writer // receives interim deltas in-place via \r + ANSI clear-to-EOL; nil → silent. Expects a terminal.
 	Debug      bool      // dump raw JSON for every WS frame
 }
 
@@ -300,15 +303,28 @@ func (s *Session) noteInbound(now time.Time, kind string, msg map[string]any) {
 	case "input_audio_buffer.committed":
 		s.result.CommitAcked = true
 	case "conversation.item.input_audio_transcription.delta":
-		if d, _ := msg["delta"].(string); d != "" && s.result.FirstDelta == "" {
-			s.result.FirstDelta = d
-			s.result.FirstDeltaAt = now
+		if d, _ := msg["delta"].(string); d != "" {
+			if s.result.FirstDelta == "" {
+				s.result.FirstDelta = d
+				s.result.FirstDeltaAt = now
+			}
+			// Lemonade re-sends the full running partial in every
+			// delta, so \r + clear-to-EOL gives a clean in-place update.
+			// Truncate to the terminal width — otherwise long deltas wrap
+			// and \r leaves cruft from the previous longer delta on the
+			// rows above.
+			if s.cfg.Live != nil {
+				fmt.Fprintf(s.cfg.Live, "\r\033[K%s", liveLine(strings.TrimSpace(d)))
+			}
 		}
 	case "conversation.item.input_audio_transcription.completed":
 		if tr, _ := msg["transcript"].(string); tr != "" {
 			s.result.Turns = append(s.result.Turns, tr)
-			// Stream the turn out as it lands — caller can pipe stdout
-			// to a file/tee while the session is still running.
+			// Terminate the live line so the next turn's deltas start
+			// fresh; caller's Transcript writer gets the canonical text.
+			if s.cfg.Live != nil {
+				fmt.Fprintln(s.cfg.Live, "\r\033[K")
+			}
 			if s.cfg.Transcript != nil {
 				fmt.Fprintln(s.cfg.Transcript, strings.TrimSpace(tr))
 			}
@@ -350,6 +366,24 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
+}
+
+// liveLine fits a delta into the current terminal width, keeping the
+// tail (newest words) since deltas grow over time. Falls back to the
+// untouched string when stderr isn't a tty (size detection fails).
+func liveLine(s string) string {
+	width, _, err := term.GetSize(int(os.Stderr.Fd()))
+	if err != nil || width <= 0 {
+		return s
+	}
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
+	}
+	// Show "…" + the trailing (width-1) runes — the newest text is
+	// always at the end with Lemonade's full-partial deltas.
+	tail := runes[len(runes)-(width-1):]
+	return "…" + string(tail)
 }
 
 func joinTurns(turns []string) string {

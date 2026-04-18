@@ -26,6 +26,7 @@ func runSTT(args []string) error {
 	skipCommit := fs.Bool("skip_commit", false, "omit input_audio_buffer.commit and rely entirely on VAD auto-commit")
 	timeoutMs := fs.Int("timeout_ms", 30000, "safety ceiling for Collect; real exit is when every speech_started has a matching completed")
 	debug := fs.Bool("debug", false, "dump raw JSON for every WS frame")
+	live := fs.Bool("live", false, "render interim deltas in-place on stderr (subtitle-style); expects a terminal")
 
 	// TTS-only flags (ignored for wav/mic) — kept here so `stt text` is
 	// a one-liner without a second level of subcommand parsing.
@@ -53,14 +54,21 @@ func runSTT(args []string) error {
 	fmt.Fprintf(os.Stderr, "source: %s → %d samples @ %d Hz (%dms audio)\n",
 		describe, len(samples), rate, len(samples)*1000/rate)
 
-	session := New(Config{
+	cfg := Config{
 		URL:        *url,
 		Model:      *model,
 		VADms:      *silenceMs,
 		Log:        os.Stderr, // protocol events → stderr
 		Transcript: os.Stdout, // each completed turn → stdout, immediately
 		Debug:      *debug,
-	})
+	}
+	if *live {
+		// In live mode the protocol log would clobber the in-place
+		// delta line — silence it. Use -debug for raw frames, not -live.
+		cfg.Log = nil
+		cfg.Live = os.Stderr
+	}
+	session := New(cfg)
 	if err := session.Start(ctx); err != nil {
 		return err
 	}
