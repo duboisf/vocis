@@ -539,12 +539,17 @@ func (s *Stream) sendJSON(ctx context.Context, payload any) error {
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 		deadline = dl
 	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	dumpWSFrame("→", data)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	if err := s.conn.SetWriteDeadline(deadline); err != nil {
 		return err
 	}
-	return s.conn.WriteJSON(payload)
+	return s.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // ---------------------------------------------------------------------------
@@ -1176,6 +1181,24 @@ func startsWithPunctuation(text string) bool {
 	}
 }
 
+// dumpWSFrame writes a single WebSocket frame to stderr when
+// VOCIS_WS_DUMP=1. Skips `input_audio_buffer.append` entirely (one frame
+// per ~50ms, kilobytes of base64 each — drowns the interesting protocol
+// traffic). Audio append counts/bytes are still captured in span attrs.
+//
+// Sized at one stderr line per frame so it can be `tee`'d for protocol
+// debugging without parsing.
+func dumpWSFrame(direction string, data []byte) {
+	if os.Getenv("VOCIS_WS_DUMP") != "1" {
+		return
+	}
+	if strings.Contains(string(data), `"type":"input_audio_buffer.append"`) {
+		return
+	}
+	ts := time.Now().Format("15:04:05.000")
+	fmt.Fprintf(os.Stderr, "[ws %s %s] %s\n", ts, direction, data)
+}
+
 // ---------------------------------------------------------------------------
 // Stream read loop
 // ---------------------------------------------------------------------------
@@ -1185,8 +1208,15 @@ func (s *Stream) readLoop() {
 	defer close(s.events)
 
 	for {
+		_, data, err := s.conn.ReadMessage()
+		if err != nil {
+			s.markReady(err)
+			s.emit(StreamEvent{Type: StreamEventError, Err: err})
+			return
+		}
+		dumpWSFrame("←", data)
 		var raw jsonMessage
-		if err := s.conn.ReadJSON(&raw); err != nil {
+		if err := json.Unmarshal(data, &raw); err != nil {
 			s.markReady(err)
 			s.emit(StreamEvent{Type: StreamEventError, Err: err})
 			return
