@@ -38,6 +38,8 @@ import St from 'gi://St';
 
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 const ACCELERATOR = '<Ctrl><Shift>space';
 const SHORTCUT_LABEL = 'ctrl+shift+space';
@@ -124,15 +126,18 @@ export default class VocisHotkeyExtension extends Extension {
         this._dbusImpl = null;
         this._isHeld = false;
         this._keyboardDevice = null;
+        this._panelButton = null;
 
         this._exportDbus();
         this._registerAccelerator();
+        this._addPanelButton();
     }
 
     disable() {
         this._stopPolling();
         this._unregisterAccelerator();
         this._unexportDbus();
+        this._removePanelButton();
         this._keyboardDevice = null;
     }
 
@@ -279,6 +284,39 @@ export default class VocisHotkeyExtension extends Extension {
         St.Clipboard.get_default().get_text(St.ClipboardType.CLIPBOARD, (_clipboard, text) => {
             invocation.return_value(GLib.Variant.new('(s)', [text || '']));
         });
+    }
+
+    // -- Panel button ------------------------------------------------------
+
+    // Adds a microphone icon to the top bar with a single popup item to
+    // disable the extension. The "Disable" action shells out to
+    // `gnome-extensions disable` rather than calling Extension.disable()
+    // directly — disabling from inside a click handler unwinds the very
+    // object handling the click, which gjs warns about.
+    _addPanelButton() {
+        this._panelButton = new PanelMenu.Button(0.0, 'Vocis', false);
+
+        const icon = new St.Icon({
+            icon_name: 'audio-input-microphone-symbolic',
+            style_class: 'system-status-icon',
+        });
+        this._panelButton.add_child(icon);
+
+        const item = new PopupMenu.PopupMenuItem('Disable vocis-gnome');
+        item.connect('activate', () => {
+            const uuid = this.metadata?.uuid || 'vocis@duboisf.github.io';
+            GLib.spawn_command_line_async(`gnome-extensions disable ${uuid}`);
+        });
+        this._panelButton.menu.addMenuItem(item);
+
+        Main.panel.addToStatusArea('vocis', this._panelButton);
+    }
+
+    _removePanelButton() {
+        if (this._panelButton) {
+            this._panelButton.destroy();
+            this._panelButton = null;
+        }
     }
 
     _virtualKeyboard() {
