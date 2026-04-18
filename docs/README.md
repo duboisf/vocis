@@ -10,6 +10,7 @@ Reading order:
 2. [`architecture.md`](/home/fred/git/vtt/docs/architecture.md)
 3. [`runtime-flow.md`](/home/fred/git/vtt/docs/runtime-flow.md)
 4. [`debugging.md`](/home/fred/git/vtt/docs/debugging.md)
+5. [`lemonade.md`](/home/fred/git/vtt/docs/lemonade.md)
 
 How to use this set:
 
@@ -17,3 +18,4 @@ How to use this set:
 - Read `architecture.md` when you need to know where behavior lives in the codebase.
 - Read `runtime-flow.md` when you need the detailed dictation lifecycle, error behavior, and timing model. Includes a Mermaid sequence diagram.
 - Read `debugging.md` for logs, tracing (Jaeger), and diagnostic tips.
+- Read `lemonade.md` when working against the local Lemonade backend — REST + realtime WS endpoints, model conventions, and known quirks.
