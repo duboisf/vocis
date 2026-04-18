@@ -63,6 +63,17 @@ gnome-shell-nested:
 # same dbus-run-session so they share a session bus. Closing the nested
 # shell window or hitting Ctrl-C exits both.
 #
+# Crucially we point XDG_CONFIG_HOME at a fresh temp dir so the nested
+# session has its OWN dconf — without this, `enabled-extensions` is shared
+# with the outer session and disabling the extension in one disables it in
+# both. With a separate dconf you can `gnome-extensions disable
+# vocis@duboisf.github.io` in your normal outer terminal to drop the
+# outer's accelerator grab (so the hotkey reaches nested) without
+# affecting the nested instance.
+#
+# VOCIS_CONFIG is pinned to the user's real config since the temp
+# XDG_CONFIG_HOME would otherwise hide it from vocis.
+#
 # What works in this setup:
 #   - Hotkey events from the nested shell's accelerator → vocis (via D-Bus)
 #   - All extension methods exposed by io.github.duboisf.Vocis.Hotkey
@@ -74,18 +85,33 @@ gnome-shell-nested:
 #     one depending on DISPLAY/WAYLAND_DISPLAY plumbing.
 # Use this for extension/D-Bus iteration, not for full dictation tests.
 dev: install-extension
-	@dbus-run-session -- bash -c '\
-		MUTTER_DEBUG_DUMMY_MODE_SPECS=1280x800 \
-			gnome-shell --nested --wayland & \
-		SHELL_PID=$$!; \
-		trap "kill $$SHELL_PID 2>/dev/null; wait $$SHELL_PID 2>/dev/null" EXIT INT TERM; \
-		echo "[dev] waiting for nested shell to register on the session bus..."; \
-		for i in 1 2 3 4 5 6 7 8 9 10; do \
-			if gnome-extensions list >/dev/null 2>&1; then break; fi; \
-			sleep 1; \
-		done; \
-		echo "[dev] enabling $(EXTENSION_UUID)"; \
-		gnome-extensions enable $(EXTENSION_UUID) || echo "[dev] warning: enable failed"; \
-		echo "[dev] starting vocis serve"; \
-		./bin/$(APP) serve; \
-	'
+	@TMP_CONFIG=$$(mktemp -d -t vocis-dev-XXXXXX) && \
+		echo "[dev] nested XDG_CONFIG_HOME=$$TMP_CONFIG (separate dconf)" && \
+		XDG_CONFIG_HOME=$$TMP_CONFIG \
+		VOCIS_CONFIG=$$HOME/.config/vocis/config.yaml \
+		dbus-run-session -- bash -c '\
+			MUTTER_DEBUG_DUMMY_MODE_SPECS=1280x800 \
+				gnome-shell --nested --wayland & \
+			SHELL_PID=$$!; \
+			VOCIS_PID=""; \
+			cleanup() { \
+				[ -n "$$VOCIS_PID" ] && kill $$VOCIS_PID 2>/dev/null; \
+				kill $$SHELL_PID 2>/dev/null; \
+				wait 2>/dev/null; \
+				rm -rf '"$$TMP_CONFIG"'; \
+			}; \
+			trap cleanup EXIT INT TERM; \
+			echo "[dev] waiting for nested shell to register on the session bus..."; \
+			for i in 1 2 3 4 5; do \
+				if gnome-extensions list >/dev/null 2>&1; then break; fi; \
+				sleep 1; \
+			done; \
+			echo "[dev] enabling $(EXTENSION_UUID) in nested dconf only"; \
+			gnome-extensions enable $(EXTENSION_UUID) || echo "[dev] warning: enable failed"; \
+			echo "[dev] tip: \`gnome-extensions disable $(EXTENSION_UUID)\` in your OUTER terminal to free the accelerator"; \
+			echo "[dev] starting vocis serve"; \
+			./bin/$(APP) serve & \
+			VOCIS_PID=$$!; \
+			wait -n $$SHELL_PID $$VOCIS_PID; \
+			echo "[dev] one of {nested-shell, vocis} exited — tearing down both"; \
+		'
