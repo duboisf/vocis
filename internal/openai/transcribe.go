@@ -60,9 +60,15 @@ func New(apiKey string, cfg config.OpenAIConfig, streaming config.StreamingConfi
 	}
 
 	opts := []option.RequestOption{
-		option.WithAPIKey(apiKey),
 		option.WithBaseURL(baseURL),
 		option.WithRequestTimeout(timeout),
+	}
+	// Only attach an API key when one is actually configured. Passing
+	// WithAPIKey("") makes the SDK send `Authorization: Bearer ` (empty
+	// token) which Lemonade returns 500 on. Lemonade is unauthenticated;
+	// OpenAI rejects empty keys at the auth layer with a 401 anyway.
+	if apiKey != "" {
+		opts = append(opts, option.WithAPIKey(apiKey))
 	}
 	if org := organization(cfg); org != "" {
 		opts = append(opts, option.WithOrganization(org))
