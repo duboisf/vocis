@@ -40,6 +40,36 @@ type PostProcessResult struct {
 	Skipped bool
 }
 
+// WarmPostProcess fires a tiny chat completion to ensure `model` is
+// resident in the backend before the real post-process request runs.
+// On Lemonade this triggers the LLM-slot model swap eagerly so the
+// real PP request doesn't pay the 5s+ load cost. Idempotent and cheap
+// (~1 token) when the model is already loaded.
+//
+// Fire-and-forget: any error is logged and swallowed so warming never
+// affects the dictation path.
+func (c *Client) WarmPostProcess(ctx context.Context, model string) {
+	if model == "" {
+		return
+	}
+	maxTokens := int64(1)
+	stream := c.chatStreamer.NewStreaming(ctx, openaisdk.ChatCompletionNewParams{
+		Model: openaisdk.ChatModel(model),
+		Messages: []openaisdk.ChatCompletionMessageParamUnion{
+			openaisdk.UserMessage("ok"),
+		},
+		MaxCompletionTokens: openaisdk.Int(maxTokens),
+	})
+	for stream.Next() {
+		_ = stream.Current()
+	}
+	if err := stream.Err(); err != nil {
+		sessionlog.Warnf("postprocess warm %s: %v", model, err)
+		return
+	}
+	sessionlog.Debugf("postprocess warm %s ok", model)
+}
+
 type streamResult struct {
 	text string
 	err  error

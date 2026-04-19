@@ -375,6 +375,14 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	go a.consumeDictationEvents(recordCtx, state)
 	go a.monitorRecordingLevel(ctx, state.id, state.session)
 
+	// Pre-warm the post-processing model in the background while the user
+	// is still talking. On Lemonade with max_models.llm=1, this triggers
+	// the model swap eagerly so the real PP request after Finalize doesn't
+	// pay the 5s+ load cost. No-op if PP is disabled.
+	if a.cfg.PostProcess.Enabled && a.cfg.PostProcess.Model != "" {
+		go a.transcribe.WarmPostProcess(ctx, a.cfg.PostProcess.Model)
+	}
+
 	if a.cfg.Recording.MaxDurationSeconds > 0 {
 		go a.forceStopAfter(ctx, state.id, time.Duration(a.cfg.Recording.MaxDurationSeconds)*time.Second)
 	}

@@ -304,6 +304,17 @@ func (s *Stream) Partial() string {
 	return s.partial
 }
 
+// HasPendingTranscription is true when speech_started events outnumber
+// completed events — i.e., Lemonade is still running Whisper on a turn
+// we already streamed. Lets callers skip a fixed wait when no turn is
+// in flight.
+func (s *Stream) HasPendingTranscription() bool {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	completed := s.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]
+	return s.stats.SpeechStartedCount > completed
+}
+
 func (s *Stream) Events() <-chan StreamEvent { return s.events }
 
 func (s *Stream) Close() error {
@@ -964,6 +975,12 @@ func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 // drainPendingSegments collects segment results that may have arrived between
 // the recording stopping and Finalize being called.
 func (s *DictationSession) drainPendingSegments(ctx context.Context, stream *Stream) (string, error) {
+	// Skip the wait when nothing is in flight: no Whisper turn pending
+	// AND no in-flight partial. Saves ~250ms on the common single-turn
+	// dictation case where VAD never fired before commit.
+	if !stream.HasPendingTranscription() && strings.TrimSpace(stream.Partial()) == "" {
+		return "", nil
+	}
 	timer := time.NewTimer(250 * time.Millisecond)
 	defer timer.Stop()
 
