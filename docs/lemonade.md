@@ -139,15 +139,20 @@ Observations:
   [`internal/openai/transcribe.go`](../internal/openai/transcribe.go)
   spans `vocis.transcribe.wait_final` for the live gap (`first_event_ms`
   vs `completed_ms`).
-- **Cumulative deltas (not incremental).** OpenAI's realtime API emits
-  `transcription.delta` events where each `delta` is only the *new*
-  text to append (`"Ok"`, `" I"`, `" see"`). Lemonade instead emits each
-  delta as the *full* transcript so far (`"Ok"`, `"OK I"`, `"OK I see"`).
-  Naïve concatenation (`partial += delta`) produces junk like
-  `"OkOK IOK I see"`. Each backend declares its own strategy via
-  `Transport.MergePartialDelta`: the OpenAI transport appends, the
-  Lemonade transport replaces. `Stream.appendPartial` calls through
-  this strategy rather than hardcoding either behavior.
+- **Cumulative deltas under Whisper (not incremental).** Per OpenAI's
+  [realtime docs](https://developers.openai.com/api/docs/guides/realtime-transcription#handling-transcriptions):
+  `whisper-1` emits each `transcription.delta` as the full turn
+  transcript (same text as `completed`), while `gpt-4o-transcribe`
+  and `gpt-4o-mini-transcribe` emit incremental new text. Lemonade's
+  Whisper models (e.g. `whisper-v3-turbo-FLM`) follow the same
+  cumulative pattern — so the delta semantics are model-specific, not
+  backend-specific. Naïve concatenation (`partial += delta`) against
+  cumulative deltas produces junk like `"OkOK IOK I see"`. The
+  package-level `deltaStrategyForModel` helper (in `delta.go`) picks
+  `mergeCumulativeDelta` when the model name contains `"whisper"`
+  (case-insensitive) and `mergeIncrementalDelta` otherwise. `Stream`
+  is wired with this strategy at construction; neither `Transport`
+  implementation knows about delta semantics.
 - **Silence hallucinations.** On silent or near-silent audio Whisper
   often emits repeated phrases into the delta stream (`"Thank you. Thank
   you. Thank you…"`). The `completed` event usually contains the

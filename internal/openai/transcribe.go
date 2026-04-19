@@ -146,10 +146,10 @@ type Stream struct {
 	partials  map[string]string
 
 	// mergeDelta decides how a transcription.delta event combines with the
-	// running partial — OpenAI is incremental (append), Lemonade is
-	// cumulative (replace). Populated from Transport.MergePartialDelta at
-	// stream construction; tests may set it directly. A nil value defaults
-	// to incremental concatenation via appendPartial.
+	// running partial — incremental (append) for gpt-4o-transcribe et al.,
+	// cumulative (replace) for Whisper variants. Chosen from cfg.Model via
+	// deltaStrategyForModel at stream construction; tests may set it
+	// directly. A nil value falls back to incremental in appendPartial.
 	mergeDelta func(existing, delta string) string
 
 	// postCommitSpan receives one event per post-commit inbound message
@@ -267,7 +267,7 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 		events:       make(chan StreamEvent, 16),
 		readDone:     make(chan struct{}),
 		stats:        newStats(),
-		mergeDelta:   c.transport.MergePartialDelta,
+		mergeDelta:   deltaStrategyForModel(c.cfg.Model),
 	}
 	go stream.readLoop()
 

@@ -44,10 +44,6 @@ func newOpenAITransport(
 
 func (t *openaiTransport) SampleRate() int { return openaiSampleRate }
 
-func (t *openaiTransport) MergePartialDelta(existing, delta string) string {
-	return mergeIncrementalDelta(existing, delta)
-}
-
 func (t *openaiTransport) Dial(ctx context.Context) (*websocket.Conn, error) {
 	secret, err := t.createClientSecret(ctx)
 	if err != nil {

@@ -504,23 +504,9 @@ func TestAppendSegmentTextAddsSpaceBetweenChunks(t *testing.T) {
 	}
 }
 
-// TestOpenAITransportMergePartialDeltaAppends documents that OpenAI's
-// realtime API emits each transcription.delta as the *incremental* new
-// text — the merge strategy concatenates.
-func TestOpenAITransportMergePartialDeltaAppends(t *testing.T) {
-	t.Parallel()
-
-	transport := &openaiTransport{}
-	if got := transport.MergePartialDelta("Ok", " I"); got != "Ok I" {
-		t.Fatalf("MergePartialDelta = %q, want %q", got, "Ok I")
-	}
-	if got := transport.MergePartialDelta("", "Ok"); got != "Ok" {
-		t.Fatalf("MergePartialDelta (first) = %q, want %q", got, "Ok")
-	}
-}
-
-// TestStreamAppendPartialIncrementalDeltas exercises the OpenAI delta
-// semantics: each event carries only the new text to append.
+// TestStreamAppendPartialIncrementalDeltas exercises the incremental
+// delta semantics used by gpt-4o-transcribe et al.: each event carries
+// only the new text to append.
 func TestStreamAppendPartialIncrementalDeltas(t *testing.T) {
 	t.Parallel()
 
@@ -533,10 +519,10 @@ func TestStreamAppendPartialIncrementalDeltas(t *testing.T) {
 	}
 }
 
-// TestStreamAppendPartialCumulativeDeltas exercises the Lemonade delta
-// semantics: each event carries the full transcript so far. Naïve
-// concatenation would produce "OkOK IOK I see" — the transport's merge
-// strategy must replace rather than append.
+// TestStreamAppendPartialCumulativeDeltas exercises the cumulative
+// delta semantics used by Whisper models: each event carries the full
+// transcript so far. Naïve concatenation would produce
+// "OkOK IOK I see" — the merge strategy must replace rather than append.
 func TestStreamAppendPartialCumulativeDeltas(t *testing.T) {
 	t.Parallel()
 

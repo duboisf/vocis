@@ -127,24 +127,6 @@ func TestLemonadeTransportSampleRate(t *testing.T) {
 	}
 }
 
-// TestLemonadeTransportMergePartialDeltaReplaces documents that Lemonade
-// emits each transcription.delta as the full transcript so far — each new
-// delta replaces the accumulated partial rather than appending to it.
-func TestLemonadeTransportMergePartialDeltaReplaces(t *testing.T) {
-	t.Parallel()
-
-	transport := newLemonadeTransport(config.OpenAIConfig{Backend: config.BackendLemonade}, config.StreamingConfig{}, time.Second)
-	if got := transport.MergePartialDelta("Ok", "OK I"); got != "OK I" {
-		t.Fatalf("MergePartialDelta = %q, want %q", got, "OK I")
-	}
-	if got := transport.MergePartialDelta("OK I", "OK I see"); got != "OK I see" {
-		t.Fatalf("MergePartialDelta (grow) = %q, want %q", got, "OK I see")
-	}
-	if got := transport.MergePartialDelta("", "Ok"); got != "Ok" {
-		t.Fatalf("MergePartialDelta (first) = %q, want %q", got, "Ok")
-	}
-}
-
 // TestClientLemonadeBackendDialsWithoutClientSecret stands up a fake Lemonade
 // WS server (no /realtime/client_secrets endpoint, no auth header expected),
 // constructs a Client with backend=lemonade, and verifies StartStream connects
