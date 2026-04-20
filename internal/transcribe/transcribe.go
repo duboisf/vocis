@@ -1042,8 +1042,8 @@ func (s *DictationSession) streamAudio(
 			if vad != nil && time.Since(lastTrace) > 500*time.Millisecond {
 				snap := vad.Snapshot()
 				sessionlog.Debugf(
-					"client VAD: in_speech=%t rms=%.4f mean=%+.4f floor=%.4f eff_thr=%.4f silence_ms=%d speech_ms=%d",
-					snap.InSpeech, snap.LastRMS, snap.LastMean, snap.NoiseFloor, snap.EffectiveThr, snap.SilenceMs, snap.SpeechMs,
+					"client VAD: in_speech=%t last=%.4f max=%.4f min=%.4f mean=%+.4f floor=%.4f eff_thr=%.4f silence_ms=%d speech_ms=%d",
+					snap.InSpeech, snap.LastRMS, snap.MaxRMS, snap.MinRMS, snap.LastMean, snap.NoiseFloor, snap.EffectiveThr, snap.SilenceMs, snap.SpeechMs,
 				)
 				lastTrace = time.Now()
 			}

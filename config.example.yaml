@@ -68,14 +68,15 @@ streaming:
   # sub-1s clips, so 1000 is the default.
   min_utterance_ms: 1000
   # vad_backend: which client-side VAD to use when client_vad=true.
-  #   rms    — energy-threshold detector, no external deps (default).
-  #   silero — neural VAD via ONNX Runtime. More robust on noisy mics
-  #            but requires libonnxruntime.so installed and the path
-  #            set in onnxruntime_library.
-  vad_backend: rms
-  # onnxruntime_library: absolute path to libonnxruntime.so. Only used
-  # when vad_backend=silero. Download from
-  # https://github.com/microsoft/onnxruntime/releases and point here.
+  #   silero — neural VAD via ONNX Runtime (default). More robust on
+  #            noisy mics. Auto-discovers libonnxruntime.so from
+  #            common paths; falls back to rms if not installed.
+  #   rms    — energy-threshold detector, no external deps.
+  vad_backend: silero
+  # onnxruntime_library: absolute path to libonnxruntime.so. Leave
+  # empty to auto-discover from /usr/local/lib, /usr/lib, and
+  # ~/opt/onnxruntime/lib. Download from
+  # https://github.com/microsoft/onnxruntime/releases.
   onnxruntime_library: ""
   # Minimum seconds to wait for the trailing transcript after Finalize
   # commits the audio buffer. Cloud backends answer in under a second;

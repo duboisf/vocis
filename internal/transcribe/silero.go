@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 
 	ort "github.com/yalue/onnxruntime_go"
@@ -12,13 +13,18 @@ import (
 //go:embed silero/silero_vad.onnx
 var sileroModelBytes []byte
 
-// Silero VAD runs inference on fixed 512-sample windows at 16 kHz
-// (= 32 ms per window). Each call updates an LSTM-style hidden state
-// which must be fed back in as input on the next call.
+// Silero VAD runs inference on a sliding window: 64 samples of
+// context (the tail of the previous chunk) + 512 new samples = 576
+// samples total at 16 kHz. The context buffer preserves temporal
+// continuity across chunks; feeding only 512 samples with no context
+// makes the model classify everything as not-speech. Confirmed
+// against snakers4/silero-vad src/silero_vad/utils_vad.py.
 const (
 	sileroSampleRate      = 16000
 	sileroWindowSamples   = 512
-	sileroWindowMs        = 32 // 512 / 16000 * 1000
+	sileroContextSamples  = 64
+	sileroInputSamples    = sileroContextSamples + sileroWindowSamples // 576
+	sileroWindowMs        = 32                                         // 512 / 16000 * 1000
 	sileroStateSize       = 128
 	sileroStateRank       = 2
 	sileroSpeechThreshold = 0.5
@@ -45,18 +51,20 @@ var (
 // initSilero loads the ONNX Runtime shared library and compiles the
 // Silero VAD graph from the embedded model bytes. Safe to call
 // repeatedly — the first call does the work, subsequent calls return
-// the cached result. The library path is required (the shared
-// library is a runtime dependency we don't bundle).
+// the cached result. If libraryPath is empty, tries a list of common
+// install locations so users don't need to configure a path when
+// they've followed a standard install procedure.
 func initSilero(libraryPath string) error {
 	sileroInitOnce.Do(func() {
-		if libraryPath == "" {
-			sileroInitErr = errors.New("silero: library path required (set streaming.onnxruntime_library)")
-			return
-		}
 		if !ort.IsInitialized() {
-			ort.SetSharedLibraryPath(libraryPath)
+			resolved, err := resolveOnnxruntimeLibrary(libraryPath)
+			if err != nil {
+				sileroInitErr = err
+				return
+			}
+			ort.SetSharedLibraryPath(resolved)
 			if err := ort.InitializeEnvironment(); err != nil {
-				sileroInitErr = fmt.Errorf("onnxruntime init: %w", err)
+				sileroInitErr = fmt.Errorf("onnxruntime init (%s): %w", resolved, err)
 				return
 			}
 		}
@@ -77,6 +85,37 @@ func initSilero(libraryPath string) error {
 		sileroSession = sess
 	})
 	return sileroInitErr
+}
+
+// resolveOnnxruntimeLibrary picks a path to libonnxruntime.so. If the
+// user configured one, that wins. Otherwise we probe a list of common
+// install locations — system-wide first, then user-local — and return
+// the first that exists. Returns a descriptive error when nothing
+// works so the caller can surface it (and we can gracefully fall back
+// to the RMS VAD).
+func resolveOnnxruntimeLibrary(configured string) (string, error) {
+	if configured != "" {
+		if _, err := os.Stat(configured); err != nil {
+			return "", fmt.Errorf("onnxruntime library %q: %w", configured, err)
+		}
+		return configured, nil
+	}
+	candidates := []string{
+		"/usr/local/lib/libonnxruntime.so",
+		"/usr/lib/libonnxruntime.so",
+		"/usr/lib/x86_64-linux-gnu/libonnxruntime.so",
+		os.ExpandEnv("$HOME/opt/onnxruntime/lib/libonnxruntime.so"),
+		os.ExpandEnv("$HOME/.local/lib/libonnxruntime.so"),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"libonnxruntime.so not found (tried %v); install from https://github.com/microsoft/onnxruntime/releases or set streaming.onnxruntime_library",
+		candidates,
+	)
 }
 
 // SileroVAD wraps the shared Silero session with per-instance hidden
@@ -104,6 +143,11 @@ type SileroVAD struct {
 	// buf holds int16 samples that haven't filled a full 512-window
 	// yet. Capacity grows to accommodate the largest recorder chunk.
 	buf []int16
+
+	// ctx is the 64-sample context Silero wants prepended to each
+	// inference input. Seeded with zeros; updated every run to the
+	// last 64 normalized samples of the most recent window.
+	ctx [sileroContextSamples]float32
 
 	// Hysteresis state — mirror of ClientVAD's fields.
 	inSpeech  bool
@@ -134,7 +178,7 @@ func NewSileroVAD(minSilenceMs, minSpeechMs, minUtteranceMs int) (*SileroVAD, er
 		stateIn.Destroy()
 		return nil, fmt.Errorf("alloc stateOut: %w", err)
 	}
-	audioIn, err := ort.NewTensor(ort.NewShape(1, sileroWindowSamples), make([]float32, sileroWindowSamples))
+	audioIn, err := ort.NewTensor(ort.NewShape(1, sileroInputSamples), make([]float32, sileroInputSamples))
 	if err != nil {
 		stateIn.Destroy()
 		stateOut.Destroy()
@@ -209,10 +253,28 @@ func (v *SileroVAD) Feed(samples []int16) VADEvent {
 		window := v.buf[:sileroWindowSamples]
 		v.buf = v.buf[sileroWindowSamples:]
 
+		// Build the 576-sample inference input: 64 samples of
+		// context from the tail of the previous window, then 512
+		// fresh normalized samples. Context preserves temporal
+		// continuity across chunks — without it Silero sees each
+		// chunk as standalone and classifies everything as
+		// not-speech. Per-window mean is subtracted from the new
+		// samples to strip any DC offset from the mic.
 		audio := v.audioIn.GetData()
-		for i, s := range window {
-			audio[i] = float32(s) / 32768.0
+		copy(audio[:sileroContextSamples], v.ctx[:])
+
+		var meanSum float64
+		for _, s := range window {
+			meanSum += float64(s)
 		}
+		mean := float32(meanSum / float64(len(window)))
+		for i, s := range window {
+			audio[sileroContextSamples+i] = (float32(s) - mean) / 32768.0
+		}
+
+		// Save the last 64 samples of this window (already
+		// normalized) as context for the next call.
+		copy(v.ctx[:], audio[sileroContextSamples+sileroWindowSamples-sileroContextSamples:])
 
 		if err := sileroSession.Run(
 			[]ort.Value{v.audioIn, v.stateIn, v.sr},
@@ -280,6 +342,7 @@ func (v *SileroVAD) Reset() {
 	v.silenceMs = 0
 	v.speechMs = 0
 	v.buf = v.buf[:0]
+	v.ctx = [sileroContextSamples]float32{}
 	// Keep the learned hidden state — it represents the mic's
 	// speech/non-speech acoustic context and doesn't need to be
 	// cleared across commits.

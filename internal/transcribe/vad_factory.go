@@ -15,33 +15,25 @@ import (
 func buildVAD(streaming config.StreamingConfig, sampleRate int) (VAD, error) {
 	switch streaming.VADBackend {
 	case "", "rms":
-		v := NewClientVAD(
-			sampleRate,
-			streaming.Threshold,
-			streaming.SilenceDurationMS,
-			streaming.PrefixPaddingMS,
-			streaming.MinUtteranceMS,
-			0, // vadMargin: use default
-		)
-		sessionlog.Infof(
-			"client VAD (rms): abs_threshold=%.3f silence=%dms prefix=%dms min_utterance=%dms",
-			streaming.Threshold,
-			streaming.SilenceDurationMS,
-			streaming.PrefixPaddingMS,
-			streaming.MinUtteranceMS,
-		)
-		return v, nil
+		return buildRMSVAD(streaming, sampleRate), nil
 
 	case "silero":
 		if err := initSilero(streaming.OnnxruntimeLibrary); err != nil {
-			return nil, fmt.Errorf("init silero: %w", err)
+			// ONNX Runtime isn't available on this host. Fall back to
+			// the RMS detector rather than failing — dictation still
+			// works, just with a less robust pause detector.
+			sessionlog.Warnf("silero VAD unavailable, falling back to rms: %v", err)
+			return buildRMSVAD(streaming, sampleRate), nil
 		}
-		// Silero operates on 16 kHz internally; the caller's
-		// sampleRate should also be 16 kHz. Log a warning if
-		// anything else is in play (transcription will still work,
-		// but the VAD windowing assumes 16k).
 		if sampleRate != sileroSampleRate {
-			sessionlog.Warnf("silero VAD expects 16 kHz but sampleRate=%d; results may be off", sampleRate)
+			// Silero operates on 16 kHz internally; if the recorder
+			// is at a different rate the VAD windowing math is off.
+			// Don't silently run with bad timing.
+			sessionlog.Warnf(
+				"silero VAD expects 16 kHz but sampleRate=%d; falling back to rms",
+				sampleRate,
+			)
+			return buildRMSVAD(streaming, sampleRate), nil
 		}
 		v, err := NewSileroVAD(
 			streaming.SilenceDurationMS,
@@ -49,7 +41,8 @@ func buildVAD(streaming config.StreamingConfig, sampleRate int) (VAD, error) {
 			streaming.MinUtteranceMS,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("new silero vad: %w", err)
+			sessionlog.Warnf("silero VAD construction failed, falling back to rms: %v", err)
+			return buildRMSVAD(streaming, sampleRate), nil
 		}
 		sessionlog.Infof(
 			"client VAD (silero): silence=%dms prefix=%dms min_utterance=%dms",
@@ -62,4 +55,26 @@ func buildVAD(streaming config.StreamingConfig, sampleRate int) (VAD, error) {
 	default:
 		return nil, fmt.Errorf("unknown vad_backend %q", streaming.VADBackend)
 	}
+}
+
+// buildRMSVAD constructs the energy-threshold detector. Extracted
+// because the silero branch falls back to this when ONNX Runtime is
+// unavailable.
+func buildRMSVAD(streaming config.StreamingConfig, sampleRate int) VAD {
+	v := NewClientVAD(
+		sampleRate,
+		streaming.Threshold,
+		streaming.SilenceDurationMS,
+		streaming.PrefixPaddingMS,
+		streaming.MinUtteranceMS,
+		0, // vadMargin: use default
+	)
+	sessionlog.Infof(
+		"client VAD (rms): abs_threshold=%.3f silence=%dms prefix=%dms min_utterance=%dms",
+		streaming.Threshold,
+		streaming.SilenceDurationMS,
+		streaming.PrefixPaddingMS,
+		streaming.MinUtteranceMS,
+	)
+	return v
 }

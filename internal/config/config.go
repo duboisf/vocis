@@ -250,7 +250,7 @@ func Default() Config {
 			Threshold:          0.5,
 			ManualCommit:       false,
 			MinUtteranceMS:     1000,
-			VADBackend:         "rms",
+			VADBackend:         "silero",
 			WaitFinalSeconds:   3,
 		},
 		Insertion: InsertionConfig{
@@ -508,10 +508,6 @@ func (c Config) Validate() error {
 	case "", "rms", "silero":
 	default:
 		return fmt.Errorf("streaming.vad_backend must be rms or silero, got %q", c.Streaming.VADBackend)
-	}
-
-	if c.Streaming.VADBackend == "silero" && c.Streaming.OnnxruntimeLibrary == "" {
-		return errors.New("streaming.vad_backend=silero requires streaming.onnxruntime_library (path to libonnxruntime.so)")
 	}
 
 	if c.Overlay.Width < 200 || c.Overlay.Height < 80 {
