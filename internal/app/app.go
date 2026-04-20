@@ -155,6 +155,14 @@ func (a *App) Run(ctx context.Context) error {
 	a.recorder = recorder.New()
 	a.transcribe = transcribe.New(a.apiKey, a.cfg.Transcription, a.cfg.Streaming)
 
+	// For Lemonade, proactively check that both configured models are
+	// resident and force-load anything that isn't. Avoids a 5-10s load
+	// stall on the user's first dictation of the session (which would
+	// otherwise manifest as "no transcript ever arrives" because the
+	// load runs on the WS path while audio is already flowing).
+	// Fire-and-forget — a failed warm never makes things worse.
+	go transcribe.EnsureLemonadeModelsLoaded(ctx, a.cfg, a.transcribe)
+
 	defer a.overlay.Close()
 
 	hk, err := a.registerHotkeyWithFallback()

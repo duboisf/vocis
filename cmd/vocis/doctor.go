@@ -16,6 +16,7 @@ import (
 	"vocis/internal/recorder"
 	"vocis/internal/securestore"
 	"vocis/internal/sessionlog"
+	"vocis/internal/transcribe"
 )
 
 var doctorCmd = &cobra.Command{
@@ -97,10 +98,13 @@ func runDoctor() error {
 	return nil
 }
 
-// checkLemonadeModels hits the Lemonade REST /models endpoint and reports
-// whether the configured transcribe + postprocess model IDs are present.
-// Lemonade's realtime WS silently accepts any model name at session.update,
-// so a typo in config surfaces only as "no transcript ever arrives". This
+// checkLemonadeModels hits /models (is it downloaded?) and /health
+// (is it currently resident?) and reports both for the configured
+// transcribe + postprocess model IDs. "Downloaded" means the model
+// is on disk; "loaded" means Lemonade has it in memory right now
+// and will respond to a request without a 5-10s load stall. The WS
+// realtime stream silently accepts any model name at session.update,
+// so a typo surfaces only as "no transcript ever arrives" — this
 // check turns that into a boot-time diagnostic.
 func checkLemonadeModels(cfg config.Config) {
 	baseURL := strings.TrimRight(cfg.Transcription.BaseURL, "/")
@@ -108,27 +112,49 @@ func checkLemonadeModels(cfg config.Config) {
 		fmt.Printf("%-14s missing (transcription.base_url is empty; set it to the Lemonade REST endpoint, e.g. http://localhost:13305/api/v1)\n", "lemonade")
 		return
 	}
-	url := baseURL + "/models"
+
+	downloaded, err := fetchDownloadedModels(baseURL)
+	if err != nil {
+		fmt.Printf("%-14s missing (%v)\n", "lemonade", err)
+		return
+	}
+	fmt.Printf("%-14s ok (%d downloaded at %s/models)\n", "lemonade", len(downloaded), baseURL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	health, healthErr := transcribe.FetchLemonadeHealth(ctx, baseURL)
+	loaded := map[string]bool{}
+	if healthErr != nil {
+		fmt.Printf("%-14s missing (%v)\n", "lemonade-hp", healthErr)
+	} else {
+		for _, name := range health.LoadedNames() {
+			loaded[name] = true
+		}
+		fmt.Printf("%-14s ok (%d resident, version %s)\n", "lemonade-hp", len(loaded), health.Version)
+	}
 
+	reportModel("lemonade-tx", cfg.Transcription.Model, downloaded, loaded)
+	if cfg.PostProcess.Enabled {
+		reportModel("lemonade-pp", cfg.PostProcess.Model, downloaded, loaded)
+	}
+}
+
+func fetchDownloadedModels(baseURL string) (map[string]bool, error) {
+	url := baseURL + "/models"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		fmt.Printf("%-14s missing (build request: %v)\n", "lemonade", err)
-		return
+		return nil, fmt.Errorf("build request: %w", err)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Printf("%-14s missing (GET %s: %v)\n", "lemonade", url, err)
-		return
+		return nil, fmt.Errorf("GET %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		fmt.Printf("%-14s missing (GET %s: status %d)\n", "lemonade", url, resp.StatusCode)
-		return
+		return nil, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
-
 	var payload struct {
 		Data []struct {
 			ID         string `json:"id"`
@@ -136,38 +162,35 @@ func checkLemonadeModels(cfg config.Config) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		fmt.Printf("%-14s missing (decode models: %v)\n", "lemonade", err)
-		return
+		return nil, fmt.Errorf("decode models: %w", err)
 	}
-
-	available := make(map[string]bool, len(payload.Data))
+	out := make(map[string]bool, len(payload.Data))
 	for _, m := range payload.Data {
 		if m.Downloaded {
-			available[m.ID] = true
+			out[m.ID] = true
 		}
 	}
-	fmt.Printf("%-14s ok (%d downloaded model(s) at %s)\n", "lemonade", len(available), url)
-
-	reportModel("lemonade-tx", cfg.Transcription.Model, available)
-	if cfg.PostProcess.Enabled {
-		reportModel("lemonade-pp", cfg.PostProcess.Model, available)
-	}
+	return out, nil
 }
 
-func reportModel(label, model string, available map[string]bool) {
+func reportModel(label, model string, downloaded, loaded map[string]bool) {
 	if model == "" {
 		fmt.Printf("%-14s missing (model name is empty)\n", label)
 		return
 	}
-	if available[model] {
-		fmt.Printf("%-14s ok (%s)\n", label, model)
+	if !downloaded[model] {
+		names := make([]string, 0, len(downloaded))
+		for id := range downloaded {
+			names = append(names, id)
+		}
+		fmt.Printf("%-14s missing (%q not downloaded: %s)\n", label, model, strings.Join(names, ", "))
 		return
 	}
-	names := make([]string, 0, len(available))
-	for id := range available {
-		names = append(names, id)
+	if loaded[model] {
+		fmt.Printf("%-14s ok (%s, loaded)\n", label, model)
+		return
 	}
-	fmt.Printf("%-14s missing (%q not in downloaded models: %s)\n", label, model, strings.Join(names, ", "))
+	fmt.Printf("%-14s warn (%s, downloaded but not loaded — first request will trigger a 5-10s load)\n", label, model)
 }
 
 func isWaylandLikeSession() bool {

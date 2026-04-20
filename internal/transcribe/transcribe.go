@@ -271,7 +271,11 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 	}
 	go stream.readLoop()
 
-	if err := stream.sendJSON(connectCtx, c.transport.SessionUpdate()); err != nil {
+	sessionUpdate := c.transport.SessionUpdate()
+	if raw, err := json.Marshal(sessionUpdate); err == nil {
+		sessionlog.Debugf("realtime: sending session.update payload=%s", string(raw))
+	}
+	if err := stream.sendJSON(connectCtx, sessionUpdate); err != nil {
 		stream.Close()
 		telemetry.EndSpan(connectSpan, err)
 		return nil, err
@@ -1369,7 +1373,16 @@ func (s *Stream) readLoop() {
 		s.recordInbound(raw)
 		switch msgType {
 		case "session.created", "session.updated":
-			sessionlog.Debugf("realtime: %s", msgType)
+			// Log the full payload for session.updated so we can see
+			// whether our turn_detection:null took effect — Lemonade
+			// echoes the effective session config back here, and a
+			// mismatch vs what we sent is the smoking gun when server
+			// VAD fires despite manual_commit mode.
+			if msgType == "session.updated" {
+				sessionlog.Debugf("realtime: session.updated payload=%s", string(data))
+			} else {
+				sessionlog.Debugf("realtime: %s", msgType)
+			}
 			s.markReady(nil)
 		case "input_audio_buffer.speech_started",
 			"input_audio_buffer.speech_stopped",
