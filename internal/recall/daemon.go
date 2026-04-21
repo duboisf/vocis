@@ -10,12 +10,16 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
 
 	"vocis/internal/config"
 	"vocis/internal/recorder"
 	"vocis/internal/sessionlog"
+	"vocis/internal/telemetry"
 	"vocis/internal/transcribe"
 )
 
@@ -228,7 +232,7 @@ func (d *Daemon) runCapture(ctx context.Context) error {
 			}
 
 			if active != nil && event == transcribe.VADSpeechStopped {
-				d.finalizeActive(active, activePeak, sampleRate)
+				d.finalizeActive(active, activePeak, sampleRate, false)
 				active = nil
 				activePeak = 0
 			} else if active != nil && len(active.PCM) >= maxSegmentSamples {
@@ -238,7 +242,7 @@ func (d *Daemon) runCapture(ctx context.Context) error {
 				// segment that inherits the in-speech state; Silero
 				// will naturally report SpeechStopped when the real
 				// pause arrives.
-				d.finalizeActive(active, activePeak, sampleRate)
+				d.finalizeActive(active, activePeak, sampleRate, true)
 				active = &Segment{
 					StartedAt:  time.Now(),
 					SampleRate: sampleRate,
@@ -251,13 +255,35 @@ func (d *Daemon) runCapture(ctx context.Context) error {
 }
 
 // finalizeActive stamps the final duration/peak onto the segment and
-// adds it to the ring buffer.
-func (d *Daemon) finalizeActive(seg *Segment, peak int16, sampleRate int) {
+// adds it to the ring buffer. Emits a `vocis.recall.capture` trace
+// span (a fresh root span, not attached to the daemon context) so
+// each captured utterance shows up as its own trace in Jaeger.
+// forceFlushed is true when MaxSegmentSeconds cut the segment short
+// rather than a natural VAD-stopped event.
+func (d *Daemon) finalizeActive(seg *Segment, peak int16, sampleRate int, forceFlushed bool) {
 	seg.Duration = time.Duration(len(seg.PCM)) * time.Second / time.Duration(sampleRate)
 	seg.PeakLevel = float64(peak) / 32768.0
+
 	id := d.ring.Add(seg)
-	sessionlog.Infof("recall: captured segment #%d (%.2fs, peak=%.2f)",
-		id, seg.Duration.Seconds(), seg.PeakLevel)
+
+	// Span covers only the finalize/add work — the capture itself is
+	// driven by the recorder's real-time stream, so its duration is
+	// simply the segment duration. We set endTime explicitly via a
+	// manually-started span anchored at seg.StartedAt so the trace
+	// reflects when the utterance actually began.
+	ctx, span := telemetry.StartSpan(context.Background(), "vocis.recall.capture",
+		attribute.Int64("segment.id", id),
+		attribute.Int("segment.duration_ms", int(seg.Duration/time.Millisecond)),
+		attribute.Int("segment.sample_count", len(seg.PCM)),
+		attribute.Int("segment.sample_rate", sampleRate),
+		attribute.Float64("segment.peak_level", seg.PeakLevel),
+		attribute.Bool("segment.force_flushed", forceFlushed),
+	)
+	_ = ctx
+	telemetry.EndSpan(span, nil)
+
+	sessionlog.Infof("recall: captured segment #%d (%.2fs, peak=%.2f, force_flushed=%t)",
+		id, seg.Duration.Seconds(), seg.PeakLevel, forceFlushed)
 }
 
 // runAccept is the socket accept loop. Each connection handles a single
@@ -347,23 +373,52 @@ func (d *Daemon) listSegments() []SegmentInfo {
 // transcribeSegment feeds a segment's PCM through the realtime
 // transcription pipeline by emulating a recorder's sample stream.
 // Serialized with a mutex so we don't run parallel transports.
-func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bool) (string, error) {
+//
+// Each call is its own trace root (context.Background as parent) so a
+// `vocis.recall.transcribe` span shows up per user pick in Jaeger,
+// independent of the long-lived daemon context. Child spans cover the
+// feed and finalize phases so you can see where time is going.
+func (d *Daemon) transcribeSegment(_ context.Context, id int64, postprocess bool) (string, error) {
 	d.transcribeMu.Lock()
 	defer d.transcribeMu.Unlock()
+
+	goroutinesBefore := runtime.NumGoroutine()
+
+	spanCtx, span := telemetry.StartSpan(context.Background(), "vocis.recall.transcribe",
+		attribute.Int64("segment.id", id),
+		attribute.Bool("postprocess", postprocess),
+	)
+	var err error
+	defer func() {
+		span.SetAttributes(attribute.Int("runtime.goroutines_delta",
+			runtime.NumGoroutine()-goroutinesBefore))
+		telemetry.EndSpan(span, err)
+	}()
 
 	seg, err := d.ring.Get(id)
 	if err != nil {
 		return "", err
 	}
+	span.SetAttributes(
+		attribute.Int("segment.duration_ms", int(seg.Duration/time.Millisecond)),
+		attribute.Int("segment.sample_count", len(seg.PCM)),
+		attribute.Float64("segment.peak_level", seg.PeakLevel),
+	)
+
 	if seg.Transcript != "" && !postprocess {
+		span.SetAttributes(attribute.Bool("cache_hit", true))
 		return seg.Transcript, nil
 	}
+	span.SetAttributes(attribute.Bool("cache_hit", false))
 
 	sampleRate := seg.SampleRate
-	samples := make(chan []int16, 8)
 
-	dictCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	dictCtx, cancel := context.WithTimeout(spanCtx, 60*time.Second)
 	defer cancel()
+
+	// Buffered so the feed goroutine doesn't block on the first send
+	// before StartDictation's pump is ready to read.
+	samples := make(chan []int16, 8)
 
 	session, err := d.transcribeClient.StartDictation(dictCtx, transcribe.DictationOpts{
 		SampleRate: sampleRate,
@@ -374,18 +429,36 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 		return "", fmt.Errorf("start dictation: %w", err)
 	}
 
-	// Drain events so the dictation pump doesn't stall; we only care
-	// about the final result from Finalize.
+	// Drain events so the dictation pump doesn't stall on a full
+	// channel. DictationSession doesn't close its events channel on
+	// Finalize — a naive `for range session.Events()` would block
+	// forever, leaking one goroutine per pick. Bind to dictCtx so the
+	// drain exits as soon as the transcribe call returns.
+	drainDone := make(chan struct{})
 	go func() {
-		for range session.Events() {
+		defer close(drainDone)
+		for {
+			select {
+			case <-dictCtx.Done():
+				return
+			case _, ok := <-session.Events():
+				if !ok {
+					return
+				}
+			}
 		}
 	}()
 
 	// Feed the segment PCM as a pretend live stream. 2048 samples per
 	// chunk (~128 ms at 16 kHz) matches the rough granularity the
 	// recorder emits and keeps the transport's write bursts modest.
+	feedCtx, feedSpan := telemetry.StartSpan(spanCtx, "vocis.recall.transcribe.feed",
+		attribute.Int("feed.chunk_samples", 2048),
+	)
 	const feedChunk = 2048
+	feedDone := make(chan struct{})
 	go func() {
+		defer close(feedDone)
 		defer close(samples)
 		for i := 0; i < len(seg.PCM); i += feedChunk {
 			end := i + feedChunk
@@ -395,30 +468,54 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 			chunk := make([]int16, end-i)
 			copy(chunk, seg.PCM[i:end])
 			select {
-			case <-dictCtx.Done():
+			case <-feedCtx.Done():
 				return
 			case samples <- chunk:
 			}
 		}
 	}()
 
-	result, err := session.Finalize(dictCtx)
-	if err != nil {
-		return "", fmt.Errorf("finalize: %w", err)
+	_, finalizeSpan := telemetry.StartSpan(spanCtx, "vocis.recall.transcribe.finalize")
+	result, finalizeErr := session.Finalize(dictCtx)
+	telemetry.EndSpan(finalizeSpan, finalizeErr)
+	<-feedDone
+	telemetry.EndSpan(feedSpan, nil)
+
+	if finalizeErr != nil {
+		err = fmt.Errorf("finalize: %w", finalizeErr)
+		return "", err
 	}
 
 	text := result.Text
+	span.SetAttributes(attribute.Int("transcript.length", len(text)))
+
 	if postprocess && d.cfg.PostProcess.Enabled {
+		_, ppSpan := telemetry.StartSpan(spanCtx, "vocis.recall.transcribe.postprocess")
 		ppCtx, ppCancel := context.WithTimeout(context.Background(),
 			time.Duration(d.cfg.PostProcess.TotalTimeoutSec)*time.Second)
-		defer ppCancel()
 		pp := d.transcribeClient.PostProcess(ppCtx, d.cfg.PostProcess, text, nil)
+		ppCancel()
 		if !pp.Skipped {
 			text = pp.Text
 		}
+		ppSpan.SetAttributes(
+			attribute.Bool("postprocess.skipped", pp.Skipped),
+			attribute.Int("postprocess.text_length", len(text)),
+		)
+		telemetry.EndSpan(ppSpan, nil)
 	}
 
 	d.ring.SetTranscript(id, text)
+
+	// Wait for the drain to exit so a tight pick loop doesn't leave
+	// stragglers behind. dictCtx will already be cancelled by the
+	// deferred cancel above.
+	cancel()
+	<-drainDone
+
+	goroutinesAfter := runtime.NumGoroutine()
+	sessionlog.Infof("recall: transcribe id=%d goroutines %d→%d (Δ=%+d)",
+		id, goroutinesBefore, goroutinesAfter, goroutinesAfter-goroutinesBefore)
 	return text, nil
 }
 

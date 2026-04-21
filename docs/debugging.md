@@ -44,3 +44,20 @@ The JSON response contains all spans with their tags (attributes) and logs (even
 | `vocis.transcribe.wait_final` | `segment_count`, `trailing.skipped`. Also carries inline events: `realtime.delta` (once per delta), `realtime.completed`, `realtime.failed` — each with `since_commit_ms` so you can see when Whisper's first pass landed vs when the redundant second pass finished. |
 | `vocis.postprocess` | `skipped` attribute, `first_token_timeout` vs `first_token_received` events, `elapsed` timings. Inline events: `postprocess.input` (with `input.text`) and `postprocess.output` (with `output.text` + `skipped`/`reason` when PP fell back). Text is truncated to 500 chars. |
 | `vocis.inject` | Paste vs type, terminal detection, target window. |
+
+### Recall-mode spans
+
+Each captured utterance and each pick is its own root trace (spans are
+started with `context.Background()` so they don't chain to the daemon
+lifetime). If the recall daemon feels slow or CPU-heavy after use,
+inspect these first:
+
+| Span | What to look for |
+|------|-----------------|
+| `vocis.recall.capture` | One per VAD-bounded utterance the daemon kept. `segment.id`, `segment.duration_ms`, `segment.peak_level`, `segment.force_flushed` (true when `max_segment_seconds` cut it short). |
+| `vocis.recall.transcribe` | One per daemon transcribe call. `segment.id`, `cache_hit`, `postprocess`, `transcript.length`, `runtime.goroutines_delta` (should be 0 — non-zero means we're leaking). Child spans: `…transcribe.feed`, `…transcribe.finalize`, `…transcribe.postprocess`. |
+
+`recall: transcribe id=N goroutines M→K (Δ=±X)` also lands in the
+daemon log per transcribe — use it as a quick sanity check when you
+don't want to spin up Jaeger. A positive Δ that doesn't come back down
+means goroutines are accumulating.
