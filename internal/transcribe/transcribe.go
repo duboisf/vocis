@@ -1032,7 +1032,8 @@ func (s *DictationSession) streamAudio(
 	samples <-chan []int16,
 	vad *SileroVAD,
 ) {
-	lastTrace := time.Now()
+	var prevInSpeech bool
+	var havePrev bool
 	for {
 		select {
 		case <-ctx.Done():
@@ -1053,16 +1054,19 @@ func (s *DictationSession) streamAudio(
 			s.hasTrailing.Store(true)
 			s.maybePauseCommit(ctx, stream, vad, chunk)
 
-			// Periodic VAD trace at ~500ms cadence. Shows what the
-			// detector is measuring so we can see whether the threshold
-			// is wrong vs whether chunks are stalling.
-			if vad != nil && time.Since(lastTrace) > 500*time.Millisecond {
+			// Log client VAD only on state transitions so the trace
+			// shows when speech starts/stops rather than repeating
+			// the same in_speech=true line every chunk.
+			if vad != nil {
 				snap := vad.Snapshot()
-				sessionlog.Debugf(
-					"client VAD: in_speech=%t last=%.4f max=%.4f min=%.4f silence_ms=%d speech_ms=%d",
-					snap.InSpeech, snap.LastProb, snap.MaxProb, snap.MinProb, snap.SilenceMs, snap.SpeechMs,
-				)
-				lastTrace = time.Now()
+				if !havePrev || snap.InSpeech != prevInSpeech {
+					sessionlog.Debugf(
+						"client VAD: in_speech=%t last=%.4f max=%.4f min=%.4f silence_ms=%d speech_ms=%d",
+						snap.InSpeech, snap.LastProb, snap.MaxProb, snap.MinProb, snap.SilenceMs, snap.SpeechMs,
+					)
+					prevInSpeech = snap.InSpeech
+					havePrev = true
+				}
 			}
 		}
 	}
