@@ -107,42 +107,100 @@ func (r *OverlayRenderer) NeededHeight(body string) int {
 	return needed
 }
 
+// Layout constants shared across paint methods.
+const (
+	overlayTextX       = 150
+	overlayTitleY      = 36
+	overlaySubtitleY   = 62
+	overlayLevelBarsL  = 26
+	overlayLevelBarsT  = 42
+	overlayLevelBarsR  = 132
+	overlayLevelBarsB  = 98
+	overlayBrandingPad = 12
+)
+
+var (
+	overlayBgColor        = color.RGBA{R: 12, G: 18, B: 31, A: 255}
+	overlayBrandingColor  = color.RGBA{R: 148, G: 163, B: 184, A: 255}
+	overlaySeparatorColor = color.RGBA{R: 24, G: 38, B: 65, A: 255}
+	overlaySubtitleColor  = color.RGBA{R: 226, G: 232, B: 240, A: 255}
+	overlayBodyColor      = color.RGBA{R: 148, G: 163, B: 184, A: 255}
+	overlaySuffixColor    = color.RGBA{R: 226, G: 232, B: 240, A: 255}
+	overlayHintColor      = color.RGBA{R: 251, G: 191, B: 36, A: 255}
+)
+
 // Render paints the overlay frame into a freshly-allocated RGBA image.
+// Each paint step is a named method so this function reads as a
+// top-to-bottom table of contents of the overlay's visual structure.
 func (r *OverlayRenderer) Render(f Frame) *image.RGBA {
 	img := image.NewRGBA(image.Rect(0, 0, r.cfg.Width, f.Height))
-	bg := color.RGBA{R: 12, G: 18, B: 31, A: 255}
-	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
-
-	DrawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), f.Accent)
-	WriteText(img, r.cfg.Width-len([]rune(r.cfg.Branding))*r.glyphWidth-12, 24, r.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, r.smallFace)
-	DrawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
-	DrawBars(img, image.Rect(26, 42, 132, 98), f.Accent, f.Level,
-		f.ReactiveWave, f.IdleWave, f.HeartbeatWave, f.WavePhase)
-
-	WriteText(img, 150, 36, f.Title, f.Accent, r.face)
-	if f.TitleSuffix != "" {
-		suffixX := 150 + len([]rune(f.Title))*r.glyphWidth
-		WriteText(img, suffixX, 36, f.TitleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, r.face)
-		if f.SubmitHint {
-			hintX := suffixX + len([]rune(f.TitleSuffix))*r.glyphWidth
-			pulse := 0.5 + 0.5*math.Sin(f.WavePhase*3)
-			alpha := uint8(140 + int(pulse*115))
-			WriteText(img, hintX, 36, " "+r.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, r.face)
-		}
-	}
-	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
-	for i, line := range strings.Split(f.Subtitle, "\n") {
-		WriteText(img, 150, 62+i*OverlayLineHeight, line, subtitleColor, r.face)
-	}
-	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
-	for i, line := range WrapLines(f.Body, r.BodyTextLimit()) {
-		WriteText(img, 150, OverlayBodyStartY+i*OverlayLineHeight, line, bodyColor, r.face)
-	}
-
-	if f.CrossPrev != nil && f.CrossFadeT < 1 {
-		BlendFrames(img, f.CrossPrev, 1-f.CrossFadeT)
-	}
+	r.paintBackground(img)
+	r.paintAccentBar(img, f.Accent)
+	r.paintBranding(img)
+	r.paintLevelBars(img, f)
+	r.paintTitle(img, f)
+	r.paintSubtitle(img, f)
+	r.paintBody(img, f)
+	r.applyCrossfade(img, f)
 	return img
+}
+
+func (r *OverlayRenderer) paintBackground(img *image.RGBA) {
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: overlayBgColor}, image.Point{}, draw.Src)
+}
+
+func (r *OverlayRenderer) paintAccentBar(img *image.RGBA, accent color.RGBA) {
+	DrawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), accent)
+}
+
+func (r *OverlayRenderer) paintBranding(img *image.RGBA) {
+	x := r.cfg.Width - len([]rune(r.cfg.Branding))*r.glyphWidth - overlayBrandingPad
+	WriteText(img, x, 24, r.cfg.Branding, overlayBrandingColor, r.smallFace)
+	// Thin separator under the branding row.
+	DrawRect(img, image.Rect(20, 22, 20+96, 24), overlaySeparatorColor)
+}
+
+func (r *OverlayRenderer) paintLevelBars(img *image.RGBA, f Frame) {
+	rect := image.Rect(overlayLevelBarsL, overlayLevelBarsT, overlayLevelBarsR, overlayLevelBarsB)
+	DrawBars(img, rect, f.Accent, f.Level, f.ReactiveWave, f.IdleWave, f.HeartbeatWave, f.WavePhase)
+}
+
+func (r *OverlayRenderer) paintTitle(img *image.RGBA, f Frame) {
+	WriteText(img, overlayTextX, overlayTitleY, f.Title, f.Accent, r.face)
+	if f.TitleSuffix == "" {
+		return
+	}
+	suffixX := overlayTextX + len([]rune(f.Title))*r.glyphWidth
+	WriteText(img, suffixX, overlayTitleY, f.TitleSuffix, overlaySuffixColor, r.face)
+	if !f.SubmitHint {
+		return
+	}
+	// Submit hint pulses its alpha with the wave phase to draw the eye
+	// without being distracting.
+	hintX := suffixX + len([]rune(f.TitleSuffix))*r.glyphWidth
+	pulse := 0.5 + 0.5*math.Sin(f.WavePhase*3)
+	hintColor := overlayHintColor
+	hintColor.A = uint8(140 + int(pulse*115))
+	WriteText(img, hintX, overlayTitleY, " "+r.cfg.Listening.SubmitHint, hintColor, r.face)
+}
+
+func (r *OverlayRenderer) paintSubtitle(img *image.RGBA, f Frame) {
+	for i, line := range strings.Split(f.Subtitle, "\n") {
+		WriteText(img, overlayTextX, overlaySubtitleY+i*OverlayLineHeight, line, overlaySubtitleColor, r.face)
+	}
+}
+
+func (r *OverlayRenderer) paintBody(img *image.RGBA, f Frame) {
+	for i, line := range WrapLines(f.Body, r.BodyTextLimit()) {
+		WriteText(img, overlayTextX, OverlayBodyStartY+i*OverlayLineHeight, line, overlayBodyColor, r.face)
+	}
+}
+
+func (r *OverlayRenderer) applyCrossfade(img *image.RGBA, f Frame) {
+	if f.CrossPrev == nil || f.CrossFadeT >= 1 {
+		return
+	}
+	BlendFrames(img, f.CrossPrev, 1-f.CrossFadeT)
 }
 
 func loadFont(name string, size float64) (font.Face, int) {
