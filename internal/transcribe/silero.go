@@ -20,14 +20,29 @@ var sileroModelBytes []byte
 // makes the model classify everything as not-speech. Confirmed
 // against snakers4/silero-vad src/silero_vad/utils_vad.py.
 const (
-	sileroSampleRate      = 16000
-	sileroWindowSamples   = 512
-	sileroContextSamples  = 64
-	sileroInputSamples    = sileroContextSamples + sileroWindowSamples // 576
-	sileroWindowMs        = 32                                         // 512 / 16000 * 1000
-	sileroStateSize       = 128
-	sileroStateRank       = 2
-	sileroSpeechThreshold = 0.5
+	sileroSampleRate     = 16000
+	sileroWindowSamples  = 512
+	sileroContextSamples = 64
+	sileroInputSamples   = sileroContextSamples + sileroWindowSamples // 576
+	sileroWindowMs       = 32                                         // 512 / 16000 * 1000
+	sileroStateSize      = 128
+	sileroStateRank      = 2
+
+	// Two-threshold hysteresis, matching snakers4/silero-vad's
+	// reference implementation. A single threshold made marginal noise
+	// (frames bouncing around 0.5) keep resetting the silence timer
+	// every ~500 ms, so speech episodes never closed — causing 30 s
+	// force-flushed noise segments on any continuous low-level ambient
+	// source.
+	//
+	// SpeechThreshold: frames at or above this count as speech and
+	// reset the silence counter.
+	// SilenceThreshold: frames strictly below this count as silence
+	// and tick the silence counter up. Frames in the ambiguous band
+	// [SilenceThreshold, SpeechThreshold) hold the state — they don't
+	// open a new episode and they don't reset a pending silence.
+	sileroSpeechThreshold  = 0.5
+	sileroSilenceThreshold = 0.35
 )
 
 // Input/output names from the Silero VAD model. Confirmed against
@@ -344,12 +359,26 @@ func (v *SileroVAD) Feed(samples []int16) VADEvent {
 }
 
 // applyHysteresis converts per-frame speech probability into VAD
-// events. minSpeechMs suppresses triggering on single-frame blips,
+// events with a two-threshold state machine, matching
+// snakers4/silero-vad's reference implementation:
+//
+//   prob >= 0.5           → speech frame (count speech, reset silence)
+//   prob <  0.35          → silence frame (count silence)
+//   0.35 <= prob <  0.5   → ambiguous — hold state, do nothing
+//
+// The ambiguous band is critical for ignoring marginal noise once an
+// episode is winding down. With a single 0.5 threshold, a single frame
+// at 0.51 every 500 ms would reset silenceMs to zero forever, so
+// low-level ambient noise kept segments open until the 30 s force
+// flush. Ambiguous frames now let a closing episode actually close.
+//
+// minSpeechMs suppresses triggering on single-frame blips,
 // minSilenceMs keeps a sentence-level pause from splitting mid-word,
 // and minUtteranceMs suppresses commits on episodes too short for
 // Whisper to transcribe reliably.
 func (v *SileroVAD) applyHysteresis(prob float64) VADEvent {
-	if prob >= sileroSpeechThreshold {
+	switch {
+	case prob >= sileroSpeechThreshold:
 		v.speechMs += sileroWindowMs
 		v.silenceMs = 0
 		if !v.inSpeech && v.speechMs >= v.minSpeechMs {
@@ -357,21 +386,29 @@ func (v *SileroVAD) applyHysteresis(prob float64) VADEvent {
 			return VADSpeechStarted
 		}
 		return VADNone
-	}
-	v.silenceMs += sileroWindowMs
-	if v.inSpeech && v.silenceMs >= v.minSilenceMs {
-		episodeMs := v.speechMs
-		v.inSpeech = false
-		v.speechMs = 0
-		if episodeMs < v.minUtteranceMs {
-			return VADNone
+
+	case prob < sileroSilenceThreshold:
+		v.silenceMs += sileroWindowMs
+		if v.inSpeech && v.silenceMs >= v.minSilenceMs {
+			episodeMs := v.speechMs
+			v.inSpeech = false
+			v.speechMs = 0
+			if episodeMs < v.minUtteranceMs {
+				return VADNone
+			}
+			return VADSpeechStopped
 		}
-		return VADSpeechStopped
+		if !v.inSpeech && v.silenceMs > 200 {
+			v.speechMs = 0
+		}
+		return VADNone
+
+	default:
+		// Ambiguous band: neither open a new episode nor reset a
+		// pending silence. Just hold. This is the whole reason a
+		// single-threshold implementation gets stuck on noise.
+		return VADNone
 	}
-	if !v.inSpeech && v.silenceMs > 200 {
-		v.speechMs = 0
-	}
-	return VADNone
 }
 
 func (v *SileroVAD) InSpeech() bool { return v.inSpeech }
