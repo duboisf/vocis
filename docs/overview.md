@@ -53,9 +53,11 @@ Core product choices:
 
   The ring buffer is memory-only by default — kill the daemon and the
   buffer is gone, which keeps an always-on mic from leaving audio on
-  disk unintentionally. Set `recall.persist_dir` in the config to
-  opt into on-disk persistence (each segment mirrors to
-  `<dir>/seg-<id>.json`, retention is applied on reload).
+  disk unintentionally. Flip `recall.persist.mode` to `disk` to opt
+  into on-disk persistence; each segment mirrors to
+  `<recall.persist.dir>/seg-<id>.json`, with retention applied on
+  reload. `recall.persist.dir` defaults to
+  `$XDG_STATE_HOME/vocis/recall` (or `~/.local/state/vocis/recall`).
 
   Retention, ring-buffer size, and persistence live under `recall:` in
   the config.

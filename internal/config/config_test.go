@@ -24,6 +24,50 @@ func TestConfigRejectsInvalidHotkeyMode(t *testing.T) {
 	}
 }
 
+func TestDefaultRecallPersist(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	if cfg.Recall.Persist.Mode != RecallPersistMemory {
+		t.Fatalf("default persist mode should be %q, got %q",
+			RecallPersistMemory, cfg.Recall.Persist.Mode)
+	}
+	if cfg.Recall.Persist.Dir == "" {
+		t.Fatal("default persist dir should be non-empty (either XDG path or ~/.local/state/vocis/recall)")
+	}
+}
+
+func TestRecallPersistValidation(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		mode    string
+		dir     string
+		wantErr bool
+	}{
+		{"default memory mode", RecallPersistMemory, "", false},
+		{"memory mode with dir is fine", RecallPersistMemory, "/some/path", false},
+		{"disk mode with dir is fine", RecallPersistDisk, "/some/path", false},
+		{"disk mode without dir errors", RecallPersistDisk, "", true},
+		{"unknown mode errors", "cloud", "/some/path", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Recall.Persist.Mode = tc.mode
+			cfg.Recall.Persist.Dir = tc.dir
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 // TestRejectDeprecatedOpenAIKey pins the strict migration error for
 // config files that still use the old top-level `openai:` section.
 func TestRejectDeprecatedOpenAIKey(t *testing.T) {

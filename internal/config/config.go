@@ -114,17 +114,35 @@ type RecallConfig struct {
 	// monologue without a pause gets flushed at this boundary so the
 	// ring buffer can't grow unbounded from a single stream.
 	MaxSegmentSeconds int `yaml:"max_segment_seconds"`
-	// PersistDir is an optional directory where each captured segment
-	// is mirrored to disk as seg-<id>.json (raw PCM base64-encoded +
-	// metadata + cached transcript). When empty (default), the ring
-	// buffer is memory-only — nothing is ever written to disk, which
-	// is the privacy-preserving default for an always-on mic.
-	//
-	// Supports a leading ~/ expansion. Recommended path is somewhere
-	// under $XDG_STATE_HOME (e.g. ~/.local/state/vocis/recall). The
-	// daemon creates the directory with mode 0700 if it doesn't exist.
-	PersistDir string `yaml:"persist_dir"`
+	// Persist controls whether captured segments are mirrored to disk.
+	// Default is memory-only — always-on mic audio does not land on
+	// disk unless the user explicitly opts in by setting mode=disk.
+	Persist RecallPersistConfig `yaml:"persist"`
 }
+
+// RecallPersistConfig is the nested `recall.persist` block. Mode is
+// the on/off switch; Dir is only consulted when Mode is "disk" but is
+// pre-populated with a sensible default so the user can flip mode with
+// a single-line config change.
+type RecallPersistConfig struct {
+	// Mode is "in_memory" (default) or "disk". In-memory keeps the
+	// ring buffer entirely in the daemon process — nothing written,
+	// restart loses the buffer. Disk mirrors each segment to Dir as
+	// one JSON file per segment (raw PCM base64-encoded + metadata +
+	// cached transcript); the ring is reloaded on daemon start, with
+	// the current retention applied.
+	Mode string `yaml:"mode"`
+	// Dir is where segment JSON files live when Mode is "disk". The
+	// directory is created with mode 0700 at daemon startup. Supports
+	// a leading ~/ expansion. Defaults to $XDG_STATE_HOME/vocis/recall
+	// when XDG_STATE_HOME is set, else ~/.local/state/vocis/recall.
+	Dir string `yaml:"dir"`
+}
+
+const (
+	RecallPersistMemory = "in_memory"
+	RecallPersistDisk   = "disk"
+)
 
 type TranscriptionConfig struct {
 	Backend      string   `yaml:"backend"`
@@ -374,9 +392,32 @@ func Default() Config {
 			MinUtteranceMS:    500,
 			PrerollMS:         300,
 			MaxSegmentSeconds: 30,
+			Persist: RecallPersistConfig{
+				Mode: RecallPersistMemory,
+				Dir:  defaultRecallStateDir(),
+			},
 		},
 		YAMLIndent: 2,
 	}
+}
+
+// defaultRecallStateDir returns the default for `recall.persist.dir`.
+// Follows the XDG state-dir convention: $XDG_STATE_HOME/vocis/recall
+// when set, else ~/.local/state/vocis/recall. Embedded into the config
+// file at generation time so users can see exactly where segments
+// would land if they flipped mode to disk.
+func defaultRecallStateDir() string {
+	if xdg := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); xdg != "" {
+		return filepath.Join(xdg, "vocis", "recall")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// os.UserHomeDir only fails when HOME is unset and the platform
+		// has no fallback. Return the tilde form and let runtime
+		// expansion either fix it or fail loudly.
+		return "~/.local/state/vocis/recall"
+	}
+	return filepath.Join(home, ".local", "state", "vocis", "recall")
 }
 
 func Path() (string, error) {
@@ -580,6 +621,14 @@ func (c Config) Validate() error {
 	}
 	if c.Recall.MaxSegmentSeconds < 1 || c.Recall.MaxSegmentSeconds > 300 {
 		return errors.New("recall.max_segment_seconds must be between 1 and 300")
+	}
+	switch c.Recall.Persist.Mode {
+	case "", RecallPersistMemory, RecallPersistDisk:
+	default:
+		return fmt.Errorf("recall.persist.mode must be %q or %q", RecallPersistMemory, RecallPersistDisk)
+	}
+	if c.Recall.Persist.Mode == RecallPersistDisk && strings.TrimSpace(c.Recall.Persist.Dir) == "" {
+		return errors.New("recall.persist.mode=disk requires recall.persist.dir to be set")
 	}
 
 	c.validateOverlayTemplates()

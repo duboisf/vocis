@@ -491,15 +491,19 @@ func writeErr(w io.Writer, err error) {
 	_ = json.NewEncoder(w).Encode(Response{Version: protocolVersion, Error: err.Error()})
 }
 
-// initPersistence opens the configured persist directory (if any),
-// reloads segments that still fit under the current retention, deletes
-// the ones that don't, and attaches the persister so future Add/Drop
-// operations mirror to disk. A nil persister (empty config) skips all
-// of this — the ring stays memory-only.
+// initPersistence opens the configured persist directory when the user
+// has set recall.persist.mode=disk, reloads segments that still fit
+// under the current retention, deletes the ones that don't, and
+// attaches the persister so future Add/Drop operations mirror to disk.
+// In the default in_memory mode this is a no-op — the ring stays
+// entirely in memory and nothing touches disk.
 func (d *Daemon) initPersistence() error {
-	dir := d.cfg.Recall.PersistDir
-	if dir == "" {
+	if d.cfg.Recall.Persist.Mode != config.RecallPersistDisk {
 		return nil
+	}
+	dir := d.cfg.Recall.Persist.Dir
+	if dir == "" {
+		return fmt.Errorf("recall.persist.mode=disk but recall.persist.dir is empty")
 	}
 	persister, err := NewFilePersister(dir)
 	if err != nil {
