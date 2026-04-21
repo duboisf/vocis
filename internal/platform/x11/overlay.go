@@ -3,12 +3,8 @@ package x11
 import (
 	"fmt"
 	"image"
-	"io"
 	"image/color"
-	"image/draw"
-	"math"
-	"os"
-	"os/exec"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -20,9 +16,6 @@ import (
 	"github.com/BurntSushi/xgbutil/ewmh"
 	"github.com/BurntSushi/xgbutil/xgraphics"
 	"github.com/BurntSushi/xgbutil/xwindow"
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/basicfont"
-	"golang.org/x/image/font/opentype"
 
 	"vocis/internal/config"
 	"vocis/internal/sessionlog"
@@ -32,13 +25,14 @@ import (
 type Overlay struct {
 	cfg config.OverlayConfig
 
-	mu      sync.Mutex
-	x       *xgbutil.XUtil
-	win     *xwindow.Window
-	visible bool
-	state   viewState
-	level   float64
-	hide    *time.Timer
+	mu       sync.Mutex
+	x        *xgbutil.XUtil
+	win      *xwindow.Window
+	renderer *ui.OverlayRenderer
+	visible  bool
+	state    viewState
+	level    float64
+	hide     *time.Timer
 
 	animToken    uint64
 	animating    bool
@@ -48,10 +42,6 @@ type Overlay struct {
 	height       int
 	targetHeight int
 	resizeToken  uint64
-	face         font.Face
-	smallFace      font.Face
-	glyphWidth     int
-	smallGlyphWidth int
 
 	baseX      int
 	baseY      int
@@ -114,25 +104,17 @@ func NewOverlay(cfg config.OverlayConfig) (*Overlay, error) {
 	_ = ewmh.WmWindowOpacitySet(xu, win.Id, cfg.Opacity)
 	win.Stack(xproto.StackModeAbove)
 
-	fontSize := cfg.FontSize
-	if fontSize <= 0 {
-		fontSize = 13
-	}
-	face, glyphW := loadFont(cfg.Font, fontSize)
-	smallFace, smallGlyphW := loadFont(cfg.Font, fontSize-2)
+	renderer := ui.NewOverlayRenderer(cfg)
 
 	return &Overlay{
-		cfg:        cfg,
-		x:          xu,
-		win:        win,
-		height:     cfg.Height,
-		face:       face,
-		smallFace:       smallFace,
-		smallGlyphWidth: smallGlyphW,
-		glyphWidth: glyphW,
-		baseX:      x,
-		baseY:      y,
-		fadeAlpha:   1,
+		cfg:       cfg,
+		x:         xu,
+		win:       win,
+		renderer:  renderer,
+		height:    cfg.Height,
+		baseX:     x,
+		baseY:     y,
+		fadeAlpha: 1,
 		state: viewState{
 			title:    cfg.Ready.Title,
 			subtitle: cfg.Ready.Subtitle,
@@ -257,7 +239,7 @@ func (o *Overlay) AnimateChunk(text string) {
 	o.drawLocked()
 	o.mu.Unlock()
 
-	go o.animateChunk(token, ui.Shorten(text, o.bodyTextLimit()))
+	go o.animateChunk(token, ui.Shorten(text, o.renderer.BodyTextLimit()))
 }
 
 func (o *Overlay) ShowFinishing(body, shortcut string, timeout time.Duration) {
@@ -418,7 +400,7 @@ func (o *Overlay) ShowSuccess(text string) {
 	o.show(viewState{
 		title:    o.cfg.Success.Title,
 		subtitle: o.cfg.Success.Subtitle,
-		body:     ui.Shorten(strings.ReplaceAll(text, "\n", " "), o.bodyTextLimit()),
+		body:     ui.Shorten(strings.ReplaceAll(text, "\n", " "), o.renderer.BodyTextLimit()),
 		accent:   color.RGBA{R: 56, G: 189, B: 248, A: 255},
 	}, true)
 }
@@ -434,7 +416,7 @@ func (o *Overlay) ShowWarning(text string) {
 func (o *Overlay) ShowError(err error) {
 	o.show(viewState{
 		title:    o.cfg.Error.Title,
-		subtitle: ui.Shorten(err.Error(), o.subtitleTextLimit()),
+		subtitle: ui.Shorten(err.Error(), o.renderer.SubtitleTextLimit()),
 		accent:   color.RGBA{R: 248, G: 113, B: 113, A: 255},
 	}, true)
 }
@@ -635,15 +617,29 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 }
 
 func (o *Overlay) neededHeight(state viewState) int {
-	bodyLines := ui.WrapLines(state.body, o.bodyTextLimit())
-	needed := o.cfg.Height
-	if len(bodyLines) > 1 {
-		needed = bodyStartY + len(bodyLines)*lineHeight + bodyPadBot
+	return o.renderer.NeededHeight(state.body)
+}
+
+// frameLocked packages the overlay's current state for the renderer.
+func (o *Overlay) frameLocked() ui.Frame {
+	return ui.Frame{
+		State: ui.State{
+			Title:         o.state.title,
+			TitleSuffix:   o.state.titleSuffix,
+			SubmitHint:    o.state.submitHint,
+			Subtitle:      o.state.subtitle,
+			Body:          o.state.body,
+			Accent:        o.state.accent,
+			ReactiveWave:  o.state.reactiveWave,
+			IdleWave:      o.state.idleWave,
+			HeartbeatWave: o.state.heartbeatWave,
+		},
+		Level:      o.level,
+		WavePhase:  o.wavePhase,
+		Height:     o.height,
+		CrossFadeT: o.crossFadeT,
+		CrossPrev:  o.crossPrevFrame,
 	}
-	if needed < o.cfg.Height {
-		needed = o.cfg.Height
-	}
-	return needed
 }
 
 func (o *Overlay) applyStateLocked(state viewState) {
@@ -743,26 +739,14 @@ func (o *Overlay) SetLevel(level float64) {
 }
 
 const (
-	bodyStartY        = 98
-	lineHeight        = 16
-	bodyPadBot        = 12
-	fadeSlideDistance  = 28
+	fadeSlideDistance = 28
 	fadeDuration      = 320 * time.Millisecond
 	crossFadeDuration = 80 * time.Millisecond
 	fadeInterval      = 12 * time.Millisecond
 )
 
 func (o *Overlay) drawLocked() {
-	charsPerLine := o.bodyTextLimit()
-	bodyLines := ui.WrapLines(o.state.body, charsPerLine)
-
-	needed := o.cfg.Height
-	if len(bodyLines) > 1 {
-		needed = bodyStartY + len(bodyLines)*lineHeight + bodyPadBot
-	}
-	if needed < o.cfg.Height {
-		needed = o.cfg.Height
-	}
+	needed := o.renderer.NeededHeight(o.state.body)
 	if needed != o.targetHeight {
 		o.targetHeight = needed
 		if o.height != needed {
@@ -771,48 +755,7 @@ func (o *Overlay) drawLocked() {
 		}
 	}
 
-	img := image.NewRGBA(image.Rect(0, 0, o.cfg.Width, o.height))
-	bg := color.RGBA{R: 12, G: 18, B: 31, A: 255}
-	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
-
-	ui.DrawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
-	ui.WriteText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
-	ui.DrawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
-	ui.DrawBars(
-		img,
-		image.Rect(26, 42, 132, 98),
-		o.state.accent,
-		o.level,
-		o.state.reactiveWave,
-		o.state.idleWave,
-		o.state.heartbeatWave,
-		o.wavePhase,
-	)
-
-	ui.WriteText(img, 150, 36, o.state.title, o.state.accent, o.face)
-	if o.state.titleSuffix != "" {
-		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
-		ui.WriteText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
-		if o.state.submitHint {
-			hintX := suffixX + len([]rune(o.state.titleSuffix))*o.glyphWidth
-			pulse := 0.5 + 0.5*math.Sin(o.wavePhase*3)
-			alpha := uint8(140 + int(pulse*115))
-			ui.WriteText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
-		}
-	}
-	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
-	for i, line := range strings.Split(o.state.subtitle, "\n") {
-		ui.WriteText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
-	}
-
-	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
-	for i, line := range bodyLines {
-		ui.WriteText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
-	}
-
-	if o.crossPrevFrame != nil && o.crossFadeT < 1 {
-		ui.BlendFrames(img, o.crossPrevFrame, 1-o.crossFadeT)
-	}
+	img := o.renderer.Render(o.frameLocked())
 
 	ximg := xgraphics.NewConvert(o.x, img)
 	ximg.XSurfaceSet(o.win.Id)
@@ -880,36 +823,10 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 
 
 func (o *Overlay) captureFrameLocked() *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, o.cfg.Width, o.height))
-	bg := color.RGBA{R: 12, G: 18, B: 31, A: 255}
-	draw.Draw(img, img.Bounds(), &image.Uniform{C: bg}, image.Point{}, draw.Src)
-
-	ui.DrawRect(img, image.Rect(0, 0, img.Bounds().Dx(), 6), o.state.accent)
-	ui.WriteText(img, o.cfg.Width-len([]rune(o.cfg.Branding))*o.glyphWidth-12, 24, o.cfg.Branding, color.RGBA{R: 148, G: 163, B: 184, A: 255}, o.smallFace)
-	ui.DrawRect(img, image.Rect(20, 22, 20+96, 24), color.RGBA{R: 24, G: 38, B: 65, A: 255})
-	ui.DrawBars(img, image.Rect(26, 42, 132, 98), o.state.accent, o.level,
-		o.state.reactiveWave, o.state.idleWave, o.state.heartbeatWave, o.wavePhase)
-
-	ui.WriteText(img, 150, 36, o.state.title, o.state.accent, o.face)
-	if o.state.titleSuffix != "" {
-		suffixX := 150 + len([]rune(o.state.title))*o.glyphWidth
-		ui.WriteText(img, suffixX, 36, o.state.titleSuffix, color.RGBA{R: 226, G: 232, B: 240, A: 255}, o.face)
-		if o.state.submitHint {
-			hintX := suffixX + len([]rune(o.state.titleSuffix))*o.glyphWidth
-			pulse := 0.5 + 0.5*math.Sin(o.wavePhase*3)
-			alpha := uint8(140 + int(pulse*115))
-			ui.WriteText(img, hintX, 36, " "+o.cfg.Listening.SubmitHint, color.RGBA{R: 251, G: 191, B: 36, A: alpha}, o.face)
-		}
-	}
-	subtitleColor := color.RGBA{R: 226, G: 232, B: 240, A: 255}
-	for i, line := range strings.Split(o.state.subtitle, "\n") {
-		ui.WriteText(img, 150, 62+i*lineHeight, line, subtitleColor, o.face)
-	}
-	bodyColor := color.RGBA{R: 148, G: 163, B: 184, A: 255}
-	for i, line := range ui.WrapLines(o.state.body, o.bodyTextLimit()) {
-		ui.WriteText(img, 150, bodyStartY+i*lineHeight, line, bodyColor, o.face)
-	}
-	return img
+	f := o.frameLocked()
+	f.CrossPrev = nil
+	f.CrossFadeT = 0
+	return o.renderer.Render(f)
 }
 
 
@@ -1116,57 +1033,4 @@ func activeMonitor(xu *xgbutil.XUtil) (x, y, w, h int) {
 	return int(info.XOrg), int(info.YOrg), int(info.Width), int(info.Height)
 }
 
-func (o *Overlay) subtitleTextLimit() int {
-	return ui.TextLimit(o.cfg.Width, 20, o.glyphWidth)
-}
-
-func (o *Overlay) bodyTextLimit() int {
-	return ui.TextLimit(o.cfg.Width, 20, o.glyphWidth)
-}
-
-
-
-
-func loadFont(name string, size float64) (font.Face, int) {
-	path := findFont(name)
-	if path != "" {
-		data, err := os.ReadFile(path)
-		if err == nil {
-			f, err := opentype.Parse(data)
-			if err == nil {
-				face, err := opentype.NewFace(f, &opentype.FaceOptions{
-					Size:    size,
-					DPI:     72,
-					Hinting: font.HintingFull,
-				})
-				if err == nil {
-					adv, ok := face.GlyphAdvance('M')
-					w := 7
-					if ok {
-						w = adv.Round()
-					}
-					sessionlog.Infof("overlay font: %s (%.0fpt, glyph %dpx)", path, size, w)
-					return face, w
-				}
-			}
-		}
-		sessionlog.Warnf("failed to load font %s, falling back to basicfont", path)
-	}
-	return basicfont.Face7x13, 7
-}
-
-func findFont(name string) string {
-	if name == "" {
-		name = "monospace"
-	}
-	out, err := exec.Command("fc-match", name, "--format=%{file}").Output()
-	if err != nil {
-		return ""
-	}
-	path := strings.TrimSpace(string(out))
-	if _, err := os.Stat(path); err != nil {
-		return ""
-	}
-	return path
-}
 
