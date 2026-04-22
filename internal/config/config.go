@@ -322,9 +322,15 @@ func Default() Config {
 		Hotkey:     "ctrl+shift+space",
 		HotkeyMode: "hold",
 		Transcription: TranscriptionConfig{
-			Backend:      BackendOpenAI,
-			BaseURL:      "https://api.openai.com/v1",
-			Model:        "gpt-4o-mini-transcribe",
+			// Local Lemonade is the default stack — no API key, no
+			// network, and whisper-v3-turbo-FLM runs on NPU when
+			// available. Users who want OpenAI Cloud flip backend to
+			// "openai" (vocis config backend) which also rewrites
+			// base_url / model to the cloud equivalents.
+			Backend:      BackendLemonade,
+			BaseURL:      "http://localhost:13305/api/v1",
+			RealtimeURL:  "ws://localhost:9000",
+			Model:        "whisper-v3-turbo-FLM",
 			PromptHint:   DefaultPromptHint,
 			RequestLimit: 45,
 			Vocabulary: []string{

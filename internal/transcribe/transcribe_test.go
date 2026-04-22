@@ -117,6 +117,8 @@ func TestStartStreamAppendsPCMAndReturnsTranscript(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.Default()
+	cfg.Transcription.Backend = config.BackendOpenAI
+	cfg.Transcription.Model = "gpt-4o-mini-transcribe"
 	cfg.Transcription.BaseURL = server.URL
 	cfg.Transcription.Organization = "org_test"
 	cfg.Transcription.Project = "proj_test"
@@ -229,6 +231,8 @@ func TestStartStreamUsesPromptHintWhenConfigured(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.Default()
+	cfg.Transcription.Backend = config.BackendOpenAI
+	cfg.Transcription.Model = "gpt-4o-mini-transcribe"
 	cfg.Transcription.BaseURL = server.URL
 	cfg.Transcription.PromptHint = "Use technical spelling."
 
@@ -317,6 +321,8 @@ func TestStartStreamKeepsFirstWordWhenCompletedTranscriptIsSuffix(t *testing.T) 
 	defer server.Close()
 
 	cfg := config.Default()
+	cfg.Transcription.Backend = config.BackendOpenAI
+	cfg.Transcription.Model = "gpt-4o-mini-transcribe"
 	cfg.Transcription.BaseURL = server.URL
 
 	client := New("test-key", cfg.Transcription, cfg.Streaming)
@@ -560,6 +566,8 @@ func TestDialErrorIncludesHTTPDetails(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.Default()
+	cfg.Transcription.Backend = config.BackendOpenAI
+	cfg.Transcription.Model = "gpt-4o-mini-transcribe"
 	cfg.Transcription.BaseURL = server.URL
 	client := New("test-key", cfg.Transcription, cfg.Streaming)
 
@@ -626,6 +634,8 @@ func TestStartStreamEnablesServerVADForSegmentMode(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.Default()
+	cfg.Transcription.Backend = config.BackendOpenAI
+	cfg.Transcription.Model = "gpt-4o-mini-transcribe"
 	cfg.Transcription.BaseURL = server.URL
 
 	client := New("test-key", cfg.Transcription, cfg.Streaming)
@@ -796,6 +806,8 @@ func TestFinalizeReceivesTrailingSegmentAfterSamplesClose(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.Default()
+	cfg.Transcription.Backend = config.BackendOpenAI
+	cfg.Transcription.Model = "gpt-4o-mini-transcribe"
 	cfg.Transcription.BaseURL = server.URL
 
 	client := New("test-key", cfg.Transcription, cfg.Streaming)
@@ -906,6 +918,8 @@ func TestFinalizeSucceedsWhenCommitEmptyArrivesViaFinals(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.Default()
+	cfg.Transcription.Backend = config.BackendOpenAI
+	cfg.Transcription.Model = "gpt-4o-mini-transcribe"
 	cfg.Transcription.BaseURL = server.URL
 
 	client := New("test-key", cfg.Transcription, cfg.Streaming)
