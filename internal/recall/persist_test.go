@@ -7,6 +7,40 @@ import (
 	"time"
 )
 
+// TestFilePersister_ExpandsEnvVarsAndTilde pins the portability
+// contract on recall.persist.dir: $HOME (and any other env var) plus
+// a leading ~/ are resolved at open time so users can keep yaml
+// values portable across machines.
+func TestFilePersister_ExpandsEnvVarsAndTilde(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("VOCIS_TEST_RECALL_BASE", base)
+	t.Setenv("HOME", base) // scoped to this test by t.Setenv
+
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"env var", "$VOCIS_TEST_RECALL_BASE/vocis/recall"},
+		{"tilde", "~/vocis/recall"},
+		{"env var with tilde-like segment", "$VOCIS_TEST_RECALL_BASE/sub/dir"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := NewFilePersister(tc.in)
+			if err != nil {
+				t.Fatalf("NewFilePersister(%q): %v", tc.in, err)
+			}
+			if _, err := os.Stat(p.Dir()); err != nil {
+				t.Fatalf("directory not created at resolved path %q: %v", p.Dir(), err)
+			}
+			if got, want := filepath.IsAbs(p.Dir()), true; got != want {
+				t.Fatalf("resolved dir %q IsAbs = %v, want %v", p.Dir(), got, want)
+			}
+		})
+	}
+}
+
 func TestFilePersister_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p, err := NewFilePersister(dir)

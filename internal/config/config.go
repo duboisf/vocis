@@ -354,11 +354,19 @@ func Default() Config {
 			// 0.02 is an energy-threshold tuned for Silero client VAD —
 			// the previous 0.5 was appropriate for server-VAD prob-mass
 			// thresholds, which we no longer use by default.
-			Threshold:        0.02,
-			ManualCommit:     true,
-			ClientVAD:        true,
-			MinUtteranceMS:   1000,
-			WaitFinalSeconds: 15,
+			Threshold:    0.02,
+			ManualCommit: true,
+			ClientVAD:    true,
+			// $HOME/opt/onnxruntime/lib/... is where the onnxruntime
+			// release tarball lands when unpacked into ~/opt — the
+			// documented install location. resolveOnnxruntimeLibrary
+			// expands $HOME at runtime so this is portable across
+			// machines; users who installed system-wide (/usr/lib,
+			// /usr/local/lib) can blank the field to trigger the
+			// auto-discovery candidates instead.
+			OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
+			MinUtteranceMS:     1000,
+			WaitFinalSeconds:   15,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
@@ -464,22 +472,13 @@ func Default() Config {
 func floatPtr(v float64) *float64 { return &v }
 
 // defaultRecallStateDir returns the default for `recall.persist.dir`.
-// Follows the XDG state-dir convention: $XDG_STATE_HOME/vocis/recall
-// when set, else ~/.local/state/vocis/recall. Embedded into the config
-// file at generation time so users can see exactly where segments
-// would land if they flipped mode to disk.
+// Emits the portable `$HOME/.local/state/vocis/recall` form rather
+// than a machine-specific absolute path so generated configs travel
+// between machines (laptop → desktop, home dir moves, etc.). The
+// FilePersister expands $HOME and ~/ at open-time, so this works
+// without any load-time transform.
 func defaultRecallStateDir() string {
-	if xdg := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); xdg != "" {
-		return filepath.Join(xdg, "vocis", "recall")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// os.UserHomeDir only fails when HOME is unset and the platform
-		// has no fallback. Return the tilde form and let runtime
-		// expansion either fix it or fail loudly.
-		return "~/.local/state/vocis/recall"
-	}
-	return filepath.Join(home, ".local", "state", "vocis", "recall")
+	return "$HOME/.local/state/vocis/recall"
 }
 
 func Path() (string, error) {

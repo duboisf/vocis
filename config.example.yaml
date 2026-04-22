@@ -70,12 +70,15 @@ streaming:
   # hotkey-release commit). Whisper produces unreliable output on
   # sub-1s clips, so 1000 is the default.
   min_utterance_ms: 1000
-  # onnxruntime_library: absolute path to libonnxruntime.so. Leave
-  # empty to auto-discover from /usr/local/lib, /usr/lib, and
-  # ~/opt/onnxruntime/lib. Install from
-  # https://github.com/microsoft/onnxruntime/releases — only needed
-  # when client_vad is true.
-  onnxruntime_library: ""
+  # onnxruntime_library: path to libonnxruntime.so. Supports $HOME
+  # and other env vars (expanded at runtime via os.ExpandEnv).
+  # Default matches the onnxruntime release-tarball layout when
+  # unpacked into ~/opt. Blank the field to fall back to the
+  # auto-discovery candidates (/usr/local/lib, /usr/lib,
+  # /usr/lib/x86_64-linux-gnu, $HOME/.local/lib). Install from
+  # https://github.com/microsoft/onnxruntime/releases — only
+  # consulted when client_vad is true.
+  onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
   # Minimum seconds to wait for the trailing transcript after Finalize
   # commits the audio buffer. Cloud backends answer in under a second;
   # the default 15 matches local Lemonade where Whisper inference

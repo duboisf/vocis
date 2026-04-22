@@ -186,15 +186,17 @@ func decodePCM16(s string) ([]int16, error) {
 	return out, nil
 }
 
-// expandHome expands a leading ~/ to the user's home directory. Other
-// tilde forms (~user/...) are not supported — the Go stdlib has no
-// portable way to resolve them and the common case for a config path
-// is ~/.local/state/vocis/recall.
+// expandHome resolves env vars and a leading ~/ to absolute paths so
+// yaml values like `$HOME/.local/state/vocis/recall` or
+// `~/.local/state/vocis/recall` both work and stay portable across
+// machines. Other tilde forms (~user/...) are not supported — the Go
+// stdlib has no portable way to resolve them.
 func expandHome(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" {
 		return "", errors.New("empty path")
 	}
+	p = os.ExpandEnv(p)
 	if !strings.HasPrefix(p, "~/") && p != "~" {
 		return p, nil
 	}
