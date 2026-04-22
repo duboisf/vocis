@@ -8,12 +8,12 @@ EXTENSION_DEST := $(HOME)/.local/share/gnome-shell/extensions/$(EXTENSION_UUID)
 
 .PHONY: build test fmt tidy install-extension uninstall-extension enable-extension gnome-shell-nested dev
 
+install:
+	go install -ldflags "$(LDFLAGS)" ./cmd/vocis
+
 build:
 	mkdir -p bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(APP) ./cmd/vocis
-
-install:
-	go install -ldflags "$(LDFLAGS)" ./cmd/vocis
 
 test:
 	go test ./...
