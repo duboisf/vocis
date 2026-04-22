@@ -27,7 +27,7 @@ var (
 	recallPickSelection   string
 	recallPickPostprocess bool
 	recallPickJoin        string
-	recallPickFZF         bool
+	recallPickNoFZF       bool
 )
 
 var recallCmd = &cobra.Command{
@@ -134,8 +134,8 @@ func init() {
 		"run the configured LLM cleanup on each transcript before joining")
 	recallPickCmd.Flags().StringVar(&recallPickJoin, "join", " ",
 		"separator inserted between segment transcripts when selecting multiple")
-	recallPickCmd.Flags().BoolVar(&recallPickFZF, "fzf", false,
-		"use fzf as the picker UI with a preview pane showing the full cached transcript (tab to multi-select, enter to confirm); requires fzf on PATH")
+	recallPickCmd.Flags().BoolVar(&recallPickNoFZF, "no-fzf", false,
+		"force the plain-table picker instead of fzf (default is fzf when it's on PATH)")
 
 	recallDropCmd.Flags().StringVar(&recallDropIDs, "ids", "",
 		"selection string (same syntax as pick --ids); required")
@@ -229,7 +229,7 @@ func runRecallPick() error {
 		if err != nil {
 			return err
 		}
-	} else if recallPickFZF {
+	} else if useFZF := !recallPickNoFZF && fzfAvailable(); useFZF {
 		ids, err = pickSegmentsWithFZF(segs)
 		if err != nil {
 			return err
@@ -496,16 +496,36 @@ func truncateOneLine(s string, max int) string {
 	return s[:max-1] + "…"
 }
 
+// fzfAvailable reports whether the fzf binary is on PATH. Used to
+// pick the default `recall pick` UI — fzf when present, table prompt
+// otherwise — without the user needing a config flag.
+func fzfAvailable() bool {
+	_, err := exec.LookPath("fzf")
+	return err == nil
+}
+
 // pickSegmentsWithFZF runs fzf as the selection UI. Each segment is
-// piped in as a tab-separated "ID<TAB>HEADER" line; fzf's preview pane
-// cats a per-segment file holding the full cached transcript (or a
-// placeholder for segments that haven't been transcribed yet). Returns
-// the selected IDs in the order the user marked them. Multi-select is
-// on (tab marks); plain enter confirms the current line.
+// piped in as a tab-separated "ID<TAB>ALIGNED_ROW" line; fzf's preview
+// pane cats a per-segment file holding the full cached transcript (or
+// a placeholder for segments that haven't been transcribed yet).
+//
+// Returns the selected IDs in the order the user marked them.
+// Multi-select is on (tab marks); plain enter confirms the current
+// line. Ctrl-P on the focused row plays the segment audio via
+// `vocis recall replay` (requires paplay, same as the replay
+// subcommand).
 func pickSegmentsWithFZF(segs []recall.SegmentInfo) ([]int64, error) {
 	fzfPath, err := exec.LookPath("fzf")
 	if err != nil {
-		return nil, fmt.Errorf("--fzf requires fzf on PATH: %w", err)
+		return nil, fmt.Errorf("fzf required but not on PATH: %w", err)
+	}
+
+	// Resolve our own path so the Ctrl-P replay binding runs the same
+	// binary the user invoked, not some other vocis that happens to be
+	// earlier on PATH (matters when running from a build dir).
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve vocis executable path: %w", err)
 	}
 
 	// Temp dir for preview files. Cleaned up after fzf exits regardless
@@ -523,11 +543,18 @@ func pickSegmentsWithFZF(segs []recall.SegmentInfo) ([]int64, error) {
 		dur := time.Duration(s.DurationMS) * time.Millisecond
 		short := "(not transcribed yet)"
 		if s.Transcribed {
-			short = truncateOneLine(s.CachedText, 80)
+			short = truncateOneLine(s.CachedText, 120)
 		}
-		// Tab-separated so fzf can treat field 1 as the ID for --preview.
-		fmt.Fprintf(&input, "%d\t#%d  %s ago  %.2fs  %s\n",
-			s.ID, s.ID, age, dur.Seconds(), short)
+		// Fixed-width columns so rows align inside fzf. Widths:
+		//   id    5  (#12345)
+		//   age   12 ("72h0m0s ago")
+		//   dur   7  ("999.99s")
+		//   text  remainder
+		// Field 1 (tab-delimited) is the raw ID for fzf substitution;
+		// fields 2+ are the visible row rendered via --with-nth=2..
+		ageField := age.String() + " ago"
+		row := fmt.Sprintf("#%-5d %-12s %6.2fs  %s", s.ID, ageField, dur.Seconds(), short)
+		fmt.Fprintf(&input, "%d\t%s\n", s.ID, row)
 
 		body := "(not transcribed yet — select this row + enter to transcribe)"
 		if s.Transcribed {
@@ -548,9 +575,10 @@ func pickSegmentsWithFZF(segs []recall.SegmentInfo) ([]int64, error) {
 		"--delimiter=\t",
 		"--with-nth=2..",
 		"--preview", fmt.Sprintf("cat %s/{1}.txt", previewDir),
-		"--preview-window=right,60%,wrap",
+		"--preview-window=down,50%,wrap",
 		"--prompt=recall> ",
-		"--header=tab to mark, enter to confirm, esc to abort",
+		"--header=tab=mark  enter=confirm  ctrl-p=play  esc=abort",
+		"--bind", fmt.Sprintf("ctrl-p:execute(%s recall replay --ids={1})", self),
 	)
 	cmd.Stdin = strings.NewReader(input.String())
 	cmd.Stderr = os.Stderr

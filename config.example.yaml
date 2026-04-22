@@ -44,23 +44,26 @@ recording:
 streaming:
   # Live-subtitle overlay showing interim transcripts as you speak.
   # Requires manual_commit=false (server-side VAD must be on so the
-  # backend streams interim results).
-  show_partial_overlay: true
+  # backend streams interim results). Default is off because the
+  # default manual_commit=true disables interim streaming.
+  show_partial_overlay: false
   prefix_padding_ms: 300
   silence_duration_ms: 500
-  threshold: 0.5
+  # 0.02 is tuned for Silero client_vad (energy threshold). Bump to
+  # ~0.5 if you flip client_vad=false and rely on server VAD instead.
+  threshold: 0.02
   # manual_commit: disables server-side VAD on Lemonade and commits the
   # audio buffer explicitly when the hotkey is released. Trades live
   # partials for lower end-of-utterance latency (Lemonade stops running
   # an interim transcription in parallel with the final). OpenAI backend
   # ignores this flag. Must be paired with show_partial_overlay=false.
-  manual_commit: false
+  manual_commit: true
   # client_vad: runs an energy-threshold pause detector client-side and
   # sends input_audio_buffer.commit every time you pause, chunking a
   # long hold into several transcribed segments instead of one big one
   # at release. Requires manual_commit=true. Reuses the threshold /
   # silence_duration_ms / prefix_padding_ms knobs above.
-  client_vad: false
+  client_vad: true
   # min_utterance_ms: minimum accumulated speech an episode needs
   # before a pause can trigger a mid-session commit. Segments shorter
   # than this are suppressed and roll into the next utterance (or the
@@ -75,9 +78,9 @@ streaming:
   onnxruntime_library: ""
   # Minimum seconds to wait for the trailing transcript after Finalize
   # commits the audio buffer. Cloud backends answer in under a second;
-  # bump this to 10-15 if you're using a local backend where Whisper
-  # inference takes longer than 3s.
-  wait_final_seconds: 3
+  # the default 15 matches local Lemonade where Whisper inference
+  # commonly takes 5–15s. Drop to 3 when pointing at OpenAI Cloud.
+  wait_final_seconds: 15
 
 insertion:
   mode: auto

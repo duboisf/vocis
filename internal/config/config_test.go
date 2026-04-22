@@ -131,8 +131,13 @@ func TestManualCommitAloneIsValid(t *testing.T) {
 func TestPartialOverlayWithoutManualCommitIsValid(t *testing.T) {
 	t.Parallel()
 
+	// Server-VAD mode: no manual commit, no client VAD, partial overlay
+	// on so interim deltas stream from the backend. Opposite of the
+	// default (manual+client VAD), but a valid combination users opt
+	// into for OpenAI cloud or a Lemonade setup without onnxruntime.
 	cfg := Default()
 	cfg.Streaming.ManualCommit = false
+	cfg.Streaming.ClientVAD = false
 	cfg.Streaming.ShowPartialOverlay = true
 
 	if err := cfg.Validate(); err != nil {

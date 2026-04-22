@@ -342,13 +342,23 @@ func Default() Config {
 			DuckVolume:         0.1,
 		},
 		Streaming: StreamingConfig{
-			ShowPartialOverlay: true,
+			// Defaults tuned for the Lemonade + Silero setup most users
+			// run locally: server-side VAD off (ManualCommit), Silero
+			// client VAD on for mid-hold chunking, partial overlay off
+			// (manual-commit mode doesn't stream interim deltas). Cloud
+			// OpenAI users who want live partials should flip
+			// ManualCommit=false, ClientVAD=false, ShowPartialOverlay=true.
+			ShowPartialOverlay: false,
 			PrefixPaddingMS:    300,
 			SilenceDurationMS:  500,
-			Threshold:          0.5,
-			ManualCommit:       false,
-			MinUtteranceMS:     1000,
-			WaitFinalSeconds:   3,
+			// 0.02 is an energy-threshold tuned for Silero client VAD —
+			// the previous 0.5 was appropriate for server-VAD prob-mass
+			// thresholds, which we no longer use by default.
+			Threshold:        0.02,
+			ManualCommit:     true,
+			ClientVAD:        true,
+			MinUtteranceMS:   1000,
+			WaitFinalSeconds: 15,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",

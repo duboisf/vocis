@@ -720,7 +720,7 @@ func assertTurnDetection(t *testing.T, value any, wantSegment bool) {
 	if got := int(turnDetection["silence_duration_ms"].(float64)); got != 500 {
 		t.Fatalf("turn_detection.silence_duration_ms = %d", got)
 	}
-	if got := turnDetection["threshold"].(float64); got != 0.5 {
+	if got := turnDetection["threshold"].(float64); got != 0.02 {
 		t.Fatalf("turn_detection.threshold = %v", got)
 	}
 }
