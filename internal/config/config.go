@@ -256,6 +256,13 @@ type StreamingConfig struct {
 	// session fields, so setting it there is harmless but has no
 	// effect until Lemonade adds the feature.
 	NoiseReduction string `yaml:"noise_reduction"`
+	// TailSilenceMS appends this many milliseconds of silent PCM to
+	// the audio buffer before the finalize commit. Whisper-family
+	// transcribers (including Gemma-FLM) need a silent tail to segment
+	// the last word reliably — without it the trailing word often gets
+	// dropped from the transcript. 300ms is the usual sweet spot; set
+	// to 0 to disable. The pad is only sent at Finalize, not mid-hold.
+	TailSilenceMS int `yaml:"tail_silence_ms"`
 }
 
 type InsertionConfig struct {
@@ -405,6 +412,7 @@ func Default() Config {
 			OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
 			MinUtteranceMS:     1000,
 			WaitFinalSeconds:   15,
+			TailSilenceMS:      300,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
@@ -685,6 +693,10 @@ func (c Config) Validate() error {
 	case "", "near_field", "far_field":
 	default:
 		return fmt.Errorf("streaming.noise_reduction must be near_field, far_field, or empty; got %q", c.Streaming.NoiseReduction)
+	}
+
+	if c.Streaming.TailSilenceMS < 0 || c.Streaming.TailSilenceMS > 2000 {
+		return errors.New("streaming.tail_silence_ms must be between 0 and 2000")
 	}
 
 	if c.Streaming.MinUtteranceMS < 0 || c.Streaming.MinUtteranceMS > 10000 {

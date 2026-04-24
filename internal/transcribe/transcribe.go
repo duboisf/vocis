@@ -324,6 +324,36 @@ func (s *Stream) Append(ctx context.Context, samples []int16) error {
 	return nil
 }
 
+// AppendSilence sends zero-valued PCM16 for the given duration at the
+// backend's target sample rate. Used to pad the audio buffer with a
+// silent tail before the finalize commit so Whisper-family models can
+// segment the last word — without the pad, the trailing word is often
+// dropped because the model treats a cut-off frame as indeterminate.
+// A zero or negative duration is a no-op.
+func (s *Stream) AppendSilence(ctx context.Context, durationMS int) error {
+	if durationMS <= 0 || s.targetRate <= 0 {
+		return nil
+	}
+	sampleCount := int64(durationMS) * int64(s.targetRate) / 1000
+	if sampleCount <= 0 {
+		return nil
+	}
+	// Mono PCM16: 2 bytes per sample. A zeroed byte slice serializes
+	// as digital silence at any bit depth we care about.
+	payload := make([]byte, sampleCount*2)
+	if err := s.sendJSON(ctx, map[string]any{
+		"type":  "input_audio_buffer.append",
+		"audio": base64.StdEncoding.EncodeToString(payload),
+	}); err != nil {
+		return err
+	}
+	s.statsMu.Lock()
+	s.stats.AppendBytes += int64(len(payload))
+	s.stats.OutboundCounts["input_audio_buffer.append"]++
+	s.statsMu.Unlock()
+	return nil
+}
+
 func (s *Stream) Commit(ctx context.Context) error {
 	err := s.sendJSON(ctx, map[string]any{"type": "input_audio_buffer.commit"})
 	if err == nil {
@@ -738,6 +768,7 @@ type DictationOpts struct {
 type DictationSession struct {
 	writeTimeout          time.Duration
 	waitFinalFloorSeconds int
+	tailSilenceMS         int
 	cancel                context.CancelFunc
 	callbacks             ConnectCallbacks
 	// hallucinationFilters is the set of exact transcripts to drop,
@@ -777,6 +808,7 @@ func (c *Client) StartDictation(ctx context.Context, opts DictationOpts) (*Dicta
 	session := &DictationSession{
 		writeTimeout:          c.writeTimeout,
 		waitFinalFloorSeconds: c.streaming.WaitFinalSeconds,
+		tailSilenceMS:         c.streaming.TailSilenceMS,
 		cancel:                cancel,
 		callbacks:             opts.Callbacks,
 		hallucinationFilters:  buildHallucinationSet(c.cfg.HallucinationFilters),
@@ -853,6 +885,14 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 	}
 
 	// Phase 2: commit trailing audio and wait for the final transcript.
+	// Pad with silence first so Whisper-family models can segment the
+	// last word — without it, releasing the hotkey mid-word routinely
+	// eats the trailing word from the transcript.
+	if s.tailSilenceMS > 0 {
+		if err := stream.AppendSilence(ctx, s.tailSilenceMS); err != nil {
+			sessionlog.Warnf("tail silence pad failed: %v", err)
+		}
+	}
 	_, commitSpan := telemetry.StartSpan(ctx, "vocis.transcribe.commit",
 		attribute.Int64("commit.pending_audio_bytes", pre.AppendBytes),
 		attribute.Int64("commit.pending_audio_ms", pre.AppendApproxMs),
@@ -860,6 +900,7 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 		attribute.Int64("commit.ms_since_last_inbound", pre.MsSinceLastInbound),
 		attribute.Bool("commit.speech_stopped_seen_before_commit", pre.SpeechStoppedSeenBefore),
 		attribute.Int64("commit.ms_since_speech_stopped", pre.MsSinceSpeechStopped),
+		attribute.Int("commit.tail_silence_ms", s.tailSilenceMS),
 	)
 	err = stream.Commit(ctx)
 	if err != nil && s.canSkipEmptyCommit(err, stream) {

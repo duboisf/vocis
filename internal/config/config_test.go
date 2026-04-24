@@ -164,6 +164,38 @@ func TestClientVADRequiresManualCommit(t *testing.T) {
 	}
 }
 
+// TestTailSilenceMSValidation pins the range on the new tail silence
+// knob. Exists to guard against accidental reintroduction of the "last
+// word eaten" Whisper failure via a huge default or negative value.
+func TestTailSilenceMSValidation(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		value   int
+		wantErr bool
+	}{
+		{"default is valid", 300, false},
+		{"zero disables, still valid", 0, false},
+		{"upper bound 2000 is valid", 2000, false},
+		{"over 2000 rejected", 2001, true},
+		{"negative rejected", -1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Streaming.TailSilenceMS = tc.value
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestClientVADWithManualCommitIsValid(t *testing.T) {
 	t.Parallel()
 

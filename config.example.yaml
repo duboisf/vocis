@@ -105,6 +105,13 @@ streaming:
   # the default 15 matches local Lemonade where Whisper inference
   # commonly takes 5–15s. Drop to 3 when pointing at OpenAI Cloud.
   wait_final_seconds: 15
+  # tail_silence_ms: append this many ms of silent PCM to the audio
+  # buffer right before the finalize commit. Whisper-family models
+  # (including Gemma-FLM) need a silent tail to segment the last word
+  # reliably — without it, releasing the hotkey mid-word often drops
+  # the trailing word from the transcript. 300ms is a solid default;
+  # set 0 to disable, cap is 2000.
+  tail_silence_ms: 300
   # noise_reduction: server-side noise reduction applied before VAD and
   # the transcription model. Accepted values:
   #   ""           - off (default)
