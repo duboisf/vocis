@@ -152,6 +152,16 @@ type RecallConfig struct {
 	// Default is memory-only — always-on mic audio does not land on
 	// disk unless the user explicitly opts in by setting mode=disk.
 	Persist RecallPersistConfig `yaml:"persist"`
+	// BatchGapMS is silent PCM (zeros) inserted between segments when
+	// `vocis recall last <duration>` concatenates the ring buffer for a
+	// single joint transcription. Prevents the ASR from welding the last
+	// word of one segment to the first word of the next.
+	BatchGapMS int `yaml:"batch_gap_ms"`
+	// BatchMaxSeconds caps the total concatenated audio duration for a
+	// single `recall last` call. Safety net — a stuck daemon with days
+	// of retention shouldn't accidentally feed hours of PCM into one
+	// realtime session. 0 disables the cap.
+	BatchMaxSeconds int `yaml:"batch_max_seconds"`
 }
 
 // RecallPersistConfig is the nested `recall.persist` block. Mode is
@@ -514,6 +524,13 @@ func Default() Config {
 				Mode: RecallPersistMemory,
 				Dir:  defaultRecallStateDir(),
 			},
+			// 300ms silence between concatenated segments — same default
+			// as `recall replay --gap`, which is already a spot the ear
+			// finds natural.
+			BatchGapMS: 300,
+			// 3600s = 1 hour. At 16 kHz mono int16 that's ~115 MB of PCM
+			// worst-case — large but still fits in one realtime session.
+			BatchMaxSeconds: 3600,
 		},
 		YAMLIndent: 2,
 	}
@@ -752,6 +769,12 @@ func (c Config) Validate() error {
 	}
 	if c.Recall.MinSegmentRMS < 0 || c.Recall.MinSegmentRMS > 1 {
 		return errors.New("recall.min_segment_rms must be between 0 and 1")
+	}
+	if c.Recall.BatchGapMS < 0 || c.Recall.BatchGapMS > 5000 {
+		return errors.New("recall.batch_gap_ms must be between 0 and 5000")
+	}
+	if c.Recall.BatchMaxSeconds < 0 || c.Recall.BatchMaxSeconds > 14400 {
+		return errors.New("recall.batch_max_seconds must be between 0 and 14400 (4 hours)")
 	}
 	switch c.Recall.Persist.Mode {
 	case "", RecallPersistMemory, RecallPersistDisk:

@@ -18,6 +18,12 @@ type Request struct {
 	// TranscribeArgs — populated when Op == "transcribe"
 	SegmentID int64 `json:"segment_id,omitempty"`
 
+	// SegmentIDs — populated when Op == "transcribe_batch". Daemon
+	// concatenates these segments (in the given order) into one audio
+	// stream with a silence gap between them, and returns a single
+	// joint transcript.
+	SegmentIDs []int64 `json:"segment_ids,omitempty"`
+
 	// PostProcess tells the daemon to also run the configured LLM
 	// post-processing step before returning the final text.
 	PostProcess bool `json:"postprocess,omitempty"`
@@ -73,10 +79,11 @@ type StatsInfo struct {
 // Op names. Kept as string constants for forward-compat — clients and
 // servers that see an unknown op return an Error instead of crashing.
 const (
-	OpList       = "list"
-	OpTranscribe = "transcribe"
-	OpDrop       = "drop"
-	OpStatus     = "status"
-	OpShutdown   = "shutdown"
-	OpGetAudio   = "get_audio"
+	OpList            = "list"
+	OpTranscribe      = "transcribe"
+	OpTranscribeBatch = "transcribe_batch"
+	OpDrop            = "drop"
+	OpStatus          = "status"
+	OpShutdown        = "shutdown"
+	OpGetAudio        = "get_audio"
 )

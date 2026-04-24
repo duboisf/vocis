@@ -378,6 +378,12 @@ func (d *Daemon) dispatch(ctx context.Context, req Request) Response {
 			return Response{Error: err.Error()}
 		}
 		return Response{Transcript: text}
+	case OpTranscribeBatch:
+		text, err := d.transcribeBatch(ctx, req.SegmentIDs, req.PostProcess)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return Response{Transcript: text}
 	case OpDrop:
 		d.ring.Drop(req.SegmentID)
 		return Response{}

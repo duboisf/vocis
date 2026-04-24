@@ -30,6 +30,8 @@ var (
 	recallPickNoFZF       bool
 )
 
+var recallLastPostprocess bool
+
 var recallCmd = &cobra.Command{
 	Use:   "recall",
 	Short: "Always-on dictation: capture continuously, transcribe on demand",
@@ -110,6 +112,28 @@ Requires paplay on PATH (part of pulseaudio-utils on most distros).`,
 	},
 }
 
+var recallLastCmd = &cobra.Command{
+	Use:   "last <duration>",
+	Short: "Transcribe every segment from the last N minutes as one joint transcript",
+	Long: `Concatenates every segment whose StartedAt falls within the given
+duration window (most recent first) and sends the combined audio
+through a single transcription request. Cheaper than picking "all":
+one realtime session instead of N, and the ASR keeps context across
+segment boundaries.
+
+Duration accepts any Go time.ParseDuration string — "10m", "2h",
+"45s", "1h30m". A short silence gap (recall.batch_gap_ms) is inserted
+between segments so words from adjacent segments don't weld together.
+
+Example:
+    vocis recall last 10m                   # last 10 minutes → stdout
+    vocis recall last 2h --postprocess      # also run LLM cleanup`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runRecallLast(args[0])
+	},
+}
+
 var recallDropCmd = &cobra.Command{
 	Use:   "drop",
 	Short: "Remove segments from the ring buffer (and persisted files)",
@@ -147,8 +171,12 @@ func init() {
 		"silence inserted between segments when playing multiple")
 	_ = recallReplayCmd.MarkFlagRequired("ids")
 
+	recallLastCmd.Flags().BoolVar(&recallLastPostprocess, "postprocess", false,
+		"run the configured LLM cleanup on the joint transcript before printing")
+
 	recallCmd.AddCommand(recallStartCmd)
 	recallCmd.AddCommand(recallPickCmd)
+	recallCmd.AddCommand(recallLastCmd)
 	recallCmd.AddCommand(recallStatusCmd)
 	recallCmd.AddCommand(recallStopCmd)
 	recallCmd.AddCommand(recallDropCmd)
@@ -272,6 +300,68 @@ func runRecallPick() error {
 		fmt.Fprintf(os.Stderr, "note: %d of %d segment(s) were empty and skipped\n", empties, len(ids))
 	}
 	fmt.Println(strings.Join(parts, recallPickJoin))
+	return nil
+}
+
+func runRecallLast(rawDuration string) error {
+	window, err := time.ParseDuration(rawDuration)
+	if err != nil {
+		return fmt.Errorf("parse duration %q: %w", rawDuration, err)
+	}
+	if window <= 0 {
+		return fmt.Errorf("duration must be > 0 (got %s)", rawDuration)
+	}
+
+	session, sessErr := sessionlog.Start()
+	if sessErr != nil {
+		return sessErr
+	}
+	defer session.Close()
+
+	cfg, _, err := config.Load()
+	if err != nil {
+		return err
+	}
+	socket, err := recall.ResolveSocketPath(cfg.Recall.SocketPath)
+	if err != nil {
+		return err
+	}
+	client := recall.NewClient(socket)
+
+	listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	segs, err := client.List(listCtx)
+	listCancel()
+	if err != nil {
+		return err
+	}
+
+	ids := recall.SegmentIDsWithinWindow(segs, time.Now(), window)
+	sessionlog.Infof("recall last: window=%s available=%d matched=%d ids=%v",
+		window, len(segs), len(ids), ids)
+
+	if len(ids) == 0 {
+		fmt.Fprintf(os.Stderr, "no segments captured in the last %s\n", window)
+		return nil
+	}
+
+	// Batch transcription can take a while: model warmup + the full
+	// concatenated duration + finalize + optional post-process. Give
+	// the daemon a generous ceiling.
+	txTimeout := 90*time.Second + window
+	txCtx, txCancel := context.WithTimeout(context.Background(), txTimeout)
+	defer txCancel()
+
+	fmt.Fprintf(os.Stderr, "transcribing %d segment(s) covering the last %s...\n", len(ids), window)
+	text, err := client.TranscribeBatch(txCtx, ids, recallLastPostprocess)
+	if err != nil {
+		return err
+	}
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		fmt.Fprintln(os.Stderr, "batch transcript was empty (likely silence or noise)")
+		return nil
+	}
+	fmt.Println(trimmed)
 	return nil
 }
 

@@ -232,4 +232,30 @@ telemetry:
   enabled: false
   endpoint: localhost:4317
 
+recall:
+  # Always-on Wokis Recall daemon (`vocis recall start`). These knobs
+  # only matter if you use the daemon — the push-to-talk `serve` mode
+  # ignores this section.
+  retention_seconds: 604800   # 7 days
+  max_segments: 2000
+  socket_path: ""             # auto under $XDG_RUNTIME_DIR/vocis/recall.sock
+  min_silence_ms: 500
+  min_speech_ms: 150
+  min_utterance_ms: 500
+  preroll_ms: 300
+  max_segment_seconds: 30
+  min_segment_peak: 0.02
+  min_segment_rms: 0.005
+  persist:
+    mode: in_memory           # or "disk" to mirror segments to disk
+    dir: $HOME/.local/state/vocis/recall
+  # batch_gap_ms: silence inserted between segments when
+  # `vocis recall last <duration>` concatenates the ring buffer for a
+  # single joint transcription. Prevents the ASR from welding the last
+  # word of one segment to the first word of the next.
+  batch_gap_ms: 300
+  # batch_max_seconds: safety cap on total concatenated audio duration
+  # for one `recall last` call. 3600 = 1 hour. Set 0 to disable.
+  batch_max_seconds: 3600
+
 yaml_indent: 2

@@ -43,6 +43,18 @@ func (c *Client) Transcribe(ctx context.Context, id int64, postprocess bool) (st
 	return resp.Transcript, nil
 }
 
+// TranscribeBatch asks the daemon to concatenate the given segments
+// (in the provided order, with a configured silence gap between them)
+// and transcribe the result as a single realtime session. Returns the
+// joint transcript.
+func (c *Client) TranscribeBatch(ctx context.Context, ids []int64, postprocess bool) (string, error) {
+	resp, err := c.do(ctx, Request{Op: OpTranscribeBatch, SegmentIDs: ids, PostProcess: postprocess})
+	if err != nil {
+		return "", err
+	}
+	return resp.Transcript, nil
+}
+
 // Drop removes a segment from the ring buffer.
 func (c *Client) Drop(ctx context.Context, id int64) error {
 	_, err := c.do(ctx, Request{Op: OpDrop, SegmentID: id})
