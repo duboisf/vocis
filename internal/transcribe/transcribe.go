@@ -887,8 +887,12 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 	// Phase 2: commit trailing audio and wait for the final transcript.
 	// Pad with silence first so Whisper-family models can segment the
 	// last word — without it, releasing the hotkey mid-word routinely
-	// eats the trailing word from the transcript.
+	// eats the trailing word from the transcript. Traced explicitly
+	// because dumpWSFrame skips all outbound input_audio_buffer.append
+	// frames to avoid audio-chunk spam, so the append itself is
+	// invisible in the protocol log.
 	if s.tailSilenceMS > 0 {
+		sessionlog.Tracef("ws → input_audio_buffer.append (tail silence pad: %dms)", s.tailSilenceMS)
 		if err := stream.AppendSilence(ctx, s.tailSilenceMS); err != nil {
 			sessionlog.Warnf("tail silence pad failed: %v", err)
 		}
