@@ -90,7 +90,14 @@ func concatSegmentPCM(segs []*Segment, gapMS int, maxTotalSeconds int) ([]int16,
 //
 // Serialized on the same transcribeMu as single-segment transcription
 // to avoid parallel transports.
-func (d *Daemon) transcribeBatch(_ context.Context, ids []int64, postprocess bool) (string, error) {
+//
+// ctx is the request-scoped context from handleConn — client
+// disconnection (Ctrl-C on the CLI) propagates through and tears down
+// the Lemonade WebSocket so the model stops being fed audio no one is
+// going to receive. A batch can legitimately take tens of minutes on a
+// local model, so there is no internal wall-clock timeout — the user
+// controls lifetime via Ctrl-C, and daemon shutdown also cancels.
+func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess bool) (string, error) {
 	if len(ids) == 0 {
 		return "", fmt.Errorf("no segment ids provided")
 	}
@@ -102,7 +109,7 @@ func (d *Daemon) transcribeBatch(_ context.Context, ids []int64, postprocess boo
 
 	idsCopy := append([]int64(nil), ids...)
 
-	spanCtx, span := telemetry.StartSpan(context.Background(), "vocis.recall.transcribe_batch",
+	spanCtx, span := telemetry.StartSpan(ctx, "vocis.recall.transcribe_batch",
 		attribute.Int("segments.count", len(ids)),
 		attribute.Int64Slice("segments.ids", idsCopy),
 		attribute.Bool("postprocess", postprocess),
@@ -141,10 +148,14 @@ func (d *Daemon) transcribeBatch(_ context.Context, ids []int64, postprocess boo
 	sessionlog.Infof("recall: batch transcribe ids=%v segments=%d total=%.2fs gap=%dms postprocess=%t",
 		idsCopy, len(ids), float64(totalMS)/1000.0, d.cfg.Recall.BatchGapMS, postprocess)
 
-	// Long batches need longer than the 60s single-segment budget. Scale
-	// with the audio duration plus a fixed overhead for connect + finalize.
-	dictTimeout := 60*time.Second + time.Duration(totalMS)*time.Millisecond
-	dictCtx, cancel := context.WithTimeout(spanCtx, dictTimeout)
+	// No internal wall-clock timeout: batches of 20+ minutes on a local
+	// 2B model can legitimately take tens of minutes, and a fixed cap
+	// was worse than useless (it cut off valid work without actually
+	// stopping Lemonade, because the cap fired from Background while
+	// the WS stayed open). Lifetime is driven by the caller's ctx —
+	// client Ctrl-C or daemon shutdown both cancel cleanly and
+	// Finalize then closes the WS.
+	dictCtx, cancel := context.WithCancel(spanCtx)
 	defer cancel()
 
 	samples := make(chan []int16, 8)
@@ -152,6 +163,11 @@ func (d *Daemon) transcribeBatch(_ context.Context, ids []int64, postprocess boo
 		SampleRate: sampleRate,
 		Channels:   d.cfg.Recording.Channels,
 		Samples:    samples,
+		// Let waitForFinal scale its post-commit budget to the audio
+		// we're about to feed — otherwise the 15 s wait_final floor
+		// fires before a local model has time to transcribe anything
+		// meaningful on a multi-minute batch.
+		ExpectedAudioMS: totalMS,
 	})
 	if startErr != nil {
 		err = fmt.Errorf("start dictation: %w", startErr)

@@ -772,11 +772,20 @@ type DictationOpts struct {
 	Channels   int
 	Samples    <-chan []int16
 	Callbacks  ConnectCallbacks
+	// ExpectedAudioMS is the total audio duration (in ms) the caller
+	// intends to feed through the session, when known upfront. Used by
+	// waitForFinal to scale its post-commit timeout proportionally — a
+	// batch commit of 20 min of pre-recorded audio needs ~minutes for
+	// a local model to transcribe, so the fixed 15 s wait_final floor
+	// would fire too soon. 0 = unknown (PTT serve path), waitForFinal
+	// falls back to wall-clock trailingDuration scaling.
+	ExpectedAudioMS int
 }
 
 type DictationSession struct {
 	writeTimeout          time.Duration
 	waitFinalFloorSeconds int
+	expectedAudioMS       int
 	tailSilenceMS         int
 	cancel                context.CancelFunc
 	callbacks             ConnectCallbacks
@@ -817,6 +826,7 @@ func (c *Client) StartDictation(ctx context.Context, opts DictationOpts) (*Dicta
 	session := &DictationSession{
 		writeTimeout:          c.writeTimeout,
 		waitFinalFloorSeconds: c.streaming.WaitFinalSeconds,
+		expectedAudioMS:       opts.ExpectedAudioMS,
 		tailSilenceMS:         c.streaming.TailSilenceMS,
 		cancel:                cancel,
 		callbacks:             opts.Callbacks,
@@ -1331,11 +1341,26 @@ func (s *DictationSession) drainPendingSegments(ctx context.Context, stream *Str
 }
 
 // waitForFinal waits for the trailing transcript with a proportional timeout.
-// The floor is streaming.wait_final_seconds (default 3); raise for local
-// backends where Whisper model load + CPU inference can run 5-15s on the
-// first request.
+// Three signals feed the timeout budget:
+//   - trailingDuration() / 5 — wall-clock since stream ready, useful for PTT
+//     where the user has been speaking for a while.
+//   - expectedAudioMS * 10 — when the caller knows the total audio it is
+//     feeding (batch recall), scales the budget to accommodate a local
+//     model that can run at 1-5x realtime. 10x headroom keeps even a
+//     very slow backend from tripping the cap unnecessarily — user still
+//     has Ctrl-C (propagated via ctx) as the real abort path.
+//   - wait_final_seconds floor — minimum, for cold-start cases.
+// Whichever signal produces the largest value wins.
 func (s *DictationSession) waitForFinal(ctx context.Context) (string, error) {
 	timeout := s.trailingDuration() / 5
+
+	if s.expectedAudioMS > 0 {
+		audioBased := time.Duration(s.expectedAudioMS) * time.Millisecond * 10
+		if audioBased > timeout {
+			timeout = audioBased
+		}
+	}
+
 	floor := time.Duration(s.waitFinalFloorSeconds) * time.Second
 	if floor <= 0 {
 		floor = 3 * time.Second
@@ -1343,6 +1368,12 @@ func (s *DictationSession) waitForFinal(ctx context.Context) (string, error) {
 	if timeout < floor {
 		timeout = floor
 	}
+
+	sessionlog.Debugf("wait_final: timeout=%s (trailing=%s, expected_audio=%dms, floor=%s)",
+		timeout.Round(100*time.Millisecond),
+		s.trailingDuration().Round(100*time.Millisecond),
+		s.expectedAudioMS, floor)
+
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 

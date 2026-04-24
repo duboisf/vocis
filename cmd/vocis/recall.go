@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -336,31 +337,58 @@ func runRecallLast(rawDuration string) error {
 	}
 
 	ids := recall.SegmentIDsWithinWindow(segs, time.Now(), window)
-	sessionlog.Infof("recall last: window=%s available=%d matched=%d ids=%v",
-		window, len(segs), len(ids), ids)
+
+	// Sum segment audio durations for a user-visible progress hint.
+	// Also logged so session logs show the same figure the user saw on
+	// stderr, per AGENTS.md's "every branch leaves evidence" rule.
+	var totalAudio time.Duration
+	idSet := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		idSet[id] = struct{}{}
+	}
+	for _, s := range segs {
+		if _, ok := idSet[s.ID]; ok {
+			totalAudio += time.Duration(s.DurationMS) * time.Millisecond
+		}
+	}
+
+	sessionlog.Infof("recall last: window=%s available=%d matched=%d total_audio=%s ids=%v",
+		window, len(segs), len(ids), totalAudio.Round(100*time.Millisecond), ids)
 
 	if len(ids) == 0 {
 		fmt.Fprintf(os.Stderr, "no segments captured in the last %s\n", window)
 		return nil
 	}
 
-	// Batch transcription can take a while: model warmup + the full
-	// concatenated duration + finalize + optional post-process. Give
-	// the daemon a generous ceiling.
-	txTimeout := 90*time.Second + window
-	txCtx, txCancel := context.WithTimeout(context.Background(), txTimeout)
+	// No client-side timeout: local backends on long batches can
+	// legitimately take tens of minutes, and a client-side cap would
+	// just cut off valid work. The user drives lifetime via Ctrl-C —
+	// signal.NotifyContext cancels the request ctx, which cleanly
+	// closes the socket to the daemon, which in turn cancels its
+	// dictation session and tears down the Lemonade WebSocket so the
+	// model stops processing audio no one will read.
+	txCtx, txCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer txCancel()
 
-	fmt.Fprintf(os.Stderr, "transcribing %d segment(s) covering the last %s...\n", len(ids), window)
+	fmt.Fprintf(os.Stderr, "transcribing %d segment(s), %s of audio covering the last %s... (Ctrl-C to abort)\n",
+		len(ids), totalAudio.Round(time.Second), window)
+
+	startedAt := time.Now()
 	text, err := client.TranscribeBatch(txCtx, ids, recallLastPostprocess)
+	elapsed := time.Since(startedAt).Round(100 * time.Millisecond)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || txCtx.Err() == context.Canceled {
+			fmt.Fprintf(os.Stderr, "aborted after %s\n", elapsed)
+			return nil
+		}
 		return err
 	}
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
-		fmt.Fprintln(os.Stderr, "batch transcript was empty (likely silence or noise)")
+		fmt.Fprintf(os.Stderr, "batch transcript was empty after %s (likely silence or noise)\n", elapsed)
 		return nil
 	}
+	fmt.Fprintf(os.Stderr, "done in %s (%d chars)\n", elapsed, len(trimmed))
 	fmt.Println(trimmed)
 	return nil
 }

@@ -352,7 +352,12 @@ func (d *Daemon) runAccept(ctx context.Context) {
 
 func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
+
+	// Short deadline around the decode so a half-open peer can't wedge
+	// the handler — after we have a request, the client may legitimately
+	// wait for a long-running op (a big `recall last` batch can take
+	// tens of minutes), so the deadline is cleared below.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
 	dec := json.NewDecoder(conn)
 	var req Request
@@ -361,7 +366,30 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	resp := d.dispatch(ctx, req)
+	// Clear the deadline now that the request is in hand — a long batch
+	// transcription must not be capped by a connection-level timer.
+	_ = conn.SetDeadline(time.Time{})
+
+	// Watch the idle connection for a client disconnect (Ctrl-C on the
+	// CLI, process exit, etc.) and cancel the request context so the
+	// in-flight op — which may be a Finalize blocked on Lemonade —
+	// tears down its WebSocket promptly instead of running to
+	// completion with no one to receive results.
+	reqCtx, cancelReq := context.WithCancel(ctx)
+	defer cancelReq()
+	go func() {
+		// Clients don't send a second message on the same conn, so this
+		// Read blocks until EOF (clean close) or an error (peer gone).
+		// Either way, that's our signal to cancel.
+		var buf [1]byte
+		_, err := conn.Read(buf[:])
+		cancelReq()
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			sessionlog.Debugf("recall: conn disconnect watch: %v", err)
+		}
+	}()
+
+	resp := d.dispatch(reqCtx, req)
 	resp.Version = protocolVersion
 	if err := json.NewEncoder(conn).Encode(resp); err != nil {
 		sessionlog.Warnf("recall: encode response: %v", err)
@@ -434,17 +462,19 @@ func (d *Daemon) listSegments() []SegmentInfo {
 // transcription pipeline by emulating a recorder's sample stream.
 // Serialized with a mutex so we don't run parallel transports.
 //
-// Each call is its own trace root (context.Background as parent) so a
-// `vocis.recall.transcribe` span shows up per user pick in Jaeger,
-// independent of the long-lived daemon context. Child spans cover the
-// feed and finalize phases so you can see where time is going.
-func (d *Daemon) transcribeSegment(_ context.Context, id int64, postprocess bool) (string, error) {
+// ctx is the request-scoped context from handleConn — cancelling it
+// (e.g. client disconnected) propagates into the dictation session so
+// the Lemonade WebSocket tears down promptly instead of running to
+// completion with no one to receive results. The OTel span is still
+// started under ctx so it remains a root span (handleConn's ctx carries
+// no existing span), giving each pick its own trace in Jaeger.
+func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bool) (string, error) {
 	d.transcribeMu.Lock()
 	defer d.transcribeMu.Unlock()
 
 	goroutinesBefore := runtime.NumGoroutine()
 
-	spanCtx, span := telemetry.StartSpan(context.Background(), "vocis.recall.transcribe",
+	spanCtx, span := telemetry.StartSpan(ctx, "vocis.recall.transcribe",
 		attribute.Int64("segment.id", id),
 		attribute.Bool("postprocess", postprocess),
 	)
@@ -484,6 +514,10 @@ func (d *Daemon) transcribeSegment(_ context.Context, id int64, postprocess bool
 		SampleRate: sampleRate,
 		Channels:   d.cfg.Recording.Channels,
 		Samples:    samples,
+		// Segment duration is known upfront — feed it to waitForFinal
+		// so the post-commit budget scales with the audio being
+		// transcribed instead of falling back to the 15 s floor.
+		ExpectedAudioMS: int(seg.Duration / time.Millisecond),
 	})
 	if err != nil {
 		return "", fmt.Errorf("start dictation: %w", err)

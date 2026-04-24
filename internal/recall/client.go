@@ -101,18 +101,37 @@ func (c *Client) do(ctx context.Context, req Request) (Response, error) {
 	}
 	defer conn.Close()
 
+	// Honor an explicit ctx deadline; ops without a deadline (batch
+	// transcription, which can legitimately take tens of minutes) are
+	// bounded only by the ctx-cancellation watcher below, so Ctrl-C
+	// still tears the conn down — the daemon then sees EOF on its
+	// disconnect watcher and cancels the in-flight operation.
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	}
 
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Response{}, ctxErr
+		}
 		return Response{}, fmt.Errorf("encode request: %w", err)
 	}
 
 	var resp Response
 	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Response{}, ctxErr
+		}
 		return Response{}, fmt.Errorf("decode response: %w", err)
 	}
 	if resp.Error != "" {
