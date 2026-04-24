@@ -412,7 +412,11 @@ func Default() Config {
 			OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
 			MinUtteranceMS:     1000,
 			WaitFinalSeconds:   15,
-			TailSilenceMS:      300,
+			// 800ms was picked empirically: 300ms left Gemma-FLM
+			// uncertain about the last word on quick releases (it
+			// would emit "..." instead of the word). A longer tail
+			// gives the model confident silence to segment on.
+			TailSilenceMS: 800,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
