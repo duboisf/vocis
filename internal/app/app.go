@@ -304,33 +304,69 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		attribute.String("hotkey.backend", a.hotkeyBackend),
 	)
 
+	// Open the mic FIRST, before the Lemonade model preflight. On a cold
+	// load preflight runs 5-10 s; if we held off on recorder.Start until
+	// after, every word the user spoke during that window was silently
+	// lost — they pressed the hotkey, started talking, and the first
+	// few seconds never reached the transcription pipeline. The drain
+	// goroutine below collects those samples into a preroll buffer that
+	// we replay into StartDictation once preflight completes.
+	session, err := a.recorder.Start(spanCtx, a.cfg.Recording)
+	if err != nil {
+		a.ducker.Restore()
+		telemetry.EndSpan(recordingSpan, err)
+		sessionlog.Errorf("start recording: %v", err)
+		a.overlay.ShowError(err)
+		return
+	}
+
+	// Drain the mic into a preroll buffer while preflight runs. The
+	// recorder's samples channel buffers 16 chunks (~2 s at 16 kHz);
+	// without active draining it would block the recorder's writer
+	// goroutine on a cold preflight.
+	stopDrain := drainPreroll(session.Samples())
+
 	// Preflight: make sure the configured transcription model is resident
-	// on the Lemonade backend before we start capturing audio. On a cold
-	// audio slot the on-demand load is 5–10 s; triggering it lazily on
-	// the WS realtime path shows up as "no transcript ever arrives"
-	// because audio is flowing while the model is still loading. No-op
+	// on the Lemonade backend before we open the WS for live audio. No-op
 	// for OpenAI. Runs inline so the overlay clearly says "Loading X..."
-	// while the user waits, rather than an ambiguous connecting spinner.
+	// while the user waits — but the mic is hot the whole time, so any
+	// speech during the load is preserved as preroll.
+	preflightStart := time.Now()
 	if err := transcribe.EnsureTranscribeModelLoaded(spanCtx, a.cfg.Transcription, func(model string) {
 		a.overlay.SetLoadingModel(model)
 		recordingSpan.AddEvent("lemonade.model.loading",
 			trace.WithAttributes(attribute.String("model", model)),
 		)
 	}); err != nil {
+		_ = stopDrain()
+		_ = session.Stop(ctx)
+		session.Cleanup()
 		a.ducker.Restore()
 		telemetry.EndSpan(recordingSpan, err)
 		sessionlog.Errorf("transcription model preflight: %v", err)
 		a.overlay.ShowError(fmt.Errorf("model load failed: %w", err))
 		return
 	}
-
-	session, err := a.recorder.Start(spanCtx, a.cfg.Recording)
-	if err != nil {
-		telemetry.EndSpan(recordingSpan, err)
-		sessionlog.Errorf("start recording: %v", err)
-		a.overlay.ShowError(err)
-		return
+	preflightElapsed := time.Since(preflightStart)
+	prerolled := stopDrain()
+	if len(prerolled.chunks) > 0 {
+		prerollMS := prerolled.samples * 1000 / a.cfg.Recording.SampleRate
+		sessionlog.Infof("preroll: captured %d chunks (%d samples, %dms) during model preflight (%s)",
+			len(prerolled.chunks), prerolled.samples, prerollMS, preflightElapsed.Round(10*time.Millisecond))
+		recordingSpan.AddEvent("preroll.captured",
+			trace.WithAttributes(
+				attribute.Int("preroll.chunks", len(prerolled.chunks)),
+				attribute.Int("preroll.samples", prerolled.samples),
+				attribute.Int("preroll.duration_ms", prerollMS),
+				attribute.String("preflight.elapsed", preflightElapsed.Round(time.Millisecond).String()),
+			),
+		)
 	}
+
+	// Wrap session.Samples(): emit the preroll chunks first, then forward
+	// live samples. StartDictation reads from this wrapped channel and
+	// can't tell the difference from a single contiguous mic stream.
+	wrappedSamples := wrapSamplesWithPreroll(prerolled.chunks, session.Samples())
 
 	target, err := a.injector.CaptureTarget(spanCtx)
 	if err != nil {
@@ -370,7 +406,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
 		SampleRate: a.cfg.Recording.SampleRate,
 		Channels:   a.cfg.Recording.Channels,
-		Samples:    session.Samples(),
+		Samples:    wrappedSamples,
 		Callbacks: transcribe.ConnectCallbacks{
 			OnConnecting: func(attempt, max int) {
 				a.overlay.SetConnecting(attempt, max)
@@ -866,4 +902,82 @@ func renderPreview(committed, partial string) string {
 		return partial
 	}
 	return committed + "\n" + partial
+}
+
+// prerollSnapshot is what drainPreroll returns when stopped: the chunks
+// captured during the model preflight plus the total sample count.
+type prerollSnapshot struct {
+	chunks  [][]int16
+	samples int
+}
+
+// drainPreroll spawns a goroutine that copies samples from `src` into a
+// local buffer until stop() is called. stop() returns the captured
+// snapshot — chunks in arrival order, plus total sample count. Safe to
+// call stop() exactly once; subsequent calls return an empty snapshot.
+//
+// Used during the Lemonade model preflight: the mic is already open
+// (so the user's first words after pressing the hotkey aren't lost),
+// but StartDictation isn't ready yet. The recorder's samples channel
+// buffers ~2 s at 16 kHz; on a 5-10 s cold preflight that channel
+// would back up and block the recorder's writer. Active draining
+// keeps the writer alive and preserves the audio for replay.
+func drainPreroll(src <-chan []int16) func() prerollSnapshot {
+	type result struct {
+		chunks  [][]int16
+		samples int
+	}
+	stopCh := make(chan struct{})
+	resultCh := make(chan result, 1)
+
+	go func() {
+		var snap result
+		for {
+			select {
+			case <-stopCh:
+				resultCh <- snap
+				return
+			case chunk, ok := <-src:
+				if !ok {
+					resultCh <- snap
+					return
+				}
+				snap.chunks = append(snap.chunks, chunk)
+				snap.samples += len(chunk)
+			}
+		}
+	}()
+
+	var once sync.Once
+	return func() prerollSnapshot {
+		var snap prerollSnapshot
+		once.Do(func() {
+			close(stopCh)
+			r := <-resultCh
+			snap = prerollSnapshot{chunks: r.chunks, samples: r.samples}
+		})
+		return snap
+	}
+}
+
+// wrapSamplesWithPreroll returns a channel that emits every chunk in
+// `preroll` (in order) and then forwards every chunk read from `live`
+// until live closes. Lets StartDictation consume preroll + live as a
+// single contiguous stream without the dictation pipeline needing to
+// know preroll exists.
+func wrapSamplesWithPreroll(preroll [][]int16, live <-chan []int16) <-chan []int16 {
+	// 32 chunks of headroom matches the recorder's natural pacing
+	// (~2 s at 16 kHz, 2048 samples per chunk). Big enough that the
+	// dictation consumer's pace is the bottleneck, not the wrapper.
+	out := make(chan []int16, 32)
+	go func() {
+		defer close(out)
+		for _, chunk := range preroll {
+			out <- chunk
+		}
+		for chunk := range live {
+			out <- chunk
+		}
+	}()
+	return out
 }

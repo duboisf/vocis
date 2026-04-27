@@ -3,10 +3,11 @@ package app
 import (
 	"context"
 	"testing"
+	"time"
 
 	"vocis/internal/config"
-	"vocis/internal/transcribe"
 	"vocis/internal/platform"
+	"vocis/internal/transcribe"
 )
 
 func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {
@@ -325,6 +326,95 @@ func (i *injectorStub) InsertLive(_ context.Context, _ platform.Target, text str
 	}
 	i.liveInserted = append(i.liveInserted, text)
 	return nil
+}
+
+func TestDrainPrerollCapturesUntilStop(t *testing.T) {
+	src := make(chan []int16, 4)
+	stop := drainPreroll(src)
+
+	src <- []int16{1, 2, 3}
+	src <- []int16{4, 5}
+	// Wait for the drain goroutine to consume both chunks. Polling
+	// with a deadline beats a fixed sleep — passes fast on healthy
+	// machines, doesn't flake on slow CI.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for len(src) > 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	snap := stop()
+	if len(snap.chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2", len(snap.chunks))
+	}
+	if snap.samples != 5 {
+		t.Fatalf("got %d samples, want 5", snap.samples)
+	}
+	// stop() is idempotent — second call is suppressed by sync.Once
+	// and returns the zero value.
+	snap2 := stop()
+	if len(snap2.chunks) != 0 {
+		t.Fatalf("stop() should be a no-op on second call; got %d chunks", len(snap2.chunks))
+	}
+}
+
+func TestDrainPrerollHandlesClosedSource(t *testing.T) {
+	src := make(chan []int16, 2)
+	src <- []int16{9, 9}
+	close(src)
+
+	stop := drainPreroll(src)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for len(src) > 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	snap := stop()
+	if len(snap.chunks) != 1 || snap.samples != 2 {
+		t.Fatalf("got chunks=%d samples=%d, want 1 chunk / 2 samples", len(snap.chunks), snap.samples)
+	}
+}
+
+func TestWrapSamplesWithPrerollEmitsPrerollFirstThenLive(t *testing.T) {
+	preroll := [][]int16{{1, 2}, {3}}
+	live := make(chan []int16, 2)
+	live <- []int16{4, 5}
+	live <- []int16{6}
+	close(live)
+
+	out := wrapSamplesWithPreroll(preroll, live)
+
+	var got [][]int16
+	for chunk := range out {
+		got = append(got, chunk)
+	}
+	want := [][]int16{{1, 2}, {3}, {4, 5}, {6}}
+	if len(got) != len(want) {
+		t.Fatalf("got %d chunks, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if len(got[i]) != len(want[i]) {
+			t.Fatalf("chunk %d length: got %d, want %d", i, len(got[i]), len(want[i]))
+		}
+		for j := range want[i] {
+			if got[i][j] != want[i][j] {
+				t.Fatalf("chunk %d sample %d: got %d, want %d", i, j, got[i][j], want[i][j])
+			}
+		}
+	}
+}
+
+func TestWrapSamplesWithPrerollEmptyPreroll(t *testing.T) {
+	live := make(chan []int16, 1)
+	live <- []int16{42}
+	close(live)
+
+	out := wrapSamplesWithPreroll(nil, live)
+	chunks := 0
+	for range out {
+		chunks++
+	}
+	if chunks != 1 {
+		t.Fatalf("got %d chunks, want 1", chunks)
+	}
 }
 
 
