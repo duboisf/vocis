@@ -145,6 +145,8 @@ func (r *Registration) signalLoop() {
 		case Interface + ".Deactivated":
 			r.setDown(false)
 			r.HandleRelease()
+		case Interface + ".Tapped":
+			r.HandleTap()
 		}
 	}
 }

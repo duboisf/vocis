@@ -21,6 +21,7 @@
 // interface `io.github.duboisf.Vocis.Hotkey`):
 //   signal Activated(s shortcut)
 //   signal Deactivated(s shortcut)
+//   signal Tapped(s shortcut)
 //   method GetShortcut() -> s
 //   method GetFocusedWindow() -> (s wm_class, s title, s id)
 //   method ActivateWindow(s id) -> b ok
@@ -28,6 +29,11 @@
 //   method ReleaseModifiers(as keys) -> b ok
 //   method SetClipboard(s text)
 //   method GetClipboard() -> s text
+//
+// Tapped fires when the user releases and re-presses the trigger key
+// without releasing the modifiers. On the daemon side this toggles
+// per-session submit mode (Enter-after-paste), matching the behavior
+// of the X11 backend's auto-repeat-filtered press detection.
 
 import GLib from 'gi://GLib';
 import Gio from 'gi://Gio';
@@ -56,6 +62,9 @@ const INTERFACE_XML = `
       <arg type="s" name="shortcut"/>
     </signal>
     <signal name="Deactivated">
+      <arg type="s" name="shortcut"/>
+    </signal>
+    <signal name="Tapped">
       <arg type="s" name="shortcut"/>
     </signal>
     <method name="GetShortcut">
@@ -344,7 +353,14 @@ export default class VocisHotkeyExtension extends Extension {
     // -- Accelerator -------------------------------------------------------
 
     _registerAccelerator() {
-        const flags = Meta.KeyBindingFlags.NONE;
+        // IGNORE_AUTOREPEAT tells Mutter to deliver accelerator-activated
+        // only on the initial press of each combo, not during the OS
+        // key-repeat stream. With it set, any subsequent activation
+        // while we still believe the combo is held can only mean the
+        // user released and re-pressed the trigger key — a tap. Without
+        // it, autorepeat at ~30 Hz is indistinguishable from a tap.
+        const flags = Meta.KeyBindingFlags.IGNORE_AUTOREPEAT
+            ?? Meta.KeyBindingFlags.NONE;
         const modes = Shell.ActionMode.NORMAL
             | Shell.ActionMode.OVERVIEW
             | Shell.ActionMode.POPUP;
@@ -384,10 +400,17 @@ export default class VocisHotkeyExtension extends Extension {
     // -- Press / release ---------------------------------------------------
 
     _onActivated() {
-        // Mutter may fire activations while the key is auto-repeating. We
-        // dedupe so the daemon only sees one Activated until the user
-        // physically releases the modifiers.
-        if (this._isHeld) return;
+        // With IGNORE_AUTOREPEAT set on the grab, Mutter fires
+        // accelerator-activated only on a real press transition. So a
+        // re-firing while we still hold the combo means the user
+        // released and re-pressed the trigger key without releasing
+        // the modifiers — a tap. We surface that as a Tapped signal so
+        // the daemon can toggle submit mode without breaking out of the
+        // active dictation.
+        if (this._isHeld) {
+            this._emitSignal('Tapped');
+            return;
+        }
         this._isHeld = true;
         this._emitSignal('Activated');
         this._startPolling();

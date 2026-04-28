@@ -31,6 +31,34 @@ func TestTapEmitsOnReleaseAndRepress(t *testing.T) {
 	expectNoEvent(t, s.Down(), 10*time.Millisecond)
 }
 
+func TestHandleTapEmitsOnlyWhileDown(t *testing.T) {
+	t.Parallel()
+
+	s := NewState("ctrl+shift+space", nil)
+
+	// Tap before press: ignored (no Down state, nothing to toggle on).
+	s.HandleTap()
+	expectNoEvent(t, s.Tap(), 50*time.Millisecond)
+
+	s.HandlePress()
+	<-s.Down()
+
+	// Tap while down: emitted. Used by the GNOME extension backend
+	// where the trigger-key release isn't observable so we can't
+	// derive taps from press/release pairs.
+	s.HandleTap()
+	expectEvent(t, s.Tap())
+
+	// Lock suppresses taps too — locking is meant for "ignore
+	// everything until unlock", e.g. while we're synthesizing
+	// keystrokes that would otherwise feed back into the state
+	// machine.
+	s.Lock()
+	s.HandleTap()
+	expectNoEvent(t, s.Tap(), 50*time.Millisecond)
+	s.Unlock()
+}
+
 func TestAutoRepeatDoesNotEmitTap(t *testing.T) {
 	t.Parallel()
 

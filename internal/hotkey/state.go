@@ -133,6 +133,23 @@ func (s *State) HandleRelease() {
 	s.scheduleRelease()
 }
 
+// HandleTap should be called when the platform backend has detected a
+// tap-while-held (the trigger key was released and re-pressed without
+// the modifiers being released). On X11 the state machine derives this
+// from explicit press/release events, but on the GNOME extension
+// backend the trigger-key release isn't observable — Mutter only
+// reports the combo activating — so the extension does the detection
+// itself and signals it through this method.
+func (s *State) HandleTap() {
+	s.mu.Lock()
+	if !s.isDown || s.locked {
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	s.emit(s.tap)
+}
+
 // HandleTrackedKeyPress should be called when any tracked modifier key
 // is pressed. This cancels pending release timers (auto-repeat filter).
 func (s *State) HandleTrackedKeyPress() {
