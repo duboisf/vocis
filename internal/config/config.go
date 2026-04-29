@@ -67,6 +67,7 @@ type Config struct {
 	PostProcess    PostProcessConfig   `yaml:"postprocess"`
 	Telemetry      TelemetryConfig     `yaml:"telemetry"`
 	Recall         RecallConfig        `yaml:"recall"`
+	Speak          SpeakConfig         `yaml:"speak"`
 	YAMLIndent     int                 `yaml:"yaml_indent"`
 }
 
@@ -96,6 +97,17 @@ type PostProcessConfig struct {
 type TelemetryConfig struct {
 	Enabled  bool   `yaml:"enabled"`
 	Endpoint string `yaml:"endpoint"`
+}
+
+// SpeakConfig drives the `vocis speak` text-to-speech command. The
+// only backend currently supported is Lemonade's OpenAI-compatible
+// /audio/speech endpoint, which serves Kokoro TTS locally. BaseURL
+// defaults to the same host as transcription.base_url at load time
+// when left empty, since most users run a single Lemonade instance.
+type SpeakConfig struct {
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
+	Voice   string `yaml:"voice"`
 }
 
 // RecallConfig drives the always-on `vocis recall` daemon. The daemon
@@ -537,6 +549,17 @@ func Default() Config {
 			// worst-case — large but still fits in one realtime session.
 			BatchMaxSeconds: 3600,
 		},
+		Speak: SpeakConfig{
+			// Empty BaseURL means "inherit transcription.base_url" at
+			// load time — most users run a single local Lemonade and
+			// don't want to repeat the URL. kokoro-v1 is the only TTS
+			// model Lemonade ships as of 10.2.0 (per docs/lemonade.md).
+			// shimmer is a known-working voice id; users can pick
+			// others from the Kokoro model card and override here.
+			BaseURL: "",
+			Model:   "kokoro-v1",
+			Voice:   "shimmer",
+		},
 		YAMLIndent: 2,
 	}
 }
@@ -805,6 +828,13 @@ func (c Config) Validate() error {
 	}
 	if c.Recall.Persist.Mode == RecallPersistDisk && strings.TrimSpace(c.Recall.Persist.Dir) == "" {
 		return errors.New("recall.persist.mode=disk requires recall.persist.dir to be set")
+	}
+
+	if strings.TrimSpace(c.Speak.Model) == "" {
+		return errors.New("speak.model must not be empty")
+	}
+	if strings.TrimSpace(c.Speak.Voice) == "" {
+		return errors.New("speak.voice must not be empty")
 	}
 
 	if err := c.PostProcess.validate(); err != nil {

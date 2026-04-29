@@ -39,11 +39,19 @@ Core product choices:
 
 ## Modes
 
-`vocis` has two dictation modes, run as separate subcommands:
+`vocis` has two dictation modes plus a one-shot text-to-speech command,
+run as separate subcommands:
 
 - **`vocis serve`** — the push-to-talk default described above: hotkey
   starts/stops a dictation session, overlay is shown, transcript is
   pasted into the focused app.
+- **`vocis speak [text]`** — sends text to Lemonade's
+  OpenAI-compatible `/audio/speech` endpoint (Kokoro TTS) and streams
+  the resulting PCM through `paplay`. Reads text from args or stdin,
+  so you can pipe `vocis recall last 5m | vocis speak`. Voice and
+  model live under `speak:` in the config; `--voice` / `--model`
+  override per call. With `--out PATH`, the audio is written as a
+  24 kHz mono PCM16 WAV instead of being played.
 - **`vocis recall`** (Wokis Recall) — always-on capture. The daemon
   (`vocis recall start`) continuously records the mic, segments speech
   with Silero VAD, and keeps a bounded ring buffer of recent utterances.

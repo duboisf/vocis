@@ -26,7 +26,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 
 ## Top-level entry points
 
-- [`cmd/vocis/`](/home/fred/git/vtt/cmd/vocis/): Cobra-based CLI with one file per command group (`root.go`, `serve.go`, `config_cmd.go`, `doctor.go`, `key.go`, `recall.go`). `config_cmd.go` hosts the `config` parent plus `config init|backend|models` subcommands. `recall.go` hosts the `recall` parent plus `recall start|pick|last|status|stop|drop|replay` subcommands for the always-on Wokis Recall daemon. `last <duration>` batches every segment in the window through one joint transcription.
+- [`cmd/vocis/`](/home/fred/git/vtt/cmd/vocis/): Cobra-based CLI with one file per command group (`root.go`, `serve.go`, `config_cmd.go`, `doctor.go`, `key.go`, `recall.go`, `speak.go`). `config_cmd.go` hosts the `config` parent plus `config init|backend|models` subcommands. `recall.go` hosts the `recall` parent plus `recall start|pick|last|status|stop|drop|replay` subcommands for the always-on Wokis Recall daemon. `last <duration>` batches every segment in the window through one joint transcription. `speak.go` hosts the one-shot text-to-speech command — sends text to Lemonade Kokoro TTS and streams the result through paplay (or writes a WAV with `--out`).
 - [`README.md`](/home/fred/git/vtt/README.md): user-facing setup and usage
 - [`config.example.yaml`](/home/fred/git/vtt/config.example.yaml): config shape example
 
@@ -46,6 +46,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - [`internal/transcribe/transport_lemonade.go`](/home/fred/git/vtt/internal/transcribe/transport_lemonade.go): local Lemonade Server transport — no auth, 16 kHz PCM, flat `session.model` payload, model passed via `?model=` query.
 - [`internal/transcribe/silero.go`](/home/fred/git/vtt/internal/transcribe/silero.go): Silero VAD wrapper — embedded ONNX model, onnxruntime_go session (pinned single-threaded), two-threshold hysteresis (0.5 speech / 0.35 silence with an ambiguous hold band). Used by both client-VAD during serve and segment boundaries in recall. See [docs/silero.md](/home/fred/git/vtt/docs/silero.md) for the full design.
 - [`internal/transcribe/postprocess.go`](/home/fred/git/vtt/internal/transcribe/postprocess.go): LLM post-processing to clean up filler words and hesitations. Backend-agnostic — uses OpenAI-compatible `/chat/completions`, so it works against either backend via `base_url`.
+- [`internal/tts/lemonade.go`](/home/fred/git/vtt/internal/tts/lemonade.go): Lemonade Kokoro TTS client — POSTs to `/audio/speech` with `response_format=pcm` and parses the PCM16 LE stream + sample rate out of the `audio/l16;rate=N` content-type. `wav.go` writes a 24 kHz mono PCM16 WAV header for the `vocis speak --out` path. Used by `cmd/vocis/speak.go` only.
 - [`internal/audio/duck.go`](/home/fred/git/vtt/internal/audio/duck.go): lower speaker volume during recording via `wpctl`.
 - [`internal/securestore/keyring.go`](/home/fred/git/vtt/internal/securestore/keyring.go): keyring-backed API key storage.
 - [`internal/sessionlog/sessionlog.go`](/home/fred/git/vtt/internal/sessionlog/sessionlog.go): per-session logs on disk with DEBUG/INFO/WARN/ERROR levels.
@@ -78,5 +79,6 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - if the bug is about volume levels → `audio`
 - if the bug is about hotkey detection or auto-repeat → `hotkey/state.go`
 - if the bug is about Wokis Recall (always-on mode) → `recall/daemon.go` (capture + VAD + socket) and `cmd/vocis/recall.go` (subcommands, picker)
+- if the bug is about `vocis speak` (text-to-speech) → `tts/lemonade.go` (HTTP client + PCM parse) and `cmd/vocis/speak.go` (CLI + paplay streaming)
 
 If you need execution details rather than file ownership, continue to `runtime-flow.md`.
