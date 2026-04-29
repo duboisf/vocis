@@ -680,19 +680,42 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vocis.inject",
 		attribute.String("target.window_id", state.target.WindowID),
 		attribute.String("target.window_class", state.target.WindowClass),
+		attribute.String("target.kitty_window_id", state.target.KittyWindowID),
 		attribute.Int("text.length", len(text)),
 	)
 	err = a.injector.Insert(insertCtx, state.target, text)
 	telemetry.EndSpan(insertSpan, err)
 	if err != nil {
+		if errors.Is(err, platform.ErrTargetGone) {
+			// Soft path: the original kitty tab/pane is gone but the
+			// transcript is safely on the clipboard. Don't taint the
+			// dictation span as failed — the transcription itself
+			// succeeded; only delivery degraded.
+			state.span.AddEvent("overlay.warning",
+				trace.WithAttributes(attribute.String("reason", "target_gone")),
+			)
+			sessionlog.Warnf("target window gone — transcript on clipboard (%d chars)", len(text))
+			a.overlay.ShowWarning(a.cfg.Overlay.Warning.TargetGone)
+			return
+		}
 		dictationErr = err
 		sessionlog.Errorf("insert transcript: %v", err)
 		a.showCompletionError(err)
 		return
 	}
-	sessionlog.Infof("transcript inserted into window=%s submit=%v", state.target.WindowID, state.submitMode)
+	if state.target.KittyWindowID != "" {
+		sessionlog.Infof("transcript inserted into kitty window id=%s (OS window=%s) submit=%v",
+			state.target.KittyWindowID, state.target.WindowID, state.submitMode)
+	} else {
+		sessionlog.Infof("transcript inserted into window=%s submit=%v",
+			state.target.WindowID, state.submitMode)
+	}
 	if state.submitMode {
-		sessionlog.Infof("submit mode: pressing Enter on window=%s", state.target.WindowID)
+		if state.target.KittyWindowID != "" {
+			sessionlog.Infof("submit mode: pressing Enter on kitty window id=%s", state.target.KittyWindowID)
+		} else {
+			sessionlog.Infof("submit mode: pressing Enter on window=%s", state.target.WindowID)
+		}
 		if err := a.injector.PressEnter(insertCtx, state.target); err != nil {
 			sessionlog.Warnf("press enter failed: %v", err)
 		}

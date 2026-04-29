@@ -58,6 +58,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - [`internal/platform/x11/overlay.go`](/home/fred/git/vtt/internal/platform/x11/overlay.go): X11 overlay — xgbutil window, xgraphics rendering, Xinerama monitor detection, Escape key grab. Uses `ui.*` for drawing and text.
 - [`internal/platform/x11/hotkeys.go`](/home/fred/git/vtt/internal/platform/x11/hotkeys.go): X11 global hotkey — keybind grab, xevent loop. Thin wrapper (~100 lines) that feeds raw events into `hotkey.State`.
 - [`internal/platform/x11/injector.go`](/home/fred/git/vtt/internal/platform/x11/injector.go): X11 text injection — xdotool for focus/paste/type/Enter, clipboard handling.
+- [`internal/platform/kitty/kitty.go`](/home/fred/git/vtt/internal/platform/kitty/kitty.go): focus-free text delivery for kitty terminals via the `kitty @ ls` and `kitty @ send-text` remote-control CLI. Three primitives — `FocusedWindowID` (capture at recording start), `Exists` (liveness probe at delivery time), `SendText` (deliver transcript without focus change), `SendEnter` (submit-mode \r without focus change). The inject layer calls these when the captured target is a kitty class and `insertion.kitty_remote_control` is on. `kitty @ send-text` always exits 0 even on no-match per the kitty docs, so we use `kitty @ ls --match id:N` as the explicit liveness probe instead. On a "no matching windows" reply (the user closed the tab mid-recording), the inject layer writes the transcript to the clipboard and surfaces `platform.ErrTargetGone` so the app shows a soft warning instead of a hard error. On any other CLI error, the inject layer falls back transparently to OS-window focus + paste so dictation still completes. Each kitty CLI shell-out is wrapped in its own OTel span (`vocis.kitty.*`) so the latency cost is visible in Jaeger.
 
 ## Package relationships
 
@@ -80,5 +81,6 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - if the bug is about hotkey detection or auto-repeat → `hotkey/state.go`
 - if the bug is about Wokis Recall (always-on mode) → `recall/daemon.go` (capture + VAD + socket) and `cmd/vocis/recall.go` (subcommands, picker)
 - if the bug is about `vocis speak` (text-to-speech) → `tts/lemonade.go` (HTTP client + PCM parse) and `cmd/vocis/speak.go` (CLI + paplay streaming)
+- if the bug is about kitty pasting into the wrong tab → `platform/kitty/kitty.go` (CLI shell-out), `platform/inject/injector.go` (capture + focus path), and `insertion.kitty_remote_control` in the config
 
 If you need execution details rather than file ownership, continue to `runtime-flow.md`.

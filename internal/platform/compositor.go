@@ -57,3 +57,11 @@ type Compositor interface {
 // can't synthesize per-character keystrokes. The injector treats this
 // as "fall back to clipboard mode" rather than a hard failure.
 var ErrTypeUnsupported = errors.New("compositor does not support typed insertion")
+
+// ErrTargetGone is returned by Injector.Insert when the originally
+// captured target window no longer exists at paste time — e.g. the
+// user closed the kitty tab while still dictating. The transcript is
+// still written to the clipboard before this error is returned, so
+// callers should treat it as a recoverable warning ("text saved to
+// clipboard, your window is gone") rather than a transcription failure.
+var ErrTargetGone = errors.New("target window no longer exists; transcript copied to clipboard")

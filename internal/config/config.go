@@ -306,6 +306,19 @@ type InsertionConfig struct {
 	// when you dictate mostly into chat inputs that send on Enter.
 	// Can still be toggled off per-session by tapping the hotkey.
 	AutoSubmit bool `yaml:"auto_submit"`
+	// KittyRemoteControl enables tab/pane-aware paste for kitty
+	// terminals via `kitty @ ls` / `kitty @ focus-window`. When the
+	// target window class is a known kitty class at recording start,
+	// vocis records the focused kitty internal window id; at paste
+	// time it focuses that exact tab/pane via kitty remote control
+	// before sending the paste shortcut. If the original tab/pane has
+	// been closed mid-recording, the transcript is written to the
+	// clipboard and a warning is shown instead of pasting into
+	// whatever happens to be focused. Requires `allow_remote_control`
+	// (and ideally `listen_on`) to be configured in kitty.conf, or
+	// vocis to be launched from inside kitty so KITTY_LISTEN_ON is
+	// inherited. Set to false to skip the kitty enrichment entirely.
+	KittyRemoteControl bool `yaml:"kitty_remote_control"`
 }
 
 type OverlayConfig struct {
@@ -369,6 +382,7 @@ type OverlayWarning struct {
 	NoSpeech           string `yaml:"no_speech"`
 	Cancelled          string `yaml:"cancelled"`
 	PostprocessSkipped string `yaml:"postprocess_skipped"`
+	TargetGone         string `yaml:"target_gone"`
 }
 
 func Default() Config {
@@ -377,8 +391,7 @@ func Default() Config {
 		HotkeyMode: "hold",
 		Transcription: TranscriptionConfig{
 			// Local Lemonade is the default stack — no API key, no
-			// network, and whisper-v3-turbo-FLM runs on NPU when
-			// available. Users who want OpenAI Cloud flip backend to
+			// network. Users who want OpenAI Cloud flip backend to
 			// "openai" (vocis config backend) which also rewrites
 			// base_url / model to the cloud equivalents.
 			Backend:      BackendLemonade,
@@ -463,6 +476,7 @@ func Default() Config {
 				"code",
 				"Cursor",
 			},
+			KittyRemoteControl: true,
 		},
 		Overlay: OverlayConfig{
 			Width:          620,
@@ -505,6 +519,7 @@ func Default() Config {
 				NoSpeech:           "No speech detected",
 				Cancelled:          "Cancelled — transcription discarded",
 				PostprocessSkipped: "Raw text pasted — cleanup was skipped due to a timeout or error",
+				TargetGone:         "Target window closed — transcript copied to clipboard",
 			},
 		},
 		PostProcess: PostProcessConfig{

@@ -5,9 +5,79 @@ OpenAI-compatible REST API plus a realtime-transcription WebSocket on a
 separate port. This doc captures what vocis actually relies on — defaults,
 quirks, and places the API diverges from OpenAI's.
 
-Everything here was learned empirically against Lemonade 10.2.0 running
+Everything here was learned empirically against Lemonade 10.3.0 running
 locally; later versions may differ. Refresh by running the probe
 (`go run ./scripts/lemonade-probe`) or hitting `/health` directly.
+
+## Required version: 10.3.0+
+
+vocis assumes Lemonade Server **10.3.0** or newer. Two protocol /
+classification changes between 10.2 and 10.3 are load-bearing:
+
+### `input_audio_buffer.cleared` after a finalize-time commit
+
+In 10.2, vocis sent `input_audio_buffer.commit` at finalize and got
+back `input_audio_buffer.committed` plus a (frequently empty)
+`conversation.item.input_audio_transcription.completed` for the
+trailing audio. In 10.3, when client/server VAD has already drained
+every speech segment mid-stream, the server replies with
+`input_audio_buffer.cleared` instead — meaning "the buffer is empty,
+no transcription incoming." vocis treats `cleared` as "trailing
+skipped, finalize immediately"; without that recognition the
+`wait_final` block sits out the full
+`streaming.wait_final_seconds` (15 s default) before pasting.
+
+When the buffer still has un-transcribed audio at commit time (e.g.
+the user kept speaking past `speech_stopped`), 10.3 still returns
+the old `committed` + final `transcription.completed` pair. So the
+`cleared` path is conditional, not unconditional — both code paths
+matter.
+
+Implementation in
+[`internal/transcribe/transcribe.go`](../internal/transcribe/transcribe.go):
+the WS read loop emits a `StreamEventTrailingSkipped` when `cleared`
+arrives after `Stats.CommitAt` is non-zero, and the dictation
+session pushes an empty result on `s.finals` (only when
+`liveSegments=false`, i.e. we're past Finalize) so `waitForFinal`
+returns immediately. The wait_final span gets a
+`realtime.buffer_cleared` event so Jaeger triage shows why finalize
+was so fast.
+
+Upstream change:
+[lemonade-sdk/lemonade#1739](https://github.com/lemonade-sdk/lemonade/pull/1739)
+"Fix realtime stop commit after VAD final" (merged 2026-04-27,
+shipped in 10.3.0).
+
+### `gemma4-it-e2b-FLM` reclassified `audio` → `llm`
+
+In 10.2, `gemma4-it-e2b-FLM` was loaded as `type=audio` and served
+realtime transcription. In 10.3 it's `type=llm` — `/chat/completions`
+works (good for `postprocess.model` on NPU), but
+`/audio/transcriptions` rejects with
+`"Audio transcription not supported by FLM llm model"`. The model's
+labels still include `audio` and `transcription`, but Lemonade's
+endpoint router now ignores those for FLM-llm builds.
+
+The realtime WS still *accepts* a `session.update` naming
+gemma4-it-e2b-FLM but silently emits empty `delta` / empty
+`transcript` events — the user sees vocis "appear to work" (overlay
+listening, mic level animating) but no text gets pasted. To turn
+that silent failure into a clear startup error, vocis runs a
+**preflight label guard** in
+[`EnsureTranscribeModelLoaded`](../internal/transcribe/warm_transcription.go):
+it fetches `/api/v1/models`, looks up the configured
+`transcription.model`, and refuses to start a dictation when the
+catalog entry doesn't carry the `transcription` label. Models that
+aren't in the catalog (user-pulled customs) skip the check with a
+debug log — we can't validate what we can't see.
+
+### Older versions
+
+vocis may still work against pre-10.3 Lemonade for basic
+transcription, but every dictation that fully drains the VAD buffer
+mid-stream will pay the full `wait_final` timeout at finalize. The
+`cleared` short-circuit is a no-op when the event never arrives, so
+nothing breaks — it's just slow. Upgrading to 10.3 is the fix.
 
 ## Port layout
 

@@ -2,6 +2,7 @@ package inject
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -217,4 +218,272 @@ func TestEmptyTextSkipsCompositor(t *testing.T) {
 	if len(fc.snapshot()) != 0 {
 		t.Fatalf("expected no compositor calls for whitespace text; calls=%v", fc.snapshot())
 	}
+}
+
+// TestCaptureTargetEnrichesKittyWindow checks that when the captured
+// window is a kitty terminal and remote control is enabled, the
+// injector calls our kitty hook and stores the returned id on the
+// target.
+func TestCaptureTargetEnrichesKittyWindow(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.KittyRemoteControl = true
+	fc := &fakeKittyCompositor{class: "kitty"}
+	inj := New(cfg, fc, "")
+	inj.SetKittyHooks(KittyHooks{
+		FocusedID: func(ctx context.Context) (string, error) { return "91", nil },
+	})
+
+	target, err := inj.CaptureTarget(context.Background())
+	if err != nil {
+		t.Fatalf("CaptureTarget: %v", err)
+	}
+	if target.KittyWindowID != "91" {
+		t.Fatalf("KittyWindowID = %q, want \"91\"", target.KittyWindowID)
+	}
+}
+
+func TestCaptureTargetSkipsKittyWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.KittyRemoteControl = false
+	fc := &fakeKittyCompositor{class: "kitty"}
+	inj := New(cfg, fc, "")
+	called := false
+	inj.SetKittyHooks(KittyHooks{
+		FocusedID: func(ctx context.Context) (string, error) { called = true; return "91", nil },
+	})
+
+	target, err := inj.CaptureTarget(context.Background())
+	if err != nil {
+		t.Fatalf("CaptureTarget: %v", err)
+	}
+	if called {
+		t.Fatal("kitty hook was called even though KittyRemoteControl is false")
+	}
+	if target.KittyWindowID != "" {
+		t.Fatalf("KittyWindowID = %q, want empty", target.KittyWindowID)
+	}
+}
+
+func TestCaptureTargetSkipsKittyForNonKittyClass(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.KittyRemoteControl = true
+	fc := &fakeKittyCompositor{class: "Firefox"}
+	inj := New(cfg, fc, "")
+	called := false
+	inj.SetKittyHooks(KittyHooks{
+		FocusedID: func(ctx context.Context) (string, error) { called = true; return "91", nil },
+	})
+
+	if _, err := inj.CaptureTarget(context.Background()); err != nil {
+		t.Fatalf("CaptureTarget: %v", err)
+	}
+	if called {
+		t.Fatal("kitty hook was called for a non-kitty target")
+	}
+}
+
+// TestInsertUsesKittySendTextWithoutFocusChange locks down the core
+// "no focus theft" contract: when the target carries a kitty window
+// id and the window is reachable, the injector MUST send the text via
+// kitty remote control and MUST NOT touch the compositor's
+// ActivateWindow / SendKeys / clipboard.
+func TestInsertUsesKittySendTextWithoutFocusChange(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.Mode = "clipboard"
+	fc := &fakeCompositor{}
+	inj := New(cfg, fc, "ctrl+shift+space")
+	sentTo, sentText := "", ""
+	inj.SetKittyHooks(KittyHooks{
+		Exists: func(ctx context.Context, id string) (bool, error) { return true, nil },
+		SendText: func(ctx context.Context, id, text string) error {
+			sentTo, sentText = id, text
+			return nil
+		},
+	})
+
+	target := platform.Target{WindowID: "42", WindowClass: "kitty", KittyWindowID: "91"}
+	if err := inj.Insert(context.Background(), target, "hello kitty"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if sentTo != "91" || sentText != "hello kitty" {
+		t.Fatalf("kitty send-text called with id=%q text=%q; want id=\"91\" text=\"hello kitty\"", sentTo, sentText)
+	}
+	for _, c := range fc.snapshot() {
+		if strings.HasPrefix(c, "ActivateWindow ") {
+			t.Fatalf("compositor.ActivateWindow MUST NOT be called for a reachable kitty target; calls=%v", fc.snapshot())
+		}
+		if strings.HasPrefix(c, "SendKeys ") {
+			t.Fatalf("compositor paste keys MUST NOT be sent for a reachable kitty target; calls=%v", fc.snapshot())
+		}
+		if strings.HasPrefix(c, "SetClipboard ") {
+			t.Fatalf("clipboard MUST NOT be touched for a reachable kitty target; calls=%v", fc.snapshot())
+		}
+	}
+}
+
+// TestInsertReturnsErrTargetGoneWhenKittyWindowDisappeared exercises
+// the recovery path: kitty reports the window is gone, the injector
+// must write the transcript to the clipboard and surface ErrTargetGone
+// (so the app layer can show a "saved to clipboard" warning rather
+// than a failure). send-text MUST NOT be called.
+func TestInsertReturnsErrTargetGoneWhenKittyWindowDisappeared(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.Mode = "clipboard"
+	fc := &fakeCompositor{}
+	inj := New(cfg, fc, "")
+	sendTextCalled := false
+	inj.SetKittyHooks(KittyHooks{
+		Exists: func(ctx context.Context, id string) (bool, error) { return false, nil },
+		SendText: func(ctx context.Context, id, text string) error {
+			sendTextCalled = true
+			return nil
+		},
+	})
+
+	target := platform.Target{WindowID: "42", WindowClass: "kitty", KittyWindowID: "91"}
+	err := inj.Insert(context.Background(), target, "lost transcript")
+	if !errors.Is(err, platform.ErrTargetGone) {
+		t.Fatalf("Insert err = %v, want ErrTargetGone", err)
+	}
+	if sendTextCalled {
+		t.Fatal("send-text MUST NOT be called when the target window is gone")
+	}
+
+	calls := fc.snapshot()
+	foundClipboard := false
+	for _, c := range calls {
+		if c == "SetClipboard lost transcript" {
+			foundClipboard = true
+		}
+		if strings.HasPrefix(c, "SendKeys ") {
+			t.Fatalf("paste keys should not have been sent when target is gone; calls=%v", calls)
+		}
+	}
+	if !foundClipboard {
+		t.Fatalf("expected SetClipboard write before ErrTargetGone; calls=%v", calls)
+	}
+}
+
+// TestInsertFallsBackToFocusPasteWhenKittyExistsErrors covers the
+// "kitty isn't reachable" degrade path: the Exists hook returns a
+// real error (not just "no match"), and the injector should fall
+// back to compositor focus + paste so dictation still completes.
+func TestInsertFallsBackToFocusPasteWhenKittyExistsErrors(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.Mode = "clipboard"
+	fc := &fakeCompositor{}
+	inj := New(cfg, fc, "")
+	inj.SetKittyHooks(KittyHooks{
+		Exists: func(ctx context.Context, id string) (bool, error) {
+			return false, errors.New("connection refused")
+		},
+	})
+
+	target := platform.Target{WindowID: "42", WindowClass: "kitty", KittyWindowID: "91"}
+	if err := inj.Insert(context.Background(), target, "hi"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	calls := fc.snapshot()
+	foundActivate, foundPaste := false, false
+	for _, c := range calls {
+		if c == "ActivateWindow 42" {
+			foundActivate = true
+		}
+		if strings.HasPrefix(c, "SendKeys ctrl+") {
+			foundPaste = true
+		}
+	}
+	if !foundActivate || !foundPaste {
+		t.Fatalf("expected fallback to compositor focus + paste when kitty exists-check errors; calls=%v", calls)
+	}
+}
+
+// TestInsertFallsBackWhenKittySendTextErrors covers the second-stage
+// degrade: Exists succeeded, but the actual SendText shell-out failed
+// (e.g. kitty crashed between the two calls). We should still focus +
+// paste so dictation completes — losing the no-focus-change benefit
+// but not losing the transcript.
+func TestInsertFallsBackWhenKittySendTextErrors(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.Mode = "clipboard"
+	fc := &fakeCompositor{}
+	inj := New(cfg, fc, "")
+	inj.SetKittyHooks(KittyHooks{
+		Exists:   func(ctx context.Context, id string) (bool, error) { return true, nil },
+		SendText: func(ctx context.Context, id, text string) error { return errors.New("socket gone") },
+	})
+
+	target := platform.Target{WindowID: "42", WindowClass: "kitty", KittyWindowID: "91"}
+	if err := inj.Insert(context.Background(), target, "hi"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	calls := fc.snapshot()
+	foundActivate := false
+	for _, c := range calls {
+		if c == "ActivateWindow 42" {
+			foundActivate = true
+		}
+	}
+	if !foundActivate {
+		t.Fatalf("expected fallback to compositor.ActivateWindow when kitty send-text fails; calls=%v", calls)
+	}
+}
+
+// TestPressEnterUsesKittyForKittyTarget locks down the submit-mode
+// contract: PressEnter on a kitty target must go through the kitty
+// remote-control SendEnter hook, NOT through compositor.SendKeys
+// (which would send Return to whatever has focus right now).
+func TestPressEnterUsesKittyForKittyTarget(t *testing.T) {
+	t.Parallel()
+
+	fc := &fakeCompositor{}
+	inj := New(config.Default().Insertion, fc, "")
+	called := ""
+	inj.SetKittyHooks(KittyHooks{
+		SendEnter: func(ctx context.Context, id string) error { called = id; return nil },
+	})
+
+	target := platform.Target{KittyWindowID: "91"}
+	if err := inj.PressEnter(context.Background(), target); err != nil {
+		t.Fatalf("PressEnter: %v", err)
+	}
+	if called != "91" {
+		t.Fatalf("kitty SendEnter called with id=%q, want \"91\"", called)
+	}
+	for _, c := range fc.snapshot() {
+		if strings.HasPrefix(c, "SendKeys ") {
+			t.Fatalf("compositor.SendKeys MUST NOT be called for a kitty target; calls=%v", fc.snapshot())
+		}
+	}
+}
+
+// fakeKittyCompositor is a shrunk fakeCompositor that only implements
+// CaptureTarget with a configurable window class — the kitty
+// enrichment tests don't exercise the rest of the surface.
+type fakeKittyCompositor struct{ class string }
+
+func (f *fakeKittyCompositor) CaptureTarget(_ context.Context) (platform.Target, error) {
+	return platform.Target{WindowID: "1", WindowClass: f.class}, nil
+}
+func (f *fakeKittyCompositor) ActivateWindow(_ context.Context, _ platform.Target) error { return nil }
+func (f *fakeKittyCompositor) SendKeys(_ context.Context, _ string) error                 { return nil }
+func (f *fakeKittyCompositor) ReleaseModifiers(_ context.Context, _ []string) error       { return nil }
+func (f *fakeKittyCompositor) SetClipboard(_ context.Context, _ string) error             { return nil }
+func (f *fakeKittyCompositor) GetClipboard(_ context.Context) (string, error)             { return "", nil }
+func (f *fakeKittyCompositor) Type(_ context.Context, _ platform.Target, _ string, _ bool) error {
+	return nil
 }

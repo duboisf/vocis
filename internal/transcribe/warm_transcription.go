@@ -111,6 +111,29 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 		return fmt.Errorf("transcription.base_url is empty")
 	}
 
+	// Label guard: catch the Lemonade 10.3 trap where
+	// `gemma4-it-e2b-FLM` (and possibly other reclassified models) is
+	// configured as transcription.model but Lemonade's audio router
+	// rejects audio for it. The realtime WS would still accept the
+	// session.update silently and return empty deltas, so the user
+	// experiences "vocis just doesn't produce text" with no clear
+	// reason. Fail loud at preflight instead.
+	if entry, err := FetchLemonadeModel(ctx, baseURL, model); err != nil {
+		// Catalog fetch failed — don't block on it. The user's model
+		// might be a user-pulled custom that doesn't show up in the
+		// catalog, or the /models endpoint hiccupped. Log and move on.
+		sessionlog.Warnf("lemonade preflight: could not verify labels for %s (%v) — proceeding", model, err)
+	} else if entry == nil {
+		sessionlog.Debugf("lemonade preflight: %s not in catalog (custom user model?) — skipping label check", model)
+	} else if !entry.HasLabel("transcription") {
+		return fmt.Errorf(
+			"transcription.model %q is not a transcription model on this Lemonade instance "+
+				"(labels: %v) — pick a model carrying the `transcription` label "+
+				"(e.g. whisper-v3-turbo-FLM) via `vocis config models`",
+			model, entry.Labels,
+		)
+	}
+
 	health, err := FetchLemonadeHealth(ctx, baseURL)
 	if err != nil {
 		return fmt.Errorf("lemonade health check: %w", err)

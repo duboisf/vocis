@@ -133,6 +133,17 @@ insertion:
   # You can still toggle it off per-session by tapping the hotkey
   # (which flips submit mode for that dictation).
   auto_submit: false
+  # kitty_remote_control: when the captured target is a kitty terminal,
+  # deliver the transcript via `kitty @ send-text` directly into the
+  # original tab/pane instead of focusing the OS window and synthesizing
+  # a paste shortcut. No focus theft, no clipboard pollution, lands in
+  # the original tab even after you switch tabs mid-dictation. Falls
+  # back to clipboard + warning when the original tab is gone, and to
+  # OS-window focus + paste when the kitty CLI is unreachable.
+  # Requires `allow_remote_control` (and ideally `listen_on`) in
+  # kitty.conf, or vocis launched from inside kitty so KITTY_LISTEN_ON
+  # is inherited.
+  kitty_remote_control: true
   terminal_classes:
     - Alacritty
     - kitty
@@ -183,6 +194,10 @@ overlay:
     no_speech: No speech detected
     cancelled: "Cancelled — transcription discarded"
     postprocess_skipped: "Raw text pasted — cleanup was skipped due to a timeout or error"
+    # Shown when the original target window has been closed by the time
+    # we try to deliver the transcript. The text is written to the
+    # clipboard so it isn't lost; the user can paste it manually.
+    target_gone: "Target window closed — transcript copied to clipboard"
 
 postprocess:
   enabled: true
@@ -256,5 +271,22 @@ recall:
   # batch_max_seconds: safety cap on total concatenated audio duration
   # for one `recall last` call. 3600 = 1 hour. Set 0 to disable.
   batch_max_seconds: 3600
+
+# `vocis speak` — text-to-speech via Lemonade's OpenAI-compatible
+# /audio/speech endpoint (Kokoro TTS by default). Reads text from CLI
+# args or stdin and streams the resulting PCM through paplay.
+speak:
+  # base_url: leave empty to inherit transcription.base_url at load time —
+  # most users run a single Lemonade instance for both ASR and TTS.
+  base_url: ""
+  # model: must be a Lemonade model with the `tts` label. As of Lemonade
+  # 10.2 the only option is kokoro-v1.
+  model: kokoro-v1
+  # voice: passed through to Kokoro. Known-working voices include
+  # `shimmer`, `fable`, `af_heart`. Lemonade silently returns 200 with
+  # an empty body for unknown voices, so vocis surfaces a clear error
+  # instead of producing a zero-second WAV. Browse the Kokoro model
+  # card for the full voice list.
+  voice: shimmer
 
 yaml_indent: 2

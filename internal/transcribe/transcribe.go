@@ -120,6 +120,15 @@ const (
 	StreamEventPartial StreamEventType = "partial"
 	StreamEventFinal   StreamEventType = "final"
 	StreamEventError   StreamEventType = "error"
+	// StreamEventTrailingSkipped is emitted when the server signals that
+	// a finalize-time commit found the buffer already empty — i.e., no
+	// trailing transcript is coming. Lemonade 10.3 introduced this by
+	// replying with `input_audio_buffer.cleared` instead of the
+	// `.committed` + final transcript pair when client/server VAD already
+	// drained every speech segment mid-stream. Without recognizing it,
+	// vocis would sit out the full wait_final timeout (15 s) waiting for
+	// a trailing transcript that never arrives.
+	StreamEventTrailingSkipped StreamEventType = "trailing_skipped"
 )
 
 type StreamEvent struct {
@@ -477,6 +486,12 @@ func postCommitEventAttrs(sinceCommit time.Duration, msg jsonMessage) (string, [
 		return "realtime.completed", attrs, true
 	case "conversation.item.input_audio_transcription.failed":
 		return "realtime.failed", base, true
+	case "input_audio_buffer.cleared":
+		// Lemonade 10.3 substitute for `.committed` + final transcript
+		// when the buffer was already drained mid-stream. Surface on
+		// the wait_final timeline so triaging "why was finalize so
+		// fast?" or "why was no trailing event seen?" is one click.
+		return "realtime.buffer_cleared", base, true
 	}
 	return "", nil, false
 }
@@ -1257,6 +1272,20 @@ func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 		}
 		s.pushFinal(text, nil)
 		return nil
+	case StreamEventTrailingSkipped:
+		// Lemonade 10.3 told us the post-commit buffer was empty. If
+		// we're past Finalize (liveSegments=false), unblock waitForFinal
+		// immediately with no trailing text — the segment text already
+		// accumulated by collectTrailing is the full transcript. During
+		// recording (liveSegments=true) we ignore this signal; a stray
+		// `cleared` mid-stream shouldn't cause Finalize to skip its real
+		// commit later.
+		s.hasTrailing.Store(false)
+		if !s.liveSegments.Load() {
+			sessionlog.Infof("realtime: post-commit buffer cleared — no trailing transcript, finalizing immediately")
+			s.pushFinal("", nil)
+		}
+		return nil
 	case StreamEventError:
 		if event.Err != nil {
 			return event.Err
@@ -1582,9 +1611,24 @@ func (s *Stream) readLoop() {
 			s.markReady(nil)
 		case "input_audio_buffer.speech_started",
 			"input_audio_buffer.speech_stopped",
-			"input_audio_buffer.committed",
-			"input_audio_buffer.cleared":
+			"input_audio_buffer.committed":
 			sessionlog.Debugf("realtime: %s", msgType)
+		case "input_audio_buffer.cleared":
+			sessionlog.Debugf("realtime: %s", msgType)
+			// Lemonade 10.3 returns `cleared` (not `committed`) in
+			// response to a finalize-time commit when client/server VAD
+			// already consumed the buffer into segment events. Wake up
+			// the wait_final loop so it doesn't sit out the full
+			// timeout waiting for a trailing transcript that's never
+			// coming. Gated on CommitAt so a `cleared` arriving in
+			// some other context (e.g. from a mid-stream client-VAD
+			// commit) doesn't short-circuit Finalize prematurely.
+			s.statsMu.Lock()
+			committed := !s.stats.CommitAt.IsZero()
+			s.statsMu.Unlock()
+			if committed {
+				s.emit(StreamEvent{Type: StreamEventTrailingSkipped})
+			}
 		case "conversation.item.input_audio_transcription.delta":
 			var event transcriptionDeltaEvent
 			if err := raw.decode(&event); err != nil {
