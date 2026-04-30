@@ -816,12 +816,13 @@ type DictationSession struct {
 	// consumeStreamEvents). Atomics keep the call sites readable —
 	// no mutex bookkeeping, just Load/Store/Add. Timestamps live as
 	// UnixNano int64 so atomic.Int64 covers them.
-	stream        atomic.Pointer[Stream]
-	liveSegments  atomic.Bool
-	hasTrailing   atomic.Bool
-	segmentCount  atomic.Int32
-	streamReadyAt atomic.Int64 // UnixNano; 0 = unset
-	lastSegmentAt atomic.Int64 // UnixNano; 0 = unset
+	stream          atomic.Pointer[Stream]
+	liveSegments    atomic.Bool
+	hasTrailing     atomic.Bool
+	partialInFlight atomic.Bool
+	segmentCount    atomic.Int32
+	streamReadyAt   atomic.Int64 // UnixNano; 0 = unset
+	lastSegmentAt   atomic.Int64 // UnixNano; 0 = unset
 }
 
 type finalResult struct {
@@ -1243,9 +1244,22 @@ func (s *DictationSession) consumeStreamEvents(ctx context.Context) {
 func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 	switch event.Type {
 	case StreamEventPartial:
+		// Track whether a delta is awaiting its matching
+		// transcription.completed event. Lemonade emits an empty-text
+		// partial right before the completed event to clear the
+		// preview, so the boolean tracks "delta seen, completion still
+		// owed" — read by the trailing-skipped handler below to avoid
+		// discarding an in-flight transcript when `cleared` arrives
+		// before `completed`.
+		if strings.TrimSpace(event.Text) == "" {
+			s.partialInFlight.Store(false)
+		} else {
+			s.partialInFlight.Store(true)
+		}
 		s.emitPartial(event.Text)
 		return nil
 	case StreamEventFinal:
+		s.partialInFlight.Store(false)
 		text := strings.TrimSpace(event.Text)
 		if text == "" {
 			return nil
@@ -1282,6 +1296,22 @@ func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 		// commit later.
 		s.hasTrailing.Store(false)
 		if !s.liveSegments.Load() {
+			// Cleared can race a still-in-flight transcription.completed:
+			// Lemonade fires `cleared` as soon as it sees our commit
+			// against an already-VAD-consumed buffer, but the matching
+			// `completed` for the last delta may still be a few hundred
+			// ms behind. Pushing an empty final here would drop the
+			// in-flight delta entirely (observed: " would have its" was
+			// emitted as a delta but never transcribed because we
+			// finalized immediately on cleared). When a partial is still
+			// outstanding, leave the finals channel alone — waitForFinal
+			// will receive the real transcript when the completion event
+			// catches up, or fall back to its existing timeout if it
+			// never does.
+			if s.partialInFlight.Load() {
+				sessionlog.Infof("realtime: post-commit buffer cleared but partial still in flight, awaiting completion")
+				return nil
+			}
 			sessionlog.Infof("realtime: post-commit buffer cleared — no trailing transcript, finalizing immediately")
 			s.pushFinal("", nil)
 		}

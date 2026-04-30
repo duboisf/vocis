@@ -542,6 +542,70 @@ func TestDictationSessionHallucinationAfterFinalizeUnblocksWaiter(t *testing.T) 
 	}
 }
 
+// TestDictationSessionTrailingSkippedWaitsForPendingCompletion pins the
+// fix for a transcript-loss bug observed against Lemonade 10.3:
+//
+//   - delta " would have its" arrives over the wire
+//   - user releases hotkey, vocis sends input_audio_buffer.commit
+//   - server replies input_audio_buffer.cleared (server VAD already
+//     consumed the audio) before the matching .completed event has fired
+//   - handleStreamEvent saw .cleared and pushed an empty final, throwing
+//     away the in-flight delta and producing chars=0 / "transcription was
+//     empty" — the user's last sentence vanished
+//
+// When .cleared arrives with a partial still in flight, we must keep
+// waiting for the completed event instead of finalizing immediately.
+func TestDictationSessionTrailingSkippedWaitsForPendingCompletion(t *testing.T) {
+	t.Parallel()
+
+	session := &DictationSession{
+		events: make(chan DictationEvent, 4),
+		finals: make(chan finalResult, 1),
+	}
+	// liveSegments = false simulates post-Finalize state.
+
+	// A delta arrived before the user released the hotkey.
+	if err := session.handleStreamEvent(StreamEvent{
+		Type: StreamEventPartial,
+		Text: " would have its",
+	}); err != nil {
+		t.Fatalf("handleStreamEvent partial: %v", err)
+	}
+
+	// Server returns `cleared` in response to our commit (server VAD
+	// already grabbed the audio). The matching .completed event has
+	// not arrived yet.
+	if err := session.handleStreamEvent(StreamEvent{Type: StreamEventTrailingSkipped}); err != nil {
+		t.Fatalf("handleStreamEvent trailing-skipped: %v", err)
+	}
+
+	select {
+	case r := <-session.finals:
+		t.Fatalf("trailing-skipped pushed a final while a partial was still in flight: %+v (would have discarded the in-flight delta)", r)
+	default:
+	}
+
+	// The .completed event eventually arrives — that's what should
+	// unblock waitForFinal, with the real text.
+	if err := session.handleStreamEvent(StreamEvent{
+		Type: StreamEventFinal,
+		Text: "would have its environment",
+	}); err != nil {
+		t.Fatalf("handleStreamEvent final: %v", err)
+	}
+	select {
+	case r := <-session.finals:
+		if r.err != nil {
+			t.Fatalf("final err = %v", r.err)
+		}
+		if r.text != "would have its environment" {
+			t.Fatalf("final text = %q, want %q", r.text, "would have its environment")
+		}
+	default:
+		t.Fatal("expected real final after completion event")
+	}
+}
+
 func TestDictationSessionHandleStreamEventQueuesFinalAfterLiveDisabled(t *testing.T) {
 	t.Parallel()
 
