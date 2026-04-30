@@ -58,13 +58,13 @@ sequenceDiagram
 
     Note over OpenAI: collectTrailing
 
-    OpenAI->>OpenAI: drainPendingSegments (250ms)
-    alt Trailing audio exists
-        OpenAI->>OpenAI: Commit + waitForFinal
-        OpenAI-->>App: Trailing transcript
-    else All consumed by segments
-        OpenAI-->>App: Skip (commit.skipped=true)
+    alt Server VAD already drained buffer
+        OpenAI->>OpenAI: Skip commit (BufferDrainedByServerVAD)
+    else
+        OpenAI->>OpenAI: AppendSilence (tail pad) + Commit
     end
+    OpenAI->>OpenAI: waitForCompletion (drain finals until HasInflightWork=false or timeout)
+    OpenAI-->>App: Combined transcript (zero or more drained segments)
 
     App->>Overlay: SetFinishingText (full text with newlines)
 
@@ -150,10 +150,9 @@ When the hotkey stops dictation:
 3. The overlay switches to the "Finishing" state with a heartbeat wave animation, showing the accumulated text and an elapsed-time counter that ticks up from 0 (e.g. `Wrapping up... (2.3s)`). There is no outer deadline on the finalize call — the counter runs until the transcription completes or the user cancels.
 4. The user can press the hotkey during this state to cancel the in-flight transcription. The overlay shows "Cancelled — transcription discarded".
 5. [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go) finalizes the `DictationSession` via `collectTrailing`:
-   - `drainPendingSegments`: collects any segment results that arrived between recording stop and finalization (250ms window).
-   - If all audio was consumed by live segments and no trailing audio remains, finalization returns immediately.
-   - Otherwise, `stream.Commit` sends the trailing audio and `waitForFinal` waits for the transcript with a proportional timeout.
-   - Empty commit errors are expected when all audio was consumed by segments and are handled gracefully.
+   - If the server VAD already drained the buffer (`PreCommitContext.BufferDrainedByServerVAD`), the explicit commit is skipped — it would just produce a no-op "buffer too small" round-trip.
+   - Otherwise, `stream.AppendSilence` pads the tail (so Whisper segments the last word) and `stream.Commit` flushes any remaining audio. `ErrInputAudioBufferCommitEmpty` is benign (server VAD raced our commit) and is swallowed.
+   - `waitForCompletion` then drains finals from `s.finals` in a loop until `Stream.HasInflightWork()` reports false (every server-VAD segment has its matching `transcription.completed` AND no streaming delta is buffered) or the proportional timeout fires. The drain handles the multi-segment case where Whisper has multiple turns pending at commit time — the previous single-shot wait dropped the second one.
 6. The overlay updates to show the complete transcription text (segments + trailing) with newlines preserved. The finished "Wrapping up" phase is pushed onto a completed-phases list with its elapsed duration (e.g. `Wrapping up — done (2.3s)`) so the user can see how long finalization actually took.
 7. If post-processing is enabled and the text has enough words (`postprocess.min_word_count`):
    - The overlay shows a new `Wait...` phase counting up from 0. Internal first-token / total timeouts still apply inside the post-processing call — they are enforced but not displayed.
@@ -227,9 +226,8 @@ When telemetry is enabled, the following OpenTelemetry spans are emitted per dic
     - `vocis.transcribe.connect` — WebSocket dial and session setup (may appear multiple times on retry). `transcribe.backend` = `openai` or `lemonade`.
     - `vocis.recorder.stop` — stream stop and resource cleanup
     - `vocis.transcribe.finalize` — post-recording finalization
-      - `vocis.transcribe.drain` — drain pending segment finals (250ms window)
-      - `vocis.transcribe.commit` — commit trailing audio buffer to the backend
-      - `vocis.transcribe.wait_final` — wait for the backend to return the trailing transcript
+      - `vocis.transcribe.commit` — commit trailing audio buffer to the backend (skipped when server VAD already drained the buffer; `commit.empty_swallowed=true` when we raced VAD)
+      - `vocis.transcribe.wait_final` — drain-loop wait for in-flight transcriptions. `wait_final.exit_reason` (`no_inflight_work` / `timeout` / `error`), `wait_final.drained_segments`, `wait_final.{started,completed}_count_at_{entry,exit}`, `wait_final.commit_skipped_buffer_drained`, `wait_final.commit_empty_swallowed`. See `docs/debugging.md` for the full attribute list.
     - `vocis.postprocess` — LLM cleanup with two-phase streaming timeout
       - Attributes: `input.length`, `model`, `output.length`, `skipped`, `postprocess.first_token_timeout_sec`, `postprocess.total_timeout_sec`, `postprocess.error`
       - Events: `postprocess.streaming_request_sent`, `postprocess.first_token_received` (`elapsed`), `postprocess.first_token_timeout` (`timeout`), `postprocess.streaming_complete` (`elapsed`), `postprocess.empty_response`, `postprocess.cancelled_by_user`

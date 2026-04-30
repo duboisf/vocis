@@ -22,10 +22,10 @@ back `input_audio_buffer.committed` plus a (frequently empty)
 trailing audio. In 10.3, when client/server VAD has already drained
 every speech segment mid-stream, the server replies with
 `input_audio_buffer.cleared` instead — meaning "the buffer is empty,
-no transcription incoming." vocis treats `cleared` as "trailing
-skipped, finalize immediately"; without that recognition the
-`wait_final` block sits out the full
-`streaming.wait_final_seconds` (15 s default) before pasting.
+no transcription incoming." Without recognition of `cleared`, the
+finalize wait would sit out the full `streaming.wait_final_seconds`
+(15 s default) before pasting on every dictation that fully drained
+mid-stream.
 
 When the buffer still has un-transcribed audio at commit time (e.g.
 the user kept speaking past `speech_stopped`), 10.3 still returns
@@ -36,12 +36,18 @@ matter.
 Implementation in
 [`internal/transcribe/transcribe.go`](../internal/transcribe/transcribe.go):
 the WS read loop emits a `StreamEventTrailingSkipped` when `cleared`
-arrives after `Stats.CommitAt` is non-zero, and the dictation
-session pushes an empty result on `s.finals` (only when
-`liveSegments=false`, i.e. we're past Finalize) so `waitForFinal`
-returns immediately. The wait_final span gets a
-`realtime.buffer_cleared` event so Jaeger triage shows why finalize
-was so fast.
+arrives after `Stats.CommitAt` is non-zero. The handler is
+diagnostic-only — `waitForCompletion`'s drain loop polls
+`Stream.HasInflightWork()` (server-VAD speech_started count vs
+transcription.completed count, plus any in-flight delta) as the
+single source of truth for "are we done?". Earlier versions used
+`cleared` as a finalize-now signal, but that lost transcripts when
+`cleared` raced an in-flight `delta` or speech_started/_stopped pair
+whose `completed` hadn't returned yet — the drain loop replaces that
+race-prone shortcut. The wait_final span carries a
+`wait_final.exit_reason` attribute (`no_inflight_work` for the fast
+path, `timeout` / `error` otherwise) so Jaeger triage shows why
+finalize ended.
 
 Upstream change:
 [lemonade-sdk/lemonade#1739](https://github.com/lemonade-sdk/lemonade/pull/1739)

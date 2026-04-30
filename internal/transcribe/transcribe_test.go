@@ -659,7 +659,7 @@ func TestWaitForCompletionDrainsMultiplePendingSegments(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	got, err := session.waitForCompletion(ctx, stream)
+	got, err := session.waitForCompletion(ctx, stream, nil)
 	if err != nil {
 		t.Fatalf("waitForCompletion: %v", err)
 	}
@@ -687,7 +687,7 @@ func TestWaitForCompletionReturnsImmediatelyWhenNothingPending(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	got, err := session.waitForCompletion(ctx, stream)
+	got, err := session.waitForCompletion(ctx, stream, nil)
 	if err != nil {
 		t.Fatalf("waitForCompletion: %v", err)
 	}

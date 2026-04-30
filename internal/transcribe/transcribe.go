@@ -666,9 +666,10 @@ func (s *Stream) PreCommitContext() PreCommitContext {
 	return ctx
 }
 
-// PostCommitStats returns the post-commit timeline. Call after waitForFinal
-// returns (success, timeout, or error). delta_eq_completed answers the
-// "could we skip waiting for completed?" question directly.
+// PostCommitStats returns the post-commit timeline. Call after
+// waitForCompletion returns (success, timeout, or error).
+// delta_eq_completed answers the "could we skip waiting for completed?"
+// question directly.
 func (s *Stream) PostCommitStats() PostCommitStats {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
@@ -810,11 +811,12 @@ type DictationOpts struct {
 	Callbacks  ConnectCallbacks
 	// ExpectedAudioMS is the total audio duration (in ms) the caller
 	// intends to feed through the session, when known upfront. Used by
-	// waitForFinal to scale its post-commit timeout proportionally — a
-	// batch commit of 20 min of pre-recorded audio needs ~minutes for
-	// a local model to transcribe, so the fixed 15 s wait_final floor
-	// would fire too soon. 0 = unknown (PTT serve path), waitForFinal
-	// falls back to wall-clock trailingDuration scaling.
+	// waitForCompletion to scale its post-commit timeout
+	// proportionally — a batch commit of 20 min of pre-recorded audio
+	// needs ~minutes for a local model to transcribe, so the fixed
+	// 15 s wait_final floor would fire too soon. 0 = unknown (PTT
+	// serve path), waitForCompletion falls back to wall-clock
+	// trailingDuration scaling.
 	ExpectedAudioMS int
 }
 
@@ -921,11 +923,17 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) (FinalizeResult, error) {
 	pre := stream.PreCommitContext()
 
+	startedAtCommit, completedAtCommit := stream.PendingTranscriptionCounts()
+	commitSkippedBufferDrained := false
+	commitEmptySwallowed := false
+
 	// Skip the commit only when the server has already drained our buffer
 	// via VAD — that's the one case where a commit would just produce a
 	// no-op "buffer too small" round-trip. Either way we still wait for
 	// any in-flight transcription to complete.
-	if !pre.BufferDrainedByServerVAD {
+	if pre.BufferDrainedByServerVAD {
+		commitSkippedBufferDrained = true
+	} else {
 		// Pad with silence first so Whisper-family models can segment
 		// the last word — without it, releasing the hotkey mid-word
 		// routinely eats the trailing word. Traced explicitly because
@@ -944,6 +952,8 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 			attribute.Bool("commit.speech_stopped_seen_before_commit", pre.SpeechStoppedSeenBefore),
 			attribute.Int64("commit.ms_since_speech_stopped", pre.MsSinceSpeechStopped),
 			attribute.Int("commit.tail_silence_ms", s.tailSilenceMS),
+			attribute.Int("commit.pending_transcription_started", startedAtCommit),
+			attribute.Int("commit.pending_transcription_completed", completedAtCommit),
 		)
 		err := stream.Commit(ctx)
 		// ErrInputAudioBufferCommitEmpty just means server VAD drained
@@ -954,7 +964,8 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 			return FinalizeResult{}, err
 		}
 		if err != nil {
-			commitSpan.SetAttributes(attribute.Bool("commit.skipped_empty", true))
+			commitEmptySwallowed = true
+			commitSpan.SetAttributes(attribute.Bool("commit.empty_swallowed", true))
 		}
 		telemetry.EndSpan(commitSpan, nil)
 	}
@@ -962,10 +973,14 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 	waitStartedAt := time.Now()
 	_, waitSpan := telemetry.StartSpan(ctx, "vocis.transcribe.wait_final",
 		attribute.String("trailing_duration", s.trailingDuration().Round(10*time.Millisecond).String()),
-		attribute.Int("segment_count", int(s.segmentCount.Load())),
+		attribute.Int("wait_final.segments_at_entry", int(s.segmentCount.Load())),
+		attribute.Int("wait_final.started_count_at_entry", startedAtCommit),
+		attribute.Int("wait_final.completed_count_at_entry", completedAtCommit),
+		attribute.Bool("wait_final.commit_skipped_buffer_drained", commitSkippedBufferDrained),
+		attribute.Bool("wait_final.commit_empty_swallowed", commitEmptySwallowed),
 	)
 	stream.SetPostCommitSpan(waitSpan, waitStartedAt)
-	text, err := s.waitForCompletion(ctx, stream)
+	text, err := s.waitForCompletion(ctx, stream, waitSpan)
 	addPostCommitAttrs(waitSpan, stream.PostCommitStats())
 	telemetry.EndSpan(waitSpan, err)
 	if err != nil {
@@ -1361,7 +1376,7 @@ func (s *DictationSession) computeWaitTimeout() time.Duration {
 // (.., context.DeadlineExceeded) and relied on canSkipTrailingTimeout to
 // suppress; the suppression layer is gone, replaced by a Warn log that
 // surfaces real hangs without surfacing benign timeouts.
-func (s *DictationSession) waitForCompletion(ctx context.Context, stream *Stream) (string, error) {
+func (s *DictationSession) waitForCompletion(ctx context.Context, stream *Stream, span trace.Span) (string, error) {
 	timeout := s.computeWaitTimeout()
 	startedAt := time.Now()
 
@@ -1397,12 +1412,23 @@ func (s *DictationSession) waitForCompletion(ctx context.Context, stream *Stream
 	}
 
 	exit := func(reason string) {
+		elapsed := time.Since(startedAt)
 		started, completed := stream.PendingTranscriptionCounts()
 		sessionlog.Infof("wait_final: exiting (%s) after %s, drained %d segments → %d chars, %d/%d server-VAD segments transcribed, partial=%q",
 			reason,
-			time.Since(startedAt).Round(time.Millisecond),
+			elapsed.Round(time.Millisecond),
 			drainedSegments, len(combined),
 			completed, started, stream.Partial())
+		if span != nil {
+			span.SetAttributes(
+				attribute.String("wait_final.exit_reason", reason),
+				attribute.Int("wait_final.drained_segments", drainedSegments),
+				attribute.Int("wait_final.text_chars", len(combined)),
+				attribute.Int("wait_final.started_count_at_exit", started),
+				attribute.Int("wait_final.completed_count_at_exit", completed),
+				attribute.Int64("wait_final.elapsed_ms", elapsed.Milliseconds()),
+			)
+		}
 	}
 
 	for {
@@ -1414,7 +1440,11 @@ func (s *DictationSession) waitForCompletion(ctx context.Context, stream *Stream
 			case r := <-s.finals:
 				done, err := applyResult(r)
 				if done {
-					exit("error")
+					if err != nil {
+						exit("error")
+					} else {
+						exit("stream_error_with_text")
+					}
 					return combined, err
 				}
 				drainedOne = true
@@ -1425,7 +1455,7 @@ func (s *DictationSession) waitForCompletion(ctx context.Context, stream *Stream
 		// All counters reflect events processed so far. If nothing's in
 		// flight, we have everything — return.
 		if !stream.HasInflightWork() {
-			exit("no in-flight work")
+			exit("no_inflight_work")
 			return combined, nil
 		}
 
@@ -1434,7 +1464,11 @@ func (s *DictationSession) waitForCompletion(ctx context.Context, stream *Stream
 		case r := <-s.finals:
 			done, err := applyResult(r)
 			if done {
-				exit("error")
+				if err != nil {
+					exit("error")
+				} else {
+					exit("stream_error_with_text")
+				}
 				return combined, err
 			}
 		case <-waitCtx.Done():
