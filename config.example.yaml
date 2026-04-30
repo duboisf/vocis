@@ -111,7 +111,7 @@ streaming:
   # reliably — without it, releasing the hotkey mid-word often drops
   # the trailing word from the transcript. 300ms is a solid default;
   # set 0 to disable, cap is 2000.
-  tail_silence_ms: 300
+  tail_silence_ms: 800
   # noise_reduction: server-side noise reduction applied before VAD and
   # the transcription model. Accepted values:
   #   ""           - off (default)
@@ -183,6 +183,11 @@ overlay:
     cancel_hint: "— press {shortcut} to cancel"
     wrapping_up: Wrapping up
     post_processing: Post-processing
+    # pp_wait / pp_stream are the postprocess phase labels appended to
+    # post_processing while the LLM is thinking — pp_wait shows until
+    # the first token arrives, then pp_stream until completion.
+    pp_wait: Wait
+    pp_stream: Stream
     phase_done: done
   success:
     title: Typed
@@ -227,6 +232,15 @@ postprocess:
 
     Now clean the next input:
   min_word_count: 10
+  # first_token_timeout_seconds: how long to wait for the LLM's first
+  # token before declaring the postprocess attempt failed and falling
+  # back to the raw transcript. Cloud OpenAI typically answers in
+  # under a second; local Lemonade with a cold model can take 5-10s.
+  first_token_timeout_seconds: 10
+  # total_timeout_seconds: hard cap on the postprocess request. If the
+  # full response hasn't arrived by then we give up and paste the raw
+  # transcript with a `postprocess_skipped` warning overlay.
+  total_timeout_seconds: 15
   # Sampling knobs. Omit any field to let the backend use its default.
   # OpenAI-standard (honored on all backends): temperature, top_p,
   # frequency_penalty, presence_penalty, stop.

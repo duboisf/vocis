@@ -204,9 +204,10 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 		span.AddEvent("postprocess.streaming_complete",
 			trace.WithAttributes(attribute.String("elapsed", elapsed.String())),
 		)
-		return c.finishPostProcess(span, r, text, cfg.Model)
+		return c.finishPostProcess(span, r, text, cfg.Model, elapsed)
 	case <-time.After(firstTokenTimeout):
 		cancel()
+		elapsed := time.Since(start).Round(time.Millisecond)
 		span.AddEvent("postprocess.first_token_timeout",
 			trace.WithAttributes(attribute.String("timeout", firstTokenTimeout.String())),
 		)
@@ -218,7 +219,7 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 				attribute.String("output.text", truncate(text, 500)),
 			),
 		)
-		sessionlog.Warnf("postprocess: no tokens within %s, giving up", firstTokenTimeout)
+		sessionlog.Warnf("postprocess: no tokens within %s elapsed=%s, giving up", firstTokenTimeout, elapsed)
 		return PostProcessResult{Text: text, Skipped: true}
 	}
 
@@ -228,10 +229,10 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 	span.AddEvent("postprocess.streaming_complete",
 		trace.WithAttributes(attribute.String("elapsed", elapsed.String())),
 	)
-	return c.finishPostProcess(span, r, text, cfg.Model)
+	return c.finishPostProcess(span, r, text, cfg.Model, elapsed)
 }
 
-func (c *Client) finishPostProcess(span trace.Span, r streamResult, rawText, model string) PostProcessResult {
+func (c *Client) finishPostProcess(span trace.Span, r streamResult, rawText, model string, elapsed time.Duration) PostProcessResult {
 	if r.err != nil {
 		span.SetAttributes(attribute.String("postprocess.error", r.err.Error()))
 		span.AddEvent("postprocess.output",
@@ -242,7 +243,7 @@ func (c *Client) finishPostProcess(span trace.Span, r streamResult, rawText, mod
 				attribute.String("output.text", truncate(rawText, 500)),
 			),
 		)
-		sessionlog.Warnf("postprocess failed, using raw transcription: %v", r.err)
+		sessionlog.Warnf("postprocess failed elapsed=%s, using raw transcription: %v", elapsed, r.err)
 		return PostProcessResult{Text: rawText, Skipped: true}
 	}
 
@@ -257,7 +258,7 @@ func (c *Client) finishPostProcess(span trace.Span, r streamResult, rawText, mod
 				attribute.String("output.text", truncate(rawText, 500)),
 			),
 		)
-		sessionlog.Warnf("postprocess returned empty text, using raw transcription")
+		sessionlog.Warnf("postprocess returned empty text elapsed=%s, using raw transcription", elapsed)
 		return PostProcessResult{Text: rawText, Skipped: true}
 	}
 
@@ -270,6 +271,6 @@ func (c *Client) finishPostProcess(span trace.Span, r streamResult, rawText, mod
 		),
 	)
 	sessionlog.Debugf("postprocess result=%q", cleaned)
-	sessionlog.Infof("postprocess cleaned=%d raw=%d model=%s", len(cleaned), len(rawText), model)
+	sessionlog.Infof("postprocess cleaned=%d raw=%d model=%s elapsed=%s", len(cleaned), len(rawText), model, elapsed)
 	return PostProcessResult{Text: cleaned}
 }
