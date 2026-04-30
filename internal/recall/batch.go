@@ -163,10 +163,10 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 		SampleRate: sampleRate,
 		Channels:   d.cfg.Recording.Channels,
 		Samples:    samples,
-		// Let waitForFinal scale its post-commit budget to the audio
-		// we're about to feed — otherwise the 15 s wait_final floor
-		// fires before a local model has time to transcribe anything
-		// meaningful on a multi-minute batch.
+		// Let waitForCompletion scale its post-commit budget to the
+		// audio we're about to feed — otherwise the 15 s wait_final
+		// floor fires before a local model has time to transcribe
+		// anything meaningful on a multi-minute batch.
 		ExpectedAudioMS: totalMS,
 	})
 	if startErr != nil {

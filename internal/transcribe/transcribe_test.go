@@ -362,29 +362,6 @@ func TestStartStreamKeepsFirstWordWhenCompletedTranscriptIsSuffix(t *testing.T) 
 	}
 }
 
-func TestCanSkipTrailingTimeout(t *testing.T) {
-	t.Parallel()
-
-	session := &DictationSession{}
-	session.segmentCount.Store(1)
-	stream := &Stream{}
-
-	if !session.canSkipTrailingTimeout(context.DeadlineExceeded, stream) {
-		t.Fatal("expected trailing timeout to be skippable for segmented dictation")
-	}
-}
-
-func TestCannotSkipTrailingTimeoutWithoutSegments(t *testing.T) {
-	t.Parallel()
-
-	session := &DictationSession{}
-	stream := &Stream{}
-
-	if session.canSkipTrailingTimeout(context.DeadlineExceeded, stream) {
-		t.Fatal("expected trailing timeout to fail when no live segments were inserted")
-	}
-}
-
 func TestPCMEncoderUpsamplesAndDownmixes(t *testing.T) {
 	t.Parallel()
 
@@ -491,8 +468,11 @@ func TestDictationSessionDropsHallucinatedFinal(t *testing.T) {
 			t.Fatalf("hallucination %q leaked as event %+v", text, evt)
 		default:
 		}
-		// During live segments, no empty final should be pushed — otherwise
-		// drainPendingSegments would be nudged every hallucination.
+		// No empty final should be pushed for hallucinations: Stream's
+		// pending-transcription counter has already been decremented by
+		// the time we get here, so HasInflightWork goes false naturally
+		// — waitForCompletion will exit on its next loop without us
+		// nudging the channel.
 		select {
 		case r := <-session.finals:
 			t.Fatalf("hallucination %q leaked as final %+v during live segments", text, r)
@@ -514,12 +494,14 @@ func TestDictationSessionDropsHallucinatedFinal(t *testing.T) {
 	}
 }
 
-// TestDictationSessionHallucinationAfterFinalizeUnblocksWaiter pins the
-// fix for the hang: once Finalize flips liveSegments off, the caller is
-// parked on the finals channel. Dropping a hallucination in that window
-// must still push an empty result or finalize spins for the full
-// wait_final timeout before failing with context deadline exceeded.
-func TestDictationSessionHallucinationAfterFinalizeUnblocksWaiter(t *testing.T) {
+// TestDictationSessionHallucinationAfterFinalizeDoesNotPush pins the
+// post-refactor behavior: waitForCompletion polls Stream.HasInflightWork
+// instead of blocking on s.finals indefinitely, so dropping a
+// hallucination no longer needs to push an empty marker to unblock the
+// waiter. The handler should silently drop and let the drain loop
+// observe the (already-decremented) pending counter on the next
+// iteration.
+func TestDictationSessionHallucinationAfterFinalizeDoesNotPush(t *testing.T) {
 	t.Parallel()
 
 	session := &DictationSession{
@@ -534,28 +516,22 @@ func TestDictationSessionHallucinationAfterFinalizeUnblocksWaiter(t *testing.T) 
 	}
 	select {
 	case r := <-session.finals:
-		if r.text != "" || r.err != nil {
-			t.Fatalf("final = %+v, want empty text + nil err", r)
-		}
+		t.Fatalf("hallucination after Finalize leaked as final %+v — the drain loop should rely on HasInflightWork, not an empty push", r)
 	default:
-		t.Fatal("expected empty final to unblock finalize waiter after hallucination drop")
 	}
 }
 
-// TestDictationSessionTrailingSkippedWaitsForPendingCompletion pins the
-// fix for a transcript-loss bug observed against Lemonade 10.3:
-//
-//   - delta " would have its" arrives over the wire
-//   - user releases hotkey, vocis sends input_audio_buffer.commit
-//   - server replies input_audio_buffer.cleared (server VAD already
-//     consumed the audio) before the matching .completed event has fired
-//   - handleStreamEvent saw .cleared and pushed an empty final, throwing
-//     away the in-flight delta and producing chars=0 / "transcription was
-//     empty" — the user's last sentence vanished
-//
-// When .cleared arrives with a partial still in flight, we must keep
-// waiting for the completed event instead of finalizing immediately.
-func TestDictationSessionTrailingSkippedWaitsForPendingCompletion(t *testing.T) {
+// TestDictationSessionTrailingSkippedDoesNotPush pins the post-refactor
+// contract for `input_audio_buffer.cleared`: it is now diagnostic-only.
+// waitForCompletion's drain loop polls Stream.HasInflightWork to decide
+// when finalize is done; the trailing-skipped handler must NOT push to
+// s.finals regardless of partial state, because doing so could either
+// (a) discard an in-flight delta (yesterday's bug), or
+// (b) discard a server-VAD segment whose .completed hasn't arrived yet
+//     (today's bug — a speech_started/_stopped pair with no delta yet).
+// Both classes are handled by the drain loop; this handler stays out of
+// the way.
+func TestDictationSessionTrailingSkippedDoesNotPush(t *testing.T) {
 	t.Parallel()
 
 	session := &DictationSession{
@@ -564,29 +540,37 @@ func TestDictationSessionTrailingSkippedWaitsForPendingCompletion(t *testing.T) 
 	}
 	// liveSegments = false simulates post-Finalize state.
 
-	// A delta arrived before the user released the hotkey.
+	// Even with a delta on the wire, trailing-skipped must not push.
 	if err := session.handleStreamEvent(StreamEvent{
 		Type: StreamEventPartial,
 		Text: " would have its",
 	}); err != nil {
 		t.Fatalf("handleStreamEvent partial: %v", err)
 	}
-
-	// Server returns `cleared` in response to our commit (server VAD
-	// already grabbed the audio). The matching .completed event has
-	// not arrived yet.
 	if err := session.handleStreamEvent(StreamEvent{Type: StreamEventTrailingSkipped}); err != nil {
 		t.Fatalf("handleStreamEvent trailing-skipped: %v", err)
 	}
-
 	select {
 	case r := <-session.finals:
-		t.Fatalf("trailing-skipped pushed a final while a partial was still in flight: %+v (would have discarded the in-flight delta)", r)
+		t.Fatalf("trailing-skipped leaked a final %+v — must be diagnostic-only", r)
 	default:
 	}
 
-	// The .completed event eventually arrives — that's what should
-	// unblock waitForFinal, with the real text.
+	// And with no partial either (today's bug shape).
+	session2 := &DictationSession{
+		events: make(chan DictationEvent, 4),
+		finals: make(chan finalResult, 1),
+	}
+	if err := session2.handleStreamEvent(StreamEvent{Type: StreamEventTrailingSkipped}); err != nil {
+		t.Fatalf("handleStreamEvent trailing-skipped (no partial): %v", err)
+	}
+	select {
+	case r := <-session2.finals:
+		t.Fatalf("trailing-skipped without partial still leaked a final %+v — must be diagnostic-only", r)
+	default:
+	}
+
+	// The eventual completion is what populates the channel.
 	if err := session.handleStreamEvent(StreamEvent{
 		Type: StreamEventFinal,
 		Text: "would have its environment",
@@ -633,6 +617,85 @@ func TestDictationSessionHandleStreamEventQueuesFinalAfterLiveDisabled(t *testin
 		}
 	default:
 		t.Fatal("expected queued final result")
+	}
+}
+
+// TestWaitForCompletionDrainsMultiplePendingSegments reproduces the
+// transcript-loss bug from session 20260430-120706: at commit time, two
+// `speech_started` events were outstanding but only one matching
+// `completed` had landed. The old single-shot waitForFinal returned on
+// the first final and abandoned the second. The drain-loop
+// waitForCompletion must keep going until HasInflightWork goes false.
+func TestWaitForCompletionDrainsMultiplePendingSegments(t *testing.T) {
+	t.Parallel()
+
+	stream := &Stream{stats: newStats()}
+	// Two server-VAD segments started; one completed already drained,
+	// one still owed (mirrors the bug's state at commit time).
+	stream.stats.SpeechStartedCount = 2
+	stream.stats.InboundCounts["conversation.item.input_audio_transcription.completed"] = 0
+
+	session := &DictationSession{
+		events:                make(chan DictationEvent, 4),
+		finals:                make(chan finalResult, 4),
+		waitFinalFloorSeconds: 2,
+	}
+	session.stream.Store(stream)
+
+	// Goroutine simulates Whisper returning two completed events. Per the
+	// real protocol, Stream.handleMessage updates the counter BEFORE
+	// emitting StreamEventFinal — mirror that order so HasInflightWork
+	// reflects the post-update state by the time the final hits s.finals.
+	go func() {
+		for _, text := range []string{"first segment.", "second segment."} {
+			time.Sleep(20 * time.Millisecond)
+			stream.statsMu.Lock()
+			stream.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]++
+			stream.statsMu.Unlock()
+			session.pushFinal(text, nil)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	got, err := session.waitForCompletion(ctx, stream)
+	if err != nil {
+		t.Fatalf("waitForCompletion: %v", err)
+	}
+	if !strings.Contains(got, "first segment") || !strings.Contains(got, "second segment") {
+		t.Fatalf("waitForCompletion = %q, want both 'first segment' and 'second segment'", got)
+	}
+}
+
+// TestWaitForCompletionReturnsImmediatelyWhenNothingPending pins the
+// no-speech case: no speech_started ever fired and no partial is in
+// flight, so HasInflightWork is false from the start. The drain loop
+// must return instantly without waiting on the floor timeout.
+func TestWaitForCompletionReturnsImmediatelyWhenNothingPending(t *testing.T) {
+	t.Parallel()
+
+	stream := &Stream{stats: newStats()}
+	session := &DictationSession{
+		events:                make(chan DictationEvent, 1),
+		finals:                make(chan finalResult, 1),
+		waitFinalFloorSeconds: 60, // would fail loudly if we actually waited
+	}
+	session.stream.Store(stream)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	got, err := session.waitForCompletion(ctx, stream)
+	if err != nil {
+		t.Fatalf("waitForCompletion: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("waitForCompletion = %q, want empty", got)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("waitForCompletion took %s with nothing pending; expected near-instant", elapsed)
 	}
 }
 
@@ -953,6 +1016,15 @@ func TestFinalizeReceivesTrailingSegmentAfterSamplesClose(t *testing.T) {
 			var appendEvent map[string]any
 			_ = conn.ReadJSON(&appendEvent)
 
+			// Server VAD detects an utterance — Lemonade/OpenAI always
+			// emit speech_started before producing a completed. The
+			// pending-transcription counter on the client tracks this
+			// pair so waitForCompletion knows to keep waiting.
+			_ = conn.WriteJSON(map[string]any{
+				"type":           "input_audio_buffer.speech_started",
+				"audio_start_ms": 0,
+			})
+
 			// Wait for the commit (sent by Finalize after samples close).
 			var commitEvent map[string]any
 			_ = conn.ReadJSON(&commitEvent)
@@ -1110,9 +1182,9 @@ func TestFinalizeSucceedsWhenCommitEmptyArrivesViaFinals(t *testing.T) {
 	// Let stream connect and segment arrive.
 	time.Sleep(300 * time.Millisecond)
 
-	// Send more audio AFTER the segment cleared the trailing flag.
-	// This keeps hasTrailing=true, matching the production scenario
-	// where audio chunks continue arriving after the last segment.
+	// Send more audio after the segment, matching the production
+	// scenario where audio chunks continue arriving after the last
+	// segment so the trailing-commit path actually runs.
 	samples <- []int16{500, -500}
 	time.Sleep(50 * time.Millisecond)
 

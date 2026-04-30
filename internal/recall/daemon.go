@@ -514,9 +514,10 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 		SampleRate: sampleRate,
 		Channels:   d.cfg.Recording.Channels,
 		Samples:    samples,
-		// Segment duration is known upfront — feed it to waitForFinal
-		// so the post-commit budget scales with the audio being
-		// transcribed instead of falling back to the 15 s floor.
+		// Segment duration is known upfront — feed it to
+		// waitForCompletion so the post-commit budget scales with
+		// the audio being transcribed instead of falling back to the
+		// 15 s floor.
 		ExpectedAudioMS: int(seg.Duration / time.Millisecond),
 	})
 	if err != nil {

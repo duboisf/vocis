@@ -400,6 +400,27 @@ func (s *Stream) HasPendingTranscription() bool {
 	return s.stats.SpeechStartedCount > completed
 }
 
+// HasInflightWork is true while Whisper may still emit a transcript event
+// for audio we've sent: either a server-VAD-detected segment hasn't
+// returned its .completed yet, or a streaming delta has been emitted
+// whose .completed is still owed. This is the universal "hold on, more
+// text may still arrive" signal — every fast-path that wants to declare
+// finalize done must check this first or risk dropping the user's last
+// utterance.
+func (s *Stream) HasInflightWork() bool {
+	return s.HasPendingTranscription() || strings.TrimSpace(s.Partial()) != ""
+}
+
+// PendingTranscriptionCounts returns (speech_started, completed) inbound
+// event counts. Lets the wait loop log "owe N transcripts" without
+// reaching into stats internals.
+func (s *Stream) PendingTranscriptionCounts() (started, completed int) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+	return s.stats.SpeechStartedCount,
+		s.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]
+}
+
 func (s *Stream) Events() <-chan StreamEvent { return s.events }
 
 func (s *Stream) Close() error {
@@ -816,13 +837,11 @@ type DictationSession struct {
 	// consumeStreamEvents). Atomics keep the call sites readable —
 	// no mutex bookkeeping, just Load/Store/Add. Timestamps live as
 	// UnixNano int64 so atomic.Int64 covers them.
-	stream          atomic.Pointer[Stream]
-	liveSegments    atomic.Bool
-	hasTrailing     atomic.Bool
-	partialInFlight atomic.Bool
-	segmentCount    atomic.Int32
-	streamReadyAt   atomic.Int64 // UnixNano; 0 = unset
-	lastSegmentAt   atomic.Int64 // UnixNano; 0 = unset
+	stream        atomic.Pointer[Stream]
+	liveSegments  atomic.Bool
+	segmentCount  atomic.Int32
+	streamReadyAt atomic.Int64 // UnixNano; 0 = unset
+	lastSegmentAt atomic.Int64 // UnixNano; 0 = unset
 }
 
 type finalResult struct {
@@ -891,65 +910,53 @@ func (s *DictationSession) Finalize(ctx context.Context) (FinalizeResult, error)
 	return s.collectTrailing(ctx, stream)
 }
 
-// collectTrailing drains any pending segment results, optionally commits
-// remaining audio, and waits for the final transcript.
+// collectTrailing flushes any uncommitted audio (when server VAD didn't
+// already drain the buffer for us) and waits for every in-flight Whisper
+// turn to return. The wait is a drain loop in waitForCompletion — it
+// uses Stream.HasInflightWork as the single source of truth for "is more
+// text coming?", which subsumes the older zoo of hasTrailing /
+// partialInFlight / canSkipEmptyCommit / canSkipTrailingTimeout
+// predicates that were dropping trailing utterances when their views of
+// in-flight state disagreed.
 func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) (FinalizeResult, error) {
-	// Phase 1: drain segments that arrived between recording stop and now.
-	_, drainSpan := telemetry.StartSpan(ctx, "vocis.transcribe.drain")
-	text, err := s.drainPendingSegments(ctx, stream)
-	telemetry.EndSpan(drainSpan, err)
-	if err != nil {
-		return FinalizeResult{}, err
-	}
-
-	// If all audio was already consumed by live segments, we're done.
-	if !s.hasTrailing.Load() && strings.TrimSpace(stream.Partial()) == "" {
-		return FinalizeResult{Text: text}, nil
-	}
-
-	// Server-VAD fast-path: if the last server event was
-	// input_audio_buffer.committed and no new speech_started has fired,
-	// the backend buffer is empty and a final commit would just return
-	// "buffer too small". Short-circuit to avoid the round-trip, the log
-	// warn, and the waitForFinal stall. Only safe when there's no
-	// in-flight partial — a non-empty partial means a completed event is
-	// still owed to us.
 	pre := stream.PreCommitContext()
-	if pre.BufferDrainedByServerVAD && strings.TrimSpace(stream.Partial()) == "" {
-		return FinalizeResult{Text: text}, nil
-	}
 
-	// Phase 2: commit trailing audio and wait for the final transcript.
-	// Pad with silence first so Whisper-family models can segment the
-	// last word — without it, releasing the hotkey mid-word routinely
-	// eats the trailing word from the transcript. Traced explicitly
-	// because dumpWSFrame skips all outbound input_audio_buffer.append
-	// frames to avoid audio-chunk spam, so the append itself is
-	// invisible in the protocol log.
-	if s.tailSilenceMS > 0 {
-		sessionlog.Tracef("ws → input_audio_buffer.append (tail silence pad: %dms)", s.tailSilenceMS)
-		if err := stream.AppendSilence(ctx, s.tailSilenceMS); err != nil {
-			sessionlog.Warnf("tail silence pad failed: %v", err)
+	// Skip the commit only when the server has already drained our buffer
+	// via VAD — that's the one case where a commit would just produce a
+	// no-op "buffer too small" round-trip. Either way we still wait for
+	// any in-flight transcription to complete.
+	if !pre.BufferDrainedByServerVAD {
+		// Pad with silence first so Whisper-family models can segment
+		// the last word — without it, releasing the hotkey mid-word
+		// routinely eats the trailing word. Traced explicitly because
+		// dumpWSFrame skips outbound input_audio_buffer.append frames.
+		if s.tailSilenceMS > 0 {
+			sessionlog.Tracef("ws → input_audio_buffer.append (tail silence pad: %dms)", s.tailSilenceMS)
+			if err := stream.AppendSilence(ctx, s.tailSilenceMS); err != nil {
+				sessionlog.Warnf("tail silence pad failed: %v", err)
+			}
 		}
-	}
-	_, commitSpan := telemetry.StartSpan(ctx, "vocis.transcribe.commit",
-		attribute.Int64("commit.pending_audio_bytes", pre.AppendBytes),
-		attribute.Int64("commit.pending_audio_ms", pre.AppendApproxMs),
-		attribute.String("commit.last_inbound_type", pre.LastInboundType),
-		attribute.Int64("commit.ms_since_last_inbound", pre.MsSinceLastInbound),
-		attribute.Bool("commit.speech_stopped_seen_before_commit", pre.SpeechStoppedSeenBefore),
-		attribute.Int64("commit.ms_since_speech_stopped", pre.MsSinceSpeechStopped),
-		attribute.Int("commit.tail_silence_ms", s.tailSilenceMS),
-	)
-	err = stream.Commit(ctx)
-	if err != nil && s.canSkipEmptyCommit(err, stream) {
-		commitSpan.SetAttributes(attribute.Bool("commit.skipped", true))
+		_, commitSpan := telemetry.StartSpan(ctx, "vocis.transcribe.commit",
+			attribute.Int64("commit.pending_audio_bytes", pre.AppendBytes),
+			attribute.Int64("commit.pending_audio_ms", pre.AppendApproxMs),
+			attribute.String("commit.last_inbound_type", pre.LastInboundType),
+			attribute.Int64("commit.ms_since_last_inbound", pre.MsSinceLastInbound),
+			attribute.Bool("commit.speech_stopped_seen_before_commit", pre.SpeechStoppedSeenBefore),
+			attribute.Int64("commit.ms_since_speech_stopped", pre.MsSinceSpeechStopped),
+			attribute.Int("commit.tail_silence_ms", s.tailSilenceMS),
+		)
+		err := stream.Commit(ctx)
+		// ErrInputAudioBufferCommitEmpty just means server VAD drained
+		// the buffer between our PreCommitContext check and the commit.
+		// Not a real error — proceed to wait for any in-flight turns.
+		if err != nil && !errors.Is(err, ErrInputAudioBufferCommitEmpty) {
+			telemetry.EndSpan(commitSpan, err)
+			return FinalizeResult{}, err
+		}
+		if err != nil {
+			commitSpan.SetAttributes(attribute.Bool("commit.skipped_empty", true))
+		}
 		telemetry.EndSpan(commitSpan, nil)
-		return FinalizeResult{Text: text}, nil
-	}
-	telemetry.EndSpan(commitSpan, err)
-	if err != nil {
-		return FinalizeResult{}, err
 	}
 
 	waitStartedAt := time.Now()
@@ -958,19 +965,14 @@ func (s *DictationSession) collectTrailing(ctx context.Context, stream *Stream) 
 		attribute.Int("segment_count", int(s.segmentCount.Load())),
 	)
 	stream.SetPostCommitSpan(waitSpan, waitStartedAt)
-	finalText, err := s.waitForFinal(ctx)
+	text, err := s.waitForCompletion(ctx, stream)
 	addPostCommitAttrs(waitSpan, stream.PostCommitStats())
-	if err != nil && (s.canSkipTrailingTimeout(err, stream) || s.canSkipEmptyCommit(err, stream)) {
-		waitSpan.SetAttributes(attribute.Bool("trailing.skipped", true))
-		telemetry.EndSpan(waitSpan, nil)
-		return FinalizeResult{Text: text}, nil
-	}
 	telemetry.EndSpan(waitSpan, err)
 	if err != nil {
 		return FinalizeResult{}, err
 	}
 
-	return FinalizeResult{Text: appendSegmentText(text, finalText)}, nil
+	return FinalizeResult{Text: text}, nil
 }
 
 // addPostCommitAttrs attaches the post-commit timeline to the wait_final
@@ -1046,9 +1048,6 @@ func (s *DictationSession) run(
 			return
 		}
 		s.maybePauseCommit(ctx, stream, vad, chunk)
-		if vad == nil || vad.InSpeech() || vad.SpeechMs() > 0 {
-			s.hasTrailing.Store(true)
-		}
 	}
 
 	// Stream live audio until the samples channel closes or context cancels.
@@ -1188,16 +1187,6 @@ func (s *DictationSession) streamAudio(
 				return
 			}
 			s.maybePauseCommit(ctx, stream, vad, chunk)
-			// Mark uncommitted audio as "trailing" only when we
-			// believe it contains speech. During post-commit silence
-			// the chunks still flow to the server, but flagging them
-			// would defeat the release-time shortcut in
-			// collectTrailing, forcing a redundant final commit and
-			// wait for an (almost always empty) transcript.
-			if vad == nil || vad.InSpeech() || vad.SpeechMs() > 0 {
-				s.hasTrailing.Store(true)
-			}
-
 			// Log client VAD only on state transitions so the trace
 			// shows when speech starts/stops rather than repeating
 			// the same in_speech=true line every chunk.
@@ -1244,40 +1233,22 @@ func (s *DictationSession) consumeStreamEvents(ctx context.Context) {
 func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 	switch event.Type {
 	case StreamEventPartial:
-		// Track whether a delta is awaiting its matching
-		// transcription.completed event. Lemonade emits an empty-text
-		// partial right before the completed event to clear the
-		// preview, so the boolean tracks "delta seen, completion still
-		// owed" — read by the trailing-skipped handler below to avoid
-		// discarding an in-flight transcript when `cleared` arrives
-		// before `completed`.
-		if strings.TrimSpace(event.Text) == "" {
-			s.partialInFlight.Store(false)
-		} else {
-			s.partialInFlight.Store(true)
-		}
 		s.emitPartial(event.Text)
 		return nil
 	case StreamEventFinal:
-		s.partialInFlight.Store(false)
 		text := strings.TrimSpace(event.Text)
 		if text == "" {
 			return nil
 		}
 		if s.isHallucination(text) {
+			// Hallucinations are still real `transcription.completed`
+			// events on the wire — Stream's counter has already been
+			// decremented by the time we get here, so HasInflightWork
+			// will go false on its own and waitForCompletion's drain
+			// loop will unblock without us pushing an empty marker.
 			sessionlog.Infof("dropped hallucinated final: %q", text)
-			s.hasTrailing.Store(false)
-			// If Finalize is already waiting on the finals channel
-			// (liveSegments flipped to false), we must still push
-			// something to unblock it — otherwise waitForFinal hangs
-			// until timeout. Push an empty result so finalize returns
-			// "no speech" cleanly.
-			if !s.liveSegments.Load() {
-				s.pushFinal("", nil)
-			}
 			return nil
 		}
-		s.hasTrailing.Store(false)
 		s.lastSegmentAt.Store(time.Now().UnixNano())
 		text = s.formatSegmentText(text)
 		if s.liveSegments.Load() {
@@ -1287,34 +1258,13 @@ func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 		s.pushFinal(text, nil)
 		return nil
 	case StreamEventTrailingSkipped:
-		// Lemonade 10.3 told us the post-commit buffer was empty. If
-		// we're past Finalize (liveSegments=false), unblock waitForFinal
-		// immediately with no trailing text — the segment text already
-		// accumulated by collectTrailing is the full transcript. During
-		// recording (liveSegments=true) we ignore this signal; a stray
-		// `cleared` mid-stream shouldn't cause Finalize to skip its real
-		// commit later.
-		s.hasTrailing.Store(false)
-		if !s.liveSegments.Load() {
-			// Cleared can race a still-in-flight transcription.completed:
-			// Lemonade fires `cleared` as soon as it sees our commit
-			// against an already-VAD-consumed buffer, but the matching
-			// `completed` for the last delta may still be a few hundred
-			// ms behind. Pushing an empty final here would drop the
-			// in-flight delta entirely (observed: " would have its" was
-			// emitted as a delta but never transcribed because we
-			// finalized immediately on cleared). When a partial is still
-			// outstanding, leave the finals channel alone — waitForFinal
-			// will receive the real transcript when the completion event
-			// catches up, or fall back to its existing timeout if it
-			// never does.
-			if s.partialInFlight.Load() {
-				sessionlog.Infof("realtime: post-commit buffer cleared but partial still in flight, awaiting completion")
-				return nil
-			}
-			sessionlog.Infof("realtime: post-commit buffer cleared — no trailing transcript, finalizing immediately")
-			s.pushFinal("", nil)
-		}
+		// Diagnostic only. The server acked our commit with `cleared`
+		// (its way of saying "buffer was already drained by VAD"). The
+		// drain loop in waitForCompletion polls Stream.HasInflightWork,
+		// which captures the actual state — `cleared` itself doesn't
+		// tell us whether Whisper is still running on an earlier
+		// segment, so we must not finalize on it.
+		sessionlog.Debugf("realtime: post-commit buffer cleared (no extra audio committed)")
 		return nil
 	case StreamEventError:
 		if event.Err != nil {
@@ -1358,59 +1308,17 @@ func buildHallucinationSet(filters []string) map[string]bool {
 // Finalization helpers
 // ---------------------------------------------------------------------------
 
-// drainPendingSegments collects segment results that may have arrived between
-// the recording stopping and Finalize being called.
-func (s *DictationSession) drainPendingSegments(ctx context.Context, stream *Stream) (string, error) {
-	// Skip the wait when nothing is in flight: no Whisper turn pending
-	// AND no in-flight partial. Saves ~250ms on the common single-turn
-	// dictation case where VAD never fired before commit.
-	if !stream.HasPendingTranscription() && strings.TrimSpace(stream.Partial()) == "" {
-		return "", nil
-	}
-	timer := time.NewTimer(250 * time.Millisecond)
-	defer timer.Stop()
-
-	var text string
-	for {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-timer.C:
-			return text, nil
-		case result := <-s.finals:
-			if result.err != nil {
-				return "", result.err
-			}
-			if strings.TrimSpace(result.text) == "" {
-				continue
-			}
-			text = appendSegmentText(text, result.text)
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(250 * time.Millisecond)
-			if !s.hasTrailing.Load() && strings.TrimSpace(stream.Partial()) == "" {
-				return text, nil
-			}
-		}
-	}
-}
-
-// waitForFinal waits for the trailing transcript with a proportional timeout.
-// Three signals feed the timeout budget:
-//   - trailingDuration() / 5 — wall-clock since stream ready, useful for PTT
-//     where the user has been speaking for a while.
+// computeWaitTimeout derives the wait budget from three signals — the
+// largest wins:
+//   - trailingDuration() / 5 — wall-clock since stream ready, useful for
+//     PTT where the user has been speaking for a while.
 //   - expectedAudioMS * 10 — when the caller knows the total audio it is
 //     feeding (batch recall), scales the budget to accommodate a local
 //     model that can run at 1-5x realtime. 10x headroom keeps even a
 //     very slow backend from tripping the cap unnecessarily — user still
 //     has Ctrl-C (propagated via ctx) as the real abort path.
 //   - wait_final_seconds floor — minimum, for cold-start cases.
-// Whichever signal produces the largest value wins.
-func (s *DictationSession) waitForFinal(ctx context.Context) (string, error) {
+func (s *DictationSession) computeWaitTimeout() time.Duration {
 	timeout := s.trailingDuration() / 5
 
 	if s.expectedAudioMS > 0 {
@@ -1427,40 +1335,118 @@ func (s *DictationSession) waitForFinal(ctx context.Context) (string, error) {
 	if timeout < floor {
 		timeout = floor
 	}
+	return timeout
+}
 
-	sessionlog.Debugf("wait_final: timeout=%s (trailing=%s, expected_audio=%dms, floor=%s)",
+// waitForCompletion drains s.finals until Whisper has emitted every
+// transcript event we're owed, then returns the concatenated text.
+//
+// Replaces the previous single-shot waitForFinal, which returned on the
+// first final received. That design dropped trailing transcripts whenever
+// more than one server-VAD segment was pending at commit time (e.g. a
+// short utterance followed by another while Whisper was still processing
+// the first). The drain loop polls Stream.HasInflightWork — which counts
+// speech_started vs completed events AND tracks in-flight deltas — as
+// the single source of truth for "is more text coming?", replacing the
+// scattered hasTrailing/partialInFlight/canSkipEmptyCommit/
+// canSkipTrailingTimeout predicates the old design accumulated.
+//
+// Race-freedom: consumeStreamEvents is single-threaded. By the time a
+// final lands on s.finals, the matching counter update on Stream has
+// already happened (Stream.handleMessage updates stats *before* emitting
+// StreamEventFinal). Checking HasInflightWork right after receiving a
+// final reflects the post-update state.
+//
+// Timeout returns (text, nil): best-effort transcript. Old code returned
+// (.., context.DeadlineExceeded) and relied on canSkipTrailingTimeout to
+// suppress; the suppression layer is gone, replaced by a Warn log that
+// surfaces real hangs without surfacing benign timeouts.
+func (s *DictationSession) waitForCompletion(ctx context.Context, stream *Stream) (string, error) {
+	timeout := s.computeWaitTimeout()
+	startedAt := time.Now()
+
+	startedCount, completedCount := stream.PendingTranscriptionCounts()
+	sessionlog.Infof("wait_final: entered timeout=%s, %d/%d server-VAD segments transcribed, partial=%q",
 		timeout.Round(100*time.Millisecond),
-		s.trailingDuration().Round(100*time.Millisecond),
-		s.expectedAudioMS, floor)
+		completedCount, startedCount, stream.Partial())
 
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	select {
-	case <-waitCtx.Done():
-		return "", waitCtx.Err()
-	case result := <-s.finals:
-		if result.err != nil {
-			return "", result.err
+	var combined string
+	var drainedSegments int
+
+	// applyResult merges a final into combined. Returns true if the loop
+	// should bail out: either we hit a fatal error and have no text to
+	// salvage, or we received a connection-error after already
+	// accumulating text (in which case we return the text and log).
+	applyResult := func(r finalResult) (done bool, retErr error) {
+		if r.err != nil {
+			if combined != "" {
+				sessionlog.Warnf("wait_final: stream error after partial drain (%v); returning %d-char text", r.err, len(combined))
+				return true, nil
+			}
+			return true, r.err
 		}
-		return strings.TrimSpace(result.text), nil
+		combined = appendSegmentText(combined, r.text)
+		drainedSegments++
+		started, completed := stream.PendingTranscriptionCounts()
+		sessionlog.Infof("wait_final: drained segment %d (%d chars total), %d/%d server-VAD segments transcribed, partial=%q",
+			drainedSegments, len(combined), completed, started, stream.Partial())
+		return false, nil
 	}
-}
 
-// canSkipEmptyCommit returns true when a commit-empty error is expected
-// because all audio was consumed by live segments.
-func (s *DictationSession) canSkipEmptyCommit(err error, stream *Stream) bool {
-	return errors.Is(err, ErrInputAudioBufferCommitEmpty) &&
-		int(s.segmentCount.Load()) > 0 &&
-		strings.TrimSpace(stream.Partial()) == ""
-}
+	exit := func(reason string) {
+		started, completed := stream.PendingTranscriptionCounts()
+		sessionlog.Infof("wait_final: exiting (%s) after %s, drained %d segments → %d chars, %d/%d server-VAD segments transcribed, partial=%q",
+			reason,
+			time.Since(startedAt).Round(time.Millisecond),
+			drainedSegments, len(combined),
+			completed, started, stream.Partial())
+	}
 
-// canSkipTrailingTimeout returns true when a trailing timeout is acceptable
-// because we already have segment text and no partial is in flight.
-func (s *DictationSession) canSkipTrailingTimeout(err error, stream *Stream) bool {
-	return errors.Is(err, context.DeadlineExceeded) &&
-		int(s.segmentCount.Load()) > 0 &&
-		strings.TrimSpace(stream.Partial()) == ""
+	for {
+		// Drain anything immediately buffered.
+		drainedOne := true
+		for drainedOne {
+			drainedOne = false
+			select {
+			case r := <-s.finals:
+				done, err := applyResult(r)
+				if done {
+					exit("error")
+					return combined, err
+				}
+				drainedOne = true
+			default:
+			}
+		}
+
+		// All counters reflect events processed so far. If nothing's in
+		// flight, we have everything — return.
+		if !stream.HasInflightWork() {
+			exit("no in-flight work")
+			return combined, nil
+		}
+
+		// Wait for the next event or the timeout.
+		select {
+		case r := <-s.finals:
+			done, err := applyResult(r)
+			if done {
+				exit("error")
+				return combined, err
+			}
+		case <-waitCtx.Done():
+			started, completed := stream.PendingTranscriptionCounts()
+			if stream.HasInflightWork() {
+				sessionlog.Warnf("wait_final: timed out with %d-char text, work still in flight (server-VAD=%d/%d, partial=%q)",
+					len(combined), completed, started, stream.Partial())
+			}
+			exit("timeout")
+			return combined, nil
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
