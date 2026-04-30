@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -60,10 +59,14 @@ func Init(ctx context.Context, cfg config.TelemetryConfig, version string) (func
 		return nil, err
 	}
 
+	// Per-trace batching: hold child spans in memory until their
+	// root ends, then export the whole trace in a single batch. See
+	// processor.go for the rationale — TL;DR, the SDK's default
+	// BatchSpanProcessor flushes children before long-lived parents
+	// finish, which causes Jaeger to log "parent span ID=N is not
+	// in the trace" warnings on every child span and persist them.
 	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter,
-			sdktrace.WithBatchTimeout(2*time.Second),
-		),
+		sdktrace.WithSpanProcessor(newTraceBatchProcessor(exporter)),
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(tp)

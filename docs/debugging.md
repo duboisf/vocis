@@ -36,6 +36,8 @@ If an event is filtered from the existing trace machinery (e.g. `dumpWSFrame` sk
 
 When `telemetry.enabled: true` in the config, OpenTelemetry spans are exported via OTLP/gRPC to `telemetry.endpoint` (default `localhost:4317`). Jaeger UI is at `http://localhost:16686`.
 
+Spans are buffered per-trace and flushed as one batch when the trace's root span ends (see `internal/telemetry/processor.go`). This is unlike the SDK's default `BatchSpanProcessor`, which flushes every 2 s and would cause Jaeger to log `"parent span ID=N is not in the trace; skipping clock skew adjustment"` warnings on every child of a long-lived root (`vocis.dictation`, `vocis.transcribe.session`, `vocis.transcribe.finalize`) — short children flush before their parent finishes, the collector's adjuster sees them parentless, and the warning is persisted on the child span. Ending a trace's root flushes the entire trace in one wire batch so Jaeger always sees the parent. Process exit must call `Shutdown` (already deferred by the entry-point) or in-flight traces are lost.
+
 ### Fetching traces via the API
 
 Fetch a specific trace by ID:
