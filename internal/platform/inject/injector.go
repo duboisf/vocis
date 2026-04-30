@@ -30,14 +30,18 @@ type Injector struct {
 	compositor  platform.Compositor
 	releaseKeys []string
 
-	// kittyFocusedID / kittyExists / kittySendText / kittySendEnter are
-	// seams for tests so we don't have to shell out to a real kitty
-	// during unit tests. The default implementations call the kitty
-	// package directly.
-	kittyFocusedID func(ctx context.Context) (string, error)
-	kittyExists    func(ctx context.Context, id string) (bool, error)
-	kittySendText  func(ctx context.Context, id, text string) error
-	kittySendEnter func(ctx context.Context, id string) error
+	// kittyFocusedID / kittyExists / kittySendText / kittySendEnter /
+	// kittyLookupWindow are seams for tests so we don't have to shell
+	// out to a real kitty during unit tests. The default
+	// implementations call the kitty package directly. LookupWindow is
+	// purely diagnostic — used to log capture-time and post-send
+	// snapshots of the target window's title and foreground process
+	// for later triage.
+	kittyFocusedID    func(ctx context.Context) (string, error)
+	kittyExists       func(ctx context.Context, id string) (bool, error)
+	kittySendText     func(ctx context.Context, id, text string) error
+	kittySendEnter    func(ctx context.Context, id string) error
+	kittyLookupWindow func(ctx context.Context, id string) (*kitty.WindowInfo, error)
 
 	mu           sync.Mutex
 	restoreTimer *time.Timer
@@ -49,13 +53,14 @@ type Injector struct {
 // dictation rather than a generic full-modifier sweep.
 func New(cfg config.InsertionConfig, compositor platform.Compositor, shortcut string) *Injector {
 	inj := &Injector{
-		cfg:            cfg,
-		compositor:     compositor,
-		releaseKeys:    defaultReleaseKeys(),
-		kittyFocusedID: kitty.FocusedWindowID,
-		kittyExists:    kitty.Exists,
-		kittySendText:  kitty.SendText,
-		kittySendEnter: kitty.SendEnter,
+		cfg:               cfg,
+		compositor:        compositor,
+		releaseKeys:       defaultReleaseKeys(),
+		kittyFocusedID:    kitty.FocusedWindowID,
+		kittyExists:       kitty.Exists,
+		kittySendText:     kitty.SendText,
+		kittySendEnter:    kitty.SendEnter,
+		kittyLookupWindow: kitty.LookupWindow,
 	}
 	if strings.TrimSpace(shortcut) != "" {
 		if names, err := hotkey.ReleaseKeyNames(shortcut); err == nil {
@@ -67,14 +72,15 @@ func New(cfg config.InsertionConfig, compositor platform.Compositor, shortcut st
 	return inj
 }
 
-// KittyHooks groups the four kitty CLI shell-outs the injector uses,
-// so tests can swap them all at once via SetKittyHooks. Any field
-// left nil keeps the Injector's existing implementation for that hook.
+// KittyHooks groups the kitty CLI shell-outs the injector uses, so
+// tests can swap them all at once via SetKittyHooks. Any field left
+// nil keeps the Injector's existing implementation for that hook.
 type KittyHooks struct {
-	FocusedID func(ctx context.Context) (string, error)
-	Exists    func(ctx context.Context, id string) (bool, error)
-	SendText  func(ctx context.Context, id, text string) error
-	SendEnter func(ctx context.Context, id string) error
+	FocusedID    func(ctx context.Context) (string, error)
+	Exists       func(ctx context.Context, id string) (bool, error)
+	SendText     func(ctx context.Context, id, text string) error
+	SendEnter    func(ctx context.Context, id string) error
+	LookupWindow func(ctx context.Context, id string) (*kitty.WindowInfo, error)
 }
 
 // SetKittyHooks swaps the kitty CLI shell-outs for fakes — used by
@@ -93,6 +99,60 @@ func (i *Injector) SetKittyHooks(h KittyHooks) {
 	if h.SendEnter != nil {
 		i.kittySendEnter = h.SendEnter
 	}
+	if h.LookupWindow != nil {
+		i.kittyLookupWindow = h.LookupWindow
+	}
+}
+
+// logKittyWindowSnapshot fetches a fresh `kitty @ ls --match id:N`
+// snapshot and writes it to the session log under the given phase
+// label ("capture" or "post-send"). Diagnostic only — failures to
+// fetch are themselves logged but never propagated, so a kitty CLI
+// hiccup never derails dictation.
+func (i *Injector) logKittyWindowSnapshot(ctx context.Context, phase, id string) {
+	if i.kittyLookupWindow == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	info, err := i.kittyLookupWindow(ctx, id)
+	if err != nil {
+		sessionlog.Debugf("kitty %s lookup id=%s failed: %v", phase, id, err)
+		return
+	}
+	if info == nil {
+		// Tells us the window was closed at this phase — important
+		// signal for "post-send" because send-text exits 0 even when
+		// the match set is empty.
+		sessionlog.Warnf("kitty %s lookup id=%s: no matching window (closed at this phase)",
+			phase, id)
+		return
+	}
+	sessionlog.Infof(
+		"kitty %s state: id=%d title=%q foreground=%q pid=%d (focused=%t active=%t alt_screen=%t at_prompt=%t)",
+		phase, info.ID, info.Title, info.ForegroundCmd, info.ForegroundPID,
+		info.IsFocused, info.IsActive, info.InAlternateScreen, info.AtPrompt,
+	)
+}
+
+// logKittyPayloadPreview writes a single Debugf line summarizing the
+// bytes about to be handed to `kitty @ send-text`: total length,
+// counts of newline/CR (which interact with bracketed-paste mode),
+// and a short head/tail of the actual payload. Lets a future
+// transcript-disappeared report be diffed byte-shape against what
+// the receiving program actually got.
+func logKittyPayloadPreview(id, text string) {
+	const previewWindow = 80
+	head := text
+	if len(head) > previewWindow {
+		head = head[:previewWindow]
+	}
+	tail := ""
+	if len(text) > previewWindow*2 {
+		tail = text[len(text)-previewWindow:]
+	}
+	sessionlog.Debugf(
+		"kitty send-text id=%s payload: length=%d newlines=%d cr=%d head=%q tail=%q",
+		id, len(text), strings.Count(text, "\n"), strings.Count(text, "\r"), head, tail,
+	)
 }
 
 // CaptureTarget proxies to the compositor and tags the span with where
@@ -129,6 +189,7 @@ func (i *Injector) CaptureTarget(ctx context.Context) (platform.Target, error) {
 	target.KittyWindowID = id
 	sessionlog.Infof("captured kitty window id=%s for OS window=%s class=%q",
 		id, target.WindowID, target.WindowClass)
+	i.logKittyWindowSnapshot(ctx, "capture", id)
 	return target, nil
 }
 
@@ -213,6 +274,7 @@ func (i *Injector) deliverViaKittyDirect(ctx context.Context, target platform.Ta
 		}
 		return false, platform.ErrTargetGone
 	}
+	logKittyPayloadPreview(target.KittyWindowID, text)
 	if err := i.kittySendText(ctx, target.KittyWindowID, text); err != nil {
 		span.SetAttributes(attribute.String("kitty.send_text.error", err.Error()))
 		sessionlog.Warnf("kitty send-text id=%s failed (%v) — falling back to OS-window focus + paste",
@@ -221,6 +283,12 @@ func (i *Injector) deliverViaKittyDirect(ctx context.Context, target platform.Ta
 	}
 	sessionlog.Infof("delivered %d-char transcript to kitty window id=%s via send-text (no focus change)",
 		len(text), target.KittyWindowID)
+	// Re-probe AFTER send-text. send-text exits 0 even when the match
+	// set is empty (per kitty docs), so a "delivered" log without a
+	// matching post-send snapshot tells us the text vanished into a
+	// closed/replaced window — the smoking gun for "transcript
+	// disappeared" reports.
+	i.logKittyWindowSnapshot(ctx, "post-send", target.KittyWindowID)
 	span.SetAttributes(attribute.Bool("kitty.delivered", true))
 	return true, nil
 }

@@ -9,7 +9,16 @@ import (
 
 	"vocis/internal/config"
 	"vocis/internal/platform"
+	"vocis/internal/platform/kitty"
 )
+
+// noLookupWindow is a no-op LookupWindow stub used by tests that
+// exercise the kitty path but don't care about the diagnostic
+// snapshot — keeps the tests from accidentally shelling out to a
+// real kitty CLI.
+func noLookupWindow(_ context.Context, _ string) (*kitty.WindowInfo, error) {
+	return nil, nil
+}
 
 // fakeCompositor records every call as a single string for ordering
 // assertions. It returns the canned clipboard value when GetClipboard is
@@ -232,7 +241,8 @@ func TestCaptureTargetEnrichesKittyWindow(t *testing.T) {
 	fc := &fakeKittyCompositor{class: "kitty"}
 	inj := New(cfg, fc, "")
 	inj.SetKittyHooks(KittyHooks{
-		FocusedID: func(ctx context.Context) (string, error) { return "91", nil },
+		FocusedID:    func(ctx context.Context) (string, error) { return "91", nil },
+		LookupWindow: noLookupWindow,
 	})
 
 	target, err := inj.CaptureTarget(context.Background())
@@ -307,6 +317,7 @@ func TestInsertUsesKittySendTextWithoutFocusChange(t *testing.T) {
 			sentTo, sentText = id, text
 			return nil
 		},
+		LookupWindow: noLookupWindow,
 	})
 
 	target := platform.Target{WindowID: "42", WindowClass: "kitty", KittyWindowID: "91"}
@@ -440,6 +451,51 @@ func TestInsertFallsBackWhenKittySendTextErrors(t *testing.T) {
 	}
 	if !foundActivate {
 		t.Fatalf("expected fallback to compositor.ActivateWindow when kitty send-text fails; calls=%v", calls)
+	}
+}
+
+// TestKittyLookupWindowCalledAtCaptureAndPostSend locks down the
+// observability contract: when a kitty target is in play, the
+// injector MUST invoke LookupWindow once at capture (so the session
+// log records the window's title + foreground process at recording
+// start) and once again after a successful send-text (so a later
+// "transcript disappeared" report can compare the post-send state to
+// what was captured). Without this, the session log can't tell us
+// whether the window changed identity between capture and delivery.
+func TestKittyLookupWindowCalledAtCaptureAndPostSend(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.Mode = "clipboard"
+	cfg.KittyRemoteControl = true
+	fc := &fakeKittyCompositor{class: "kitty"}
+	inj := New(cfg, fc, "")
+
+	var lookups []string
+	inj.SetKittyHooks(KittyHooks{
+		FocusedID: func(_ context.Context) (string, error) { return "91", nil },
+		Exists:    func(_ context.Context, _ string) (bool, error) { return true, nil },
+		SendText:  func(_ context.Context, _, _ string) error { return nil },
+		LookupWindow: func(_ context.Context, id string) (*kitty.WindowInfo, error) {
+			lookups = append(lookups, id)
+			return &kitty.WindowInfo{ID: 91, Title: "claude", ForegroundCmd: "claude"}, nil
+		},
+	})
+
+	target, err := inj.CaptureTarget(context.Background())
+	if err != nil {
+		t.Fatalf("CaptureTarget: %v", err)
+	}
+	if err := inj.Insert(context.Background(), target, "diag"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if len(lookups) != 2 {
+		t.Fatalf("LookupWindow called %d times (%v), want exactly 2 (capture + post-send)", len(lookups), lookups)
+	}
+	for i, id := range lookups {
+		if id != "91" {
+			t.Fatalf("LookupWindow call #%d had id=%q, want \"91\"", i, id)
+		}
 	}
 }
 

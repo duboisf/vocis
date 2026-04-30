@@ -113,3 +113,86 @@ type stringErr string
 func (e stringErr) Error() string { return string(e) }
 
 func errFromString(s string) error { return stringErr(s) }
+
+// TestFindWindow_ReturnsFlattenedSnapshot verifies that findWindow
+// walks the kitty @ ls JSON tree and returns the matching window's
+// title + foreground process info. This is the diagnostic data the
+// inject layer logs at capture and post-send to triage "transcript
+// disappeared" reports — if the parsing breaks, those logs go silent.
+func TestFindWindow_ReturnsFlattenedSnapshot(t *testing.T) {
+	t.Parallel()
+	oss := []osWin{
+		{
+			ID: 1, IsFocused: true, IsActive: true,
+			Tabs: []kittyTab{
+				{
+					ID: 1, IsFocused: true, IsActive: true,
+					Windows: []kittyWin{
+						{
+							ID: 4, IsFocused: true, IsActive: true,
+							Title: "claude — vocis",
+							ForegroundProcesses: []kittyProcess{
+								{Cmdline: []string{"claude", "--resume"}, PID: 12345, Cwd: "/home/fred/git/vocis"},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	got := findWindow(oss, "4")
+	if got == nil {
+		t.Fatal("findWindow(_, \"4\") = nil, want a snapshot")
+	}
+	if got.ID != 4 {
+		t.Errorf("ID = %d, want 4", got.ID)
+	}
+	if got.Title != "claude — vocis" {
+		t.Errorf("Title = %q, want %q", got.Title, "claude — vocis")
+	}
+	if got.ForegroundCmd != "claude --resume" {
+		t.Errorf("ForegroundCmd = %q, want %q", got.ForegroundCmd, "claude --resume")
+	}
+	if got.ForegroundPID != 12345 {
+		t.Errorf("ForegroundPID = %d, want 12345", got.ForegroundPID)
+	}
+	if !got.IsFocused {
+		t.Errorf("IsFocused = false, want true")
+	}
+}
+
+func TestFindWindow_NoMatchReturnsNil(t *testing.T) {
+	t.Parallel()
+	oss := []osWin{
+		{
+			Tabs: []kittyTab{
+				{Windows: []kittyWin{{ID: 4, Title: "shell"}}},
+			},
+		},
+	}
+	if got := findWindow(oss, "99"); got != nil {
+		t.Fatalf("findWindow(_, \"99\") = %+v, want nil for no matching id", got)
+	}
+}
+
+// TestFindWindow_EmptyForegroundProcesses ensures the snapshot stays
+// well-formed (empty cmd, zero pid) when kitty reports a window with
+// no foreground processes — e.g. a freshly-detached pty. We must not
+// panic indexing into an empty slice.
+func TestFindWindow_EmptyForegroundProcesses(t *testing.T) {
+	t.Parallel()
+	oss := []osWin{
+		{
+			Tabs: []kittyTab{
+				{Windows: []kittyWin{{ID: 7, Title: "scratch"}}},
+			},
+		},
+	}
+	got := findWindow(oss, "7")
+	if got == nil {
+		t.Fatal("findWindow returned nil for matching id")
+	}
+	if got.ForegroundCmd != "" || got.ForegroundPID != 0 {
+		t.Fatalf("expected zero-valued foreground fields, got cmd=%q pid=%d", got.ForegroundCmd, got.ForegroundPID)
+	}
+}

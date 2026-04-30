@@ -56,10 +56,54 @@ type kittyTab struct {
 }
 
 type kittyWin struct {
-	ID        int    `json:"id"`
-	IsFocused bool   `json:"is_focused"`
-	IsActive  bool   `json:"is_active"`
-	Title     string `json:"title"`
+	ID                  int            `json:"id"`
+	IsFocused           bool           `json:"is_focused"`
+	IsActive            bool           `json:"is_active"`
+	Title               string         `json:"title"`
+	ForegroundProcesses []kittyProcess `json:"foreground_processes"`
+	// InAlternateScreen is true when the foreground program has
+	// switched the terminal to its alternate screen buffer (vim,
+	// less, fzf, btop, claude-code's full-screen modes, etc.).
+	// Programs in alt-screen frequently handle bracketed paste
+	// differently — some swallow it silently, some require a key
+	// event to render — so this is the single highest-signal field
+	// for "transcript-disappeared" triage.
+	InAlternateScreen bool `json:"in_alternate_screen"`
+	// AtPrompt requires kitty's shell-integration to be active in
+	// the foreground program. When true, the cursor is sitting at a
+	// shell prompt ready for input; when false the program is
+	// running a command (or shell integration just isn't installed).
+	// Useful but optional — log it when present.
+	AtPrompt bool `json:"at_prompt"`
+}
+
+// kittyProcess mirrors one entry of `kitty @ ls`'s `foreground_processes`
+// array — the running program(s) attached to a window's pty. Used only
+// for diagnostic logging (no decisions branch on it) so we keep just
+// enough fields to identify what was running when a paste was sent.
+type kittyProcess struct {
+	Cmdline []string `json:"cmdline"`
+	PID     int      `json:"pid"`
+	Cwd     string   `json:"cwd"`
+}
+
+// WindowInfo is a point-in-time snapshot of a single kitty window's
+// state. The inject layer logs one of these at capture time and again
+// after `kitty @ send-text` succeeds, so a future "transcript
+// disappeared" report can be triaged off the actual session log
+// without re-running the bug — we can see whether the title or
+// foreground process changed between capture and delivery, whether
+// the window was still focused, and what program was meant to receive
+// the paste.
+type WindowInfo struct {
+	ID                int
+	Title             string
+	IsFocused         bool
+	IsActive          bool
+	InAlternateScreen bool   // see kittyWin.InAlternateScreen
+	AtPrompt          bool   // see kittyWin.AtPrompt
+	ForegroundCmd     string // joined cmdline of the first foreground process; empty when kitty reports none
+	ForegroundPID     int
 }
 
 // FocusedWindowID returns the stable kitty window id that currently has
@@ -133,6 +177,80 @@ func pickFocused(oss []osWin) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// LookupWindow returns a diagnostic snapshot of the kitty window with
+// the given internal id, or (nil, nil) when kitty replies with no
+// match (the window was closed). A non-nil error means the kitty CLI
+// itself failed (binary missing, no socket, remote control disabled,
+// JSON parse error). This is purely observability — no decision
+// branches on the returned data — so the inject layer treats any
+// failure as "skip the diagnostic, keep going" rather than fatal.
+func LookupWindow(ctx context.Context, id string) (*WindowInfo, error) {
+	if strings.TrimSpace(id) == "" {
+		return nil, fmt.Errorf("empty kitty window id")
+	}
+	ctx, span := telemetry.StartSpan(ctx, "vocis.kitty.lookup_window",
+		attribute.String("kitty.window_id", id),
+	)
+	var rerr error
+	defer func() { telemetry.EndSpan(span, rerr) }()
+
+	out, err := run(ctx, "kitty", "@", "ls", "--match", "id:"+id)
+	if err != nil {
+		if isNoMatchError(err) {
+			span.SetAttributes(attribute.Bool("kitty.no_match", true))
+			return nil, nil
+		}
+		rerr = err
+		return nil, err
+	}
+	var oss []osWin
+	if err := json.Unmarshal([]byte(out), &oss); err != nil {
+		rerr = fmt.Errorf("parse kitty @ ls JSON: %w", err)
+		return nil, rerr
+	}
+	info := findWindow(oss, id)
+	if info == nil {
+		span.SetAttributes(attribute.Bool("kitty.no_match", true))
+		return nil, nil
+	}
+	span.SetAttributes(
+		attribute.String("kitty.title", info.Title),
+		attribute.String("kitty.foreground_cmd", info.ForegroundCmd),
+		attribute.Bool("kitty.is_focused", info.IsFocused),
+	)
+	return info, nil
+}
+
+// findWindow walks a parsed `kitty @ ls` tree for the window whose
+// integer id matches the string-form id passed in, returning a
+// flattened snapshot. Extracted from LookupWindow so the JSON-walking
+// can be unit-tested without shelling out to a real kitty.
+func findWindow(oss []osWin, id string) *WindowInfo {
+	for _, os := range oss {
+		for _, t := range os.Tabs {
+			for _, w := range t.Windows {
+				if strconv.Itoa(w.ID) != id {
+					continue
+				}
+				info := &WindowInfo{
+					ID:                w.ID,
+					Title:             w.Title,
+					IsFocused:         w.IsFocused,
+					IsActive:          w.IsActive,
+					InAlternateScreen: w.InAlternateScreen,
+					AtPrompt:          w.AtPrompt,
+				}
+				if len(w.ForegroundProcesses) > 0 {
+					info.ForegroundPID = w.ForegroundProcesses[0].PID
+					info.ForegroundCmd = strings.Join(w.ForegroundProcesses[0].Cmdline, " ")
+				}
+				return info
+			}
+		}
+	}
+	return nil
 }
 
 // Exists reports whether a kitty window with the given internal id is
