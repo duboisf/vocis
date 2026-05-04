@@ -210,7 +210,6 @@ type TranscriptionConfig struct {
 	Project      string   `yaml:"project"`
 	Language     string   `yaml:"language"`
 	PromptHint   string   `yaml:"prompt_hint"`
-	Vocabulary   []string `yaml:"vocabulary"`
 	// RequestLimit is the HTTP request timeout (seconds) applied to the
 	// transcription SDK client. Gates postprocess `/chat/completions`
 	// and any OpenAI REST calls (ephemeral client_secret mint). Set to
@@ -298,7 +297,6 @@ type InsertionConfig struct {
 	Mode             string   `yaml:"mode"`
 	DefaultPasteKey  string   `yaml:"default_paste_key"`
 	TerminalPasteKey string   `yaml:"terminal_paste_key"`
-	TypeDelayMS      int      `yaml:"type_delay_ms"`
 	RestoreClipboard bool     `yaml:"restore_clipboard"`
 	TerminalClasses  []string `yaml:"terminal_classes"`
 	// AutoSubmit defaults every dictation to "submit mode" — after the
@@ -359,13 +357,12 @@ type OverlayListen struct {
 }
 
 type OverlayFinish struct {
-	Title          string `yaml:"title"`
-	CancelHint     string `yaml:"cancel_hint"`
-	WrappingUp     string `yaml:"wrapping_up"`
-	PostProcessing string `yaml:"post_processing"`
-	PPWait         string `yaml:"pp_wait"`
-	PPStream       string `yaml:"pp_stream"`
-	PhaseDone      string `yaml:"phase_done"`
+	Title      string `yaml:"title"`
+	CancelHint string `yaml:"cancel_hint"`
+	WrappingUp string `yaml:"wrapping_up"`
+	PPWait     string `yaml:"pp_wait"`
+	PPStream   string `yaml:"pp_stream"`
+	PhaseDone  string `yaml:"phase_done"`
 }
 
 type OverlaySuccess struct {
@@ -400,11 +397,6 @@ func Default() Config {
 			Model:        "whisper-v3-turbo-FLM",
 			PromptHint:   DefaultPromptHint,
 			RequestLimit: 45,
-			Vocabulary: []string{
-				"OpenAI",
-				"GPT",
-				"Vocis",
-			},
 			HallucinationFilters: []string{
 				"Thank you.",
 				"Thanks.",
@@ -463,7 +455,6 @@ func Default() Config {
 			Mode:             "auto",
 			DefaultPasteKey:  "ctrl+v",
 			TerminalPasteKey: "ctrl+shift+v",
-			TypeDelayMS:      1,
 			RestoreClipboard: true,
 			TerminalClasses: []string{
 				"Alacritty",
@@ -499,13 +490,12 @@ func Default() Config {
 				LoadingModel: "○ Loading {model}...",
 			},
 			Finishing: OverlayFinish{
-				Title:          "Finishing",
-				CancelHint:     "— press {shortcut} to cancel",
-				WrappingUp:     "Wrapping up",
-				PostProcessing: "Post-processing",
-				PPWait:         "Wait",
-				PPStream:       "Stream",
-				PhaseDone:      "done",
+				Title:      "Finishing",
+				CancelHint: "— press {shortcut} to cancel",
+				WrappingUp: "Wrapping up",
+				PPWait:     "Wait",
+				PPStream:   "Stream",
+				PhaseDone:  "done",
 			},
 			Success: OverlaySuccess{
 				Title:    "Typed",
@@ -730,10 +720,6 @@ func (c Config) Validate() error {
 	case "auto", "clipboard", "type":
 	default:
 		return fmt.Errorf("insertion.mode must be auto, clipboard, or type")
-	}
-
-	if c.Insertion.TypeDelayMS < 0 || c.Insertion.TypeDelayMS > 1000 {
-		return errors.New("insertion.type_delay_ms must be between 0 and 1000")
 	}
 
 	if c.Recording.SampleRate <= 0 || c.Recording.SampleRate > 48000 {

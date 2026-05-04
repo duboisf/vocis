@@ -118,7 +118,7 @@ When `vocis serve` runs:
 
 ## Config Reload
 
-Config is reloaded at the start of each recording. This allows changes to vocabulary, prompt hints, streaming settings, recording settings, and post-processing to take effect without restarting vocis. The OpenAI client is recreated with the new config on each reload.
+Config is reloaded at the start of each recording. This allows changes to prompt hints, streaming settings, recording settings, and post-processing to take effect without restarting vocis. The OpenAI client is recreated with the new config on each reload.
 
 ## Record Start
 

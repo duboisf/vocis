@@ -28,12 +28,6 @@ transcription:
     Prefer technical terminology for software, CLI, cloud, and API concepts.
     Preserve obvious technical terms, acronyms, and capitalization when the
     audio supports them.
-  vocabulary:
-    - OpenAI
-    - GPT
-    - Vocis
-    - ffmpeg
-    - xdotool
   request_timeout_seconds: 45
   # Drop finals whose trimmed text exactly matches one of these
   # (case-insensitive). Whisper and Gemma-FLM routinely hallucinate
@@ -126,7 +120,6 @@ insertion:
   mode: auto
   default_paste_key: ctrl+v
   terminal_paste_key: ctrl+shift+v
-  type_delay_ms: 1
   restore_clipboard: true
   # auto_submit: always press Enter after pasting the transcript.
   # Useful when dictating into chat-style inputs that send on Enter.
@@ -182,10 +175,9 @@ overlay:
     title: Finishing
     cancel_hint: "— press {shortcut} to cancel"
     wrapping_up: Wrapping up
-    post_processing: Post-processing
     # pp_wait / pp_stream are the postprocess phase labels appended to
-    # post_processing while the LLM is thinking — pp_wait shows until
-    # the first token arrives, then pp_stream until completion.
+    # the wrapping-up text while the LLM is thinking — pp_wait shows
+    # until the first token arrives, then pp_stream until completion.
     pp_wait: Wait
     pp_stream: Stream
     phase_done: done
