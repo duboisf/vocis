@@ -118,7 +118,25 @@ When `vocis serve` runs:
 
 ## Config Reload
 
-Config is reloaded at the start of each recording. This allows changes to prompt hints, streaming settings, recording settings, and post-processing to take effect without restarting vocis. The OpenAI client is recreated with the new config on each reload.
+`vocis serve` re-reads `~/.config/vocis/config.yaml` at the start of every dictation, just before the mic opens (`App.reloadConfig` in `internal/app/app.go`). The reload is partial — only the sections used by the per-dictation pipeline are refreshed; everything wired up at process start stays pinned.
+
+**Refreshed on every hotkey press (no restart needed):**
+
+- `transcription.*` — backend, base_url, realtime_url, model, language, prompt_hint, request_timeout_seconds, hallucination_filters, organization, project. The transcribe `Client` is rebuilt so a new API key/SDK option set takes effect.
+- `recording.*` — device, sample_rate, channels, max_duration_seconds, duck_volume.
+- `streaming.*` — manual_commit, client_vad, threshold/silence_duration_ms/prefix_padding_ms, min_utterance_ms, wait_final_seconds, tail_silence_ms, noise_reduction, onnxruntime_library, show_partial_overlay.
+- `postprocess.*` — enabled, model, **prompt**, min_word_count, timeouts, sampling knobs (temperature, top_p, min_p, frequency/presence/repetition penalties, stop).
+- `log_window_title`.
+
+**Pinned at `vocis serve` startup (require restart to change):**
+
+- `hotkey`, `hotkey_mode` — registered with the OS once.
+- `insertion.*` — paste keys, terminal_classes, auto_submit, kitty_remote_control. The `Injector` is constructed once in `cmd/vocis/serve.go`.
+- `overlay.*` — window dimensions, opacity, font, all the overlay copy strings. The X11 overlay window is created once at startup.
+- `telemetry.*` — exporter is initialized once.
+- `speak.*` — only consulted by the separate `vocis speak` command, not by `serve`.
+
+**Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*`, `streaming.*`, and `postprocess.*` blocks the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands do load fresh config on each invocation, so cli-side knobs like `recall.batch_gap_ms` are picked up immediately.
 
 ## Record Start
 
