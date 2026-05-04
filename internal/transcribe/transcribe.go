@@ -1258,10 +1258,21 @@ func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 		if s.isHallucination(text) {
 			// Hallucinations are still real `transcription.completed`
 			// events on the wire — Stream's counter has already been
-			// decremented by the time we get here, so HasInflightWork
-			// will go false on its own and waitForCompletion's drain
-			// loop will unblock without us pushing an empty marker.
+			// updated by the time we get here, so HasInflightWork
+			// reflects the post-update state. But waitForCompletion's
+			// drain loop only re-checks HasInflightWork at the TOP of
+			// each iteration, after either receiving on s.finals or
+			// the timeout firing — so if a hallucination is the LAST
+			// in-flight transcript, the select sleeps for the full
+			// wait_final_seconds timeout instead of exiting promptly
+			// (observed as a 15 s "Wrapping up..." stall in session
+			// 20260430-154129). Push an empty marker during finalize
+			// to wake the select; applyResult's appendSegmentText is a
+			// no-op on empty text so the drained-text stays clean.
 			sessionlog.Infof("dropped hallucinated final: %q", text)
+			if !s.liveSegments.Load() {
+				s.pushFinal("", nil)
+			}
 			return nil
 		}
 		s.lastSegmentAt.Store(time.Now().UnixNano())

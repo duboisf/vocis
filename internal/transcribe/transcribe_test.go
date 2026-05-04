@@ -494,14 +494,26 @@ func TestDictationSessionDropsHallucinatedFinal(t *testing.T) {
 	}
 }
 
-// TestDictationSessionHallucinationAfterFinalizeDoesNotPush pins the
-// post-refactor behavior: waitForCompletion polls Stream.HasInflightWork
-// instead of blocking on s.finals indefinitely, so dropping a
-// hallucination no longer needs to push an empty marker to unblock the
-// waiter. The handler should silently drop and let the drain loop
-// observe the (already-decremented) pending counter on the next
-// iteration.
-func TestDictationSessionHallucinationAfterFinalizeDoesNotPush(t *testing.T) {
+// TestDictationSessionHallucinationAfterFinalizePushesEmptyMarker
+// reproduces the timeout bug observed in session 20260430-154129 (the
+// "Hey, by the way..." dictation): when Whisper transcribes the last
+// server-VAD segment as a stock filter phrase like "Thank you.",
+// handleStreamEvent must push an empty finalResult so that
+// waitForCompletion's blocking select wakes up and observes
+// HasInflightWork going false on the next iteration. Without the
+// nudge, the wait loop sleeps until its full wait_final_seconds
+// timeout (15 s in the user's session log) — paying a perceptible
+// "Wrapping up..." stall on every dictation that ends in a
+// hallucination-shaped trailing segment.
+//
+// An earlier version of this test asserted the OPPOSITE — that no
+// marker should be pushed because "the drain loop polls
+// HasInflightWork." That assumption was wrong: the drain loop only
+// polls HasInflightWork at the TOP of each iteration, after either
+// receiving on s.finals or the timeout firing. With nothing on
+// s.finals, the select sleeps for the full timeout. The fix and the
+// test were inverted together.
+func TestDictationSessionHallucinationAfterFinalizePushesEmptyMarker(t *testing.T) {
 	t.Parallel()
 
 	session := &DictationSession{
@@ -516,8 +528,74 @@ func TestDictationSessionHallucinationAfterFinalizeDoesNotPush(t *testing.T) {
 	}
 	select {
 	case r := <-session.finals:
-		t.Fatalf("hallucination after Finalize leaked as final %+v — the drain loop should rely on HasInflightWork, not an empty push", r)
+		if r.err != nil || strings.TrimSpace(r.text) != "" {
+			t.Fatalf("hallucination drop pushed non-empty marker %+v — should be empty (text=\"\", err=nil) so applyResult is a no-op", r)
+		}
 	default:
+		t.Fatal("hallucination drop in post-finalize phase did NOT push an empty marker — waitForCompletion's select will sleep until its full wait_final_seconds timeout instead of exiting promptly")
+	}
+}
+
+// TestWaitForCompletionExitsPromptlyAfterHallucinationDrop is the
+// integration-shaped check on the same bug: it drives the actual
+// waitForCompletion drain loop with two server-VAD segments where
+// the second one transcribes to a filter phrase. Before the fix the
+// loop blocked the full waitFinalFloorSeconds (here 2 s) waiting
+// for a final that would never come, then exited via timeout; after
+// the fix it exits via "no_inflight_work" within tens of ms.
+func TestWaitForCompletionExitsPromptlyAfterHallucinationDrop(t *testing.T) {
+	t.Parallel()
+
+	stream := &Stream{stats: newStats()}
+	stream.stats.SpeechStartedCount = 2
+	stream.stats.InboundCounts["conversation.item.input_audio_transcription.completed"] = 0
+
+	session := &DictationSession{
+		events:                make(chan DictationEvent, 4),
+		finals:                make(chan finalResult, 4),
+		waitFinalFloorSeconds: 2,
+		hallucinationFilters:  buildHallucinationSet([]string{"Thank you."}),
+	}
+	session.stream.Store(stream)
+	// liveSegments=false — we're past Finalize.
+
+	go func() {
+		// First segment: real content, mirrors Stream.handleMessage's
+		// counter-then-event ordering.
+		time.Sleep(20 * time.Millisecond)
+		stream.statsMu.Lock()
+		stream.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]++
+		stream.statsMu.Unlock()
+		_ = session.handleStreamEvent(StreamEvent{Type: StreamEventFinal, Text: "real content."})
+
+		// Second segment: hallucination — counter still ticks (it's a
+		// real `transcription.completed` on the wire), then
+		// handleStreamEvent silently drops the text.
+		time.Sleep(20 * time.Millisecond)
+		stream.statsMu.Lock()
+		stream.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]++
+		stream.statsMu.Unlock()
+		_ = session.handleStreamEvent(StreamEvent{Type: StreamEventFinal, Text: "Thank you."})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	got, err := session.waitForCompletion(ctx, stream, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("waitForCompletion: %v", err)
+	}
+	if !strings.Contains(got, "real content") {
+		t.Fatalf("waitForCompletion = %q, want it to contain 'real content'", got)
+	}
+	// The 2 s floor is the bug's signature — hitting or exceeding it
+	// means the select slept until timeout instead of waking on the
+	// hallucination drop. 500 ms gives generous slack for goroutine
+	// scheduling on slow CI without masking the bug.
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("waitForCompletion took %s after hallucination drop — bug: empty-marker nudge missing, loop slept until floor timeout (2 s)", elapsed.Round(time.Millisecond))
 	}
 }
 
