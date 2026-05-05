@@ -533,6 +533,9 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	escapeCh := a.overlay.GrabEscape()
 	defer a.overlay.UngrabEscape()
+	// Safety net for error returns. The success path clears the flag
+	// earlier via markDelivered() so the overlay fade-out doesn't
+	// extend the dismissable window past the paste.
 	defer func() {
 		a.mu.Lock()
 		a.transcribing = false
@@ -695,6 +698,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 				trace.WithAttributes(attribute.String("reason", "target_gone")),
 			)
 			sessionlog.Warnf("target window gone — transcript on clipboard (%d chars)", len(text))
+			a.markDelivered()
 			a.overlay.ShowWarning(a.cfg.Overlay.Warning.TargetGone)
 			return
 		}
@@ -720,6 +724,11 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 			sessionlog.Warnf("press enter failed: %v", err)
 		}
 	}
+	// Paste (and submit Enter, if any) is done — the user has the
+	// result. Clear the transcribing flag NOW so a quick follow-up
+	// hotkey press starts a new dictation instead of being eaten by
+	// dismissInFlightOverlay during the ~320ms overlay fade-out below.
+	a.markDelivered()
 	state.span.SetAttributes(attribute.Bool("submit_mode", state.submitMode))
 	if postProcessSkipped {
 		state.span.AddEvent("overlay.warning", trace.WithAttributes(attribute.String("reason", "postprocess_skipped")))
@@ -728,6 +737,21 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		state.span.AddEvent("overlay.success")
 		a.showCompletionSuccess(text)
 	}
+}
+
+// markDelivered ends the dismissable phase of a dictation. The
+// transcript is now in the destination (paste landed; submit Enter, if
+// any, was dispatched), so a follow-up hotkey press should start a new
+// dictation rather than be eaten by dismissInFlightOverlay during the
+// remaining overlay-fade animation. Called only on the
+// transcript-delivered paths (Insert success, ErrTargetGone clipboard
+// fallback); error paths fall through to the deferred clear in
+// finishRecording, which doesn't pretend a delivery happened.
+func (a *App) markDelivered() {
+	a.mu.Lock()
+	a.transcribing = false
+	a.mu.Unlock()
+	sessionlog.Debugf("dictation delivered: transcribing flag cleared (overlay cleanup may still be running)")
 }
 
 func (a *App) monitorRecordingLevel(ctx context.Context, id uint64, session *recorder.Session) {

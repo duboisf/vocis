@@ -99,7 +99,7 @@ sequenceDiagram
     App->>Overlay: UngrabEscape
     App->>Overlay: Hide
 
-    opt User cancels during finishing
+    opt User cancels during finishing (only valid until paste lands)
         User->>App: Ctrl+Shift+Space (Down)
         App->>App: Cancel transcription
         App->>Overlay: ShowWarning("Cancelled — transcription discarded")
@@ -166,7 +166,7 @@ When the hotkey stops dictation:
 1. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) stops local recording.
 2. The Escape key is temporarily grabbed for the finishing state.
 3. The overlay switches to the "Finishing" state with a heartbeat wave animation, showing the accumulated text and an elapsed-time counter that ticks up from 0 (e.g. `Wrapping up... (2.3s)`). There is no outer deadline on the finalize call — the counter runs until the transcription completes or the user cancels.
-4. The user can press the hotkey during this state to cancel the in-flight transcription. The overlay shows "Cancelled — transcription discarded".
+4. The user can press the hotkey during this state to cancel the in-flight transcription. The overlay shows "Cancelled — transcription discarded". The dismissable window ends as soon as the paste lands (and submit Enter, if any, has fired): from that point onward, a hotkey press starts a fresh dictation rather than dismissing the just-completed one. This matters because the success-overlay fade-out takes ~320ms — without an explicit "delivery completed" marker, an eager user pressing the hotkey during the fade would otherwise hit the cancel path and see a stray "Cancelled" warning even though the transcript already landed.
 5. [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go) finalizes the `DictationSession` via `collectTrailing`:
    - If the server VAD already drained the buffer (`PreCommitContext.BufferDrainedByServerVAD`), the explicit commit is skipped — it would just produce a no-op "buffer too small" round-trip.
    - Otherwise, `stream.AppendSilence` pads the tail (so Whisper segments the last word) and `stream.Commit` flushes any remaining audio. `ErrInputAudioBufferCommitEmpty` is benign (server VAD raced our commit) and is swallowed.

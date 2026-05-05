@@ -261,6 +261,43 @@ func TestShowCompletionSuccessStaysHiddenAfterDismiss(t *testing.T) {
 	}
 }
 
+// TestHandleDownAfterDeliveryStartsNewSessionInsteadOfCancelling
+// reproduces the kitty fade-out race: once the transcript has been
+// pasted into kitty and (if applicable) submit Enter has fired, the
+// user should be able to start a fresh dictation immediately. Before
+// the fix, finishRecording only cleared `transcribing` via a deferred
+// call that ran AFTER overlay.Hide()'s 320ms fade-out animation, so a
+// fast user pressing the hotkey within that window hit
+// dismissInFlightOverlay() and got a stray "Cancelled" warning instead
+// of a new recording session.
+func TestHandleDownAfterDeliveryStartsNewSessionInsteadOfCancelling(t *testing.T) {
+	t.Parallel()
+
+	fakeOverlay := &overlayStub{}
+	cfg := config.Default()
+	cfg.HotkeyMode = "hold"
+	app := &App{
+		cfg:          cfg,
+		overlay:      fakeOverlay,
+		transcribing: true, // simulate "post-Insert, deferred clear hasn't run yet"
+	}
+
+	// markDelivered is the post-paste hook finishRecording calls once
+	// the transcript is in the destination — well before overlay
+	// fade-out completes.
+	app.markDelivered()
+
+	if app.transcribing {
+		t.Fatal("markDelivered should have cleared transcribing")
+	}
+	if app.dismissInFlightOverlay() {
+		t.Fatal("dismissInFlightOverlay must return false once delivery is done")
+	}
+	if fakeOverlay.warningText != "" {
+		t.Fatalf("expected no Cancelled warning, got %q", fakeOverlay.warningText)
+	}
+}
+
 type overlayStub struct {
 	windowClass    string
 	listeningText  string
