@@ -77,6 +77,73 @@ catalog entry doesn't carry the `transcription` label. Models that
 aren't in the catalog (user-pulled customs) skip the check with a
 debug log — we can't validate what we can't see.
 
+### `whisper-v3-turbo-FLM` missing the `audio` label (FastFlowLM v0.9.40+)
+
+FastFlowLM v0.9.40 shipped a regression in whisper's catalog labels:
+
+```diff
+ "label": [
+-    "audio",
++    "realtime-transcription",
+     "transcription"
+ ]
+```
+
+(commit
+[`f83ba611`](https://github.com/FastFlowLM/FastFlowLM/commit/f83ba611),
+2026-04-27, first released in FLM v0.9.40 — last good release is
+**v0.9.39**.)
+
+Lemonade's classifier
+(`get_model_type_from_labels` in
+`src/cpp/include/lemon/model_types.h`) recognizes the literal label
+`"audio"` for `ModelType::AUDIO` but doesn't know
+`"realtime-transcription"`. Without `"audio"`, whisper falls through
+to the default `ModelType::LLM` and consumes the **llm** slot in
+`max_models` instead of the **audio** slot — fighting whatever chat
+model is configured for `postprocess.model` and triggering 5–10 s
+reload stalls on every dictation. Worse, the audio router rejects the
+warm POST with `"Audio transcription not supported by FLM llm
+model"`, so the model loads but won't actually transcribe.
+
+The vocis preflight label guard in `EnsureTranscribeModelLoaded`
+doesn't catch this case: it asserts the catalog entry carries the
+`transcription` label, which whisper still does. The bug is the
+*absence* of `"audio"`, not the presence of a wrong label.
+
+**Where the labels come from.** The metadata is curated by the FLM
+team in
+[`src/model_list.json`](https://github.com/FastFlowLM/FastFlowLM/blob/main/src/model_list.json),
+not on Hugging Face. Hugging Face stores the model weights
+(`huggingface.co/FastFlowLM/Whisper-V3-Turbo-NPU2`); FLM ships the
+catalog file inside its package (`/opt/fastflowlm/share/flm/model_list.json`
+on Linux). `flm list --json` reads from that file, and lemonade calls
+`flm list --json` from `ModelManager::discover_flm_models`
+(`src/cpp/server/model_manager.cpp`) to populate its own catalog — so
+the `labels[]` you see at `/api/v1/models` originate in the FLM
+package, not in lemonade or HF.
+
+**Local workaround.** Patch the FLM catalog file to add `"audio"`
+back into whisper's label array, then restart lemonade so it re-runs
+`flm list --json`:
+
+```bash
+sudo python3 -c '
+import json, pathlib
+p = pathlib.Path("/opt/fastflowlm/share/flm/model_list.json")
+d = json.loads(p.read_text())
+labels = d["models"]["whisper-v3"]["turbo"]["label"]
+if "audio" not in labels:
+    labels.insert(0, "audio")
+p.write_text(json.dumps(d, indent=2))
+'
+```
+
+After the patch, `/health` reports `whisper-v3-turbo-FLM` with
+`type: "audio"` and the model occupies the audio slot, freeing the
+llm slot for postprocess. The patch is overwritten on every FLM
+package upgrade — track upstream until a permanent fix lands.
+
 ### Older versions
 
 vocis may still work against pre-10.3 Lemonade for basic
