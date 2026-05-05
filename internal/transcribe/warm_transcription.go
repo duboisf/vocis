@@ -157,14 +157,20 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 // is missing it fires a warm request (async) to force-load without
 // blocking the caller. Logs a concise warning per missing model.
 // Safe to call from main; no-op on non-Lemonade backends.
-func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcribeClient *Client) {
+//
+// Returns an error when the Lemonade server is unreachable so callers
+// can fail startup loudly instead of letting the user discover the
+// problem on their first dictation, when transcription silently fails.
+// The model-warm requests themselves remain fire-and-forget — they
+// take 5-10s and would otherwise stall startup for no good reason.
+func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcribeClient *Client) error {
 	if cfg.Transcription.Backend != config.BackendLemonade {
-		return
+		return nil
 	}
-	health, err := FetchLemonadeHealth(ctx, cfg.Transcription.BaseURL)
+	baseURL := cfg.Transcription.BaseURL
+	health, err := FetchLemonadeHealth(ctx, baseURL)
 	if err != nil {
-		sessionlog.Warnf("lemonade health check failed: %v", err)
-		return
+		return fmt.Errorf("lemonade not reachable at %s — start the Lemonade server (`lemonade-server serve`) and retry: %w", baseURL, err)
 	}
 
 	txModel := strings.TrimSpace(cfg.Transcription.Model)
@@ -184,6 +190,7 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 			sessionlog.Debugf("lemonade: postprocess model %s already loaded", ppModel)
 		}
 	}
+	return nil
 }
 
 // silentWAV returns a canonical 16-bit mono 16 kHz WAV buffer filled

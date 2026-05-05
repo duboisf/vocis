@@ -156,15 +156,39 @@ func (a *App) Run(ctx context.Context) error {
 	a.recorder = recorder.New()
 	a.transcribe = transcribe.New(a.apiKey, a.cfg.Transcription, a.cfg.Streaming)
 
+	// Defer overlay close before the Lemonade preflight so that path
+	// can use ShowError below — without this, a failed preflight would
+	// return before the defer was registered and the overlay would
+	// never get cleaned up.
+	defer a.overlay.Close()
+
 	// For Lemonade, proactively check that both configured models are
 	// resident and force-load anything that isn't. Avoids a 5-10s load
 	// stall on the user's first dictation of the session (which would
 	// otherwise manifest as "no transcript ever arrives" because the
 	// load runs on the WS path while audio is already flowing).
-	// Fire-and-forget — a failed warm never makes things worse.
-	go transcribe.EnsureLemonadeModelsLoaded(ctx, a.cfg, a.transcribe)
-
-	defer a.overlay.Close()
+	//
+	// The reachability check itself runs synchronously: if Lemonade
+	// isn't running there's nothing for vocis to do — the first
+	// dictation would silently fail at the WS connect — so we surface
+	// the error at startup, both via the overlay (so users running
+	// vocis under a service manager actually see it) and via the
+	// returned error (so it lands in stderr/journal). The actual
+	// model-warm requests still fire and forget in the background.
+	if err := transcribe.EnsureLemonadeModelsLoaded(ctx, a.cfg, a.transcribe); err != nil {
+		sessionlog.Errorf("lemonade preflight: %v", err)
+		a.overlay.ShowError(err)
+		// Hold long enough for the overlay to actually be visible.
+		// Reusing AutoHideMillis keeps this consistent with how long
+		// every other transient overlay stays up, and avoids adding a
+		// new tunable just for the preflight path. Bail early on ctx
+		// cancellation so Ctrl-C still exits promptly.
+		select {
+		case <-time.After(time.Duration(a.cfg.Overlay.AutoHideMillis) * time.Millisecond):
+		case <-ctx.Done():
+		}
+		return err
+	}
 
 	hk, err := a.registerHotkeyWithFallback()
 	if err != nil {
