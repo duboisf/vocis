@@ -2,6 +2,11 @@ APP := vocis
 VERSION := $(shell git describe --tags --always)
 LDFLAGS := -X main.version=$(VERSION)
 
+# Silero VAD goes through onnxruntime_go, which is all-cgo. Pin CGO_ENABLED=1
+# so `make install` / `make build` work even when the user's shell env has
+# CGO_ENABLED=0 (e.g. for cross-compile workflows).
+export CGO_ENABLED := 1
+
 EXTENSION_UUID := vocis@duboisf.github.io
 EXTENSION_SRC  := extensions/vocis-gnome
 EXTENSION_DEST := $(HOME)/.local/share/gnome-shell/extensions/$(EXTENSION_UUID)
