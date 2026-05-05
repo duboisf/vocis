@@ -331,6 +331,46 @@ func SendText(ctx context.Context, id, text string) error {
 	return nil
 }
 
+// GetText returns the rendered contents of the given kitty window's
+// visible screen via `kitty @ get-text --extent screen`. Used purely
+// as a post-send verification probe: after `send-text` returns 0,
+// callers can grep this output for the payload (or a `[Pasted text
+// +N lines]` marker) to confirm the text actually reached the program
+// in the window. send-text exits 0 even when the receiving program
+// silently discards the bytes (alt-screen TUIs in odd modes, claude
+// while spinning on a stream, shells with bracketed-paste off), so
+// this is the only way to tell "delivered" from "delivered and
+// rendered."
+//
+// Returns ("", nil) on no-match (window closed) so callers can branch
+// without sniffing error strings. A non-nil error means the kitty CLI
+// itself failed.
+func GetText(ctx context.Context, id string) (string, error) {
+	if strings.TrimSpace(id) == "" {
+		return "", fmt.Errorf("empty kitty window id")
+	}
+	ctx, span := telemetry.StartSpan(ctx, "vocis.kitty.get_text",
+		attribute.String("kitty.window_id", id),
+	)
+	var rerr error
+	defer func() { telemetry.EndSpan(span, rerr) }()
+
+	out, err := run(ctx, "kitty", "@", "get-text",
+		"--match", "id:"+id,
+		"--extent", "screen",
+	)
+	if err != nil {
+		if isNoMatchError(err) {
+			span.SetAttributes(attribute.Bool("kitty.no_match", true))
+			return "", nil
+		}
+		rerr = err
+		return "", err
+	}
+	span.SetAttributes(attribute.Int("kitty.text.length", len(out)))
+	return out, nil
+}
+
 // SendEnter sends a single carriage return to the kitty window
 // without changing focus and WITHOUT bracketed paste — that's the
 // "submit" semantic for shells and chat-style TUIs. Bracketed paste

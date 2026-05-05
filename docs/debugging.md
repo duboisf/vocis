@@ -31,6 +31,8 @@ If an event is filtered from the existing trace machinery (e.g. `dumpWSFrame` sk
 - `duck` — audio volume ducking/restore.
 - `hotkey` — fallback decisions, registration failures.
 - `submit mode:` — Enter-after-paste decision. See `insertion.auto_submit`.
+- `kitty capture state:` / `kitty post-send state:` — pre/post `kitty @ ls` snapshot of the targeted window's title, foreground process, focus, alt-screen, and at-prompt flags. Compare the two when triaging "transcript landed in the wrong window."
+- `kitty verify-paste id=N screen.len=…` (DEBUG) and `kitty verify-paste id=N: payload head … NOT visible …` (WARN) — post-send `kitty @ get-text --extent screen` probe. The WARN means `send-text` returned 0 but the program in the window appears to have swallowed the bytes (alt-screen TUI in an odd input mode, claude mid-stream, shell with bracketed-paste off). Disable with `insertion.kitty_verify_paste: false`.
 
 ## Tracing (Jaeger)
 

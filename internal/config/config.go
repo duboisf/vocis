@@ -317,6 +317,16 @@ type InsertionConfig struct {
 	// vocis to be launched from inside kitty so KITTY_LISTEN_ON is
 	// inherited. Set to false to skip the kitty enrichment entirely.
 	KittyRemoteControl bool `yaml:"kitty_remote_control"`
+	// KittyVerifyPaste runs an extra `kitty @ get-text --extent screen`
+	// snapshot after a successful send-text and warns if neither the
+	// payload's first 20 chars nor a `Pasted text` marker shows up in
+	// the rendered screen. send-text exits 0 even when the receiving
+	// program silently swallows the bytes; this probe is the only way
+	// to distinguish "delivered" from "delivered and rendered." Adds
+	// one extra kitty CLI shell-out per dictation when on. Default
+	// true — disable only if the extra subprocess shows up in latency
+	// profiles.
+	KittyVerifyPaste bool `yaml:"kitty_verify_paste"`
 }
 
 type OverlayConfig struct {
@@ -468,6 +478,7 @@ func Default() Config {
 				"Cursor",
 			},
 			KittyRemoteControl: true,
+			KittyVerifyPaste:   true,
 		},
 		Overlay: OverlayConfig{
 			Width:          620,

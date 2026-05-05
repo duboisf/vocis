@@ -499,6 +499,77 @@ func TestKittyLookupWindowCalledAtCaptureAndPostSend(t *testing.T) {
 	}
 }
 
+// TestKittyVerifyPasteFiresAfterSendText locks down the verification
+// probe contract: when KittyVerifyPaste is on (default) and send-text
+// succeeds, the injector MUST run GetText against the same window id
+// so the session log records what actually rendered. Without this
+// probe, a "transcript disappeared" report has no way to distinguish
+// "send-text succeeded and the program rendered it" from "send-text
+// succeeded and the program silently swallowed the bytes."
+func TestKittyVerifyPasteFiresAfterSendText(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.Mode = "clipboard"
+	if !cfg.KittyVerifyPaste {
+		t.Fatal("config default expected KittyVerifyPaste=true; precondition for this test")
+	}
+	fc := &fakeCompositor{}
+	inj := New(cfg, fc, "")
+
+	var getTextID string
+	inj.SetKittyHooks(KittyHooks{
+		Exists:       func(_ context.Context, _ string) (bool, error) { return true, nil },
+		SendText:     func(_ context.Context, _, _ string) error { return nil },
+		LookupWindow: noLookupWindow,
+		GetText: func(_ context.Context, id string) (string, error) {
+			getTextID = id
+			return "prompt> hello kitty\n", nil
+		},
+	})
+
+	target := platform.Target{KittyWindowID: "91"}
+	if err := inj.Insert(context.Background(), target, "hello kitty"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if getTextID != "91" {
+		t.Fatalf("GetText called with id=%q, want \"91\" (verify probe should run on the same window send-text targeted)", getTextID)
+	}
+}
+
+// TestKittyVerifyPasteSkippedWhenDisabled covers the off path: with
+// the config flag false, the probe MUST NOT shell out — useful when
+// the extra subprocess shows up in latency profiles or when the user
+// has confirmed kitty paste is reliable on their setup.
+func TestKittyVerifyPasteSkippedWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default().Insertion
+	cfg.Mode = "clipboard"
+	cfg.KittyVerifyPaste = false
+	fc := &fakeCompositor{}
+	inj := New(cfg, fc, "")
+
+	called := false
+	inj.SetKittyHooks(KittyHooks{
+		Exists:       func(_ context.Context, _ string) (bool, error) { return true, nil },
+		SendText:     func(_ context.Context, _, _ string) error { return nil },
+		LookupWindow: noLookupWindow,
+		GetText: func(_ context.Context, _ string) (string, error) {
+			called = true
+			return "", nil
+		},
+	})
+
+	target := platform.Target{KittyWindowID: "91"}
+	if err := inj.Insert(context.Background(), target, "hi"); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if called {
+		t.Fatal("GetText MUST NOT be called when KittyVerifyPaste is disabled")
+	}
+}
+
 // TestPressEnterUsesKittyForKittyTarget locks down the submit-mode
 // contract: PressEnter on a kitty target must go through the kitty
 // remote-control SendEnter hook, NOT through compositor.SendKeys

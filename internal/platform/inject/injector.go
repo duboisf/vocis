@@ -42,6 +42,7 @@ type Injector struct {
 	kittySendText     func(ctx context.Context, id, text string) error
 	kittySendEnter    func(ctx context.Context, id string) error
 	kittyLookupWindow func(ctx context.Context, id string) (*kitty.WindowInfo, error)
+	kittyGetText      func(ctx context.Context, id string) (string, error)
 
 	mu           sync.Mutex
 	restoreTimer *time.Timer
@@ -61,6 +62,7 @@ func New(cfg config.InsertionConfig, compositor platform.Compositor, shortcut st
 		kittySendText:     kitty.SendText,
 		kittySendEnter:    kitty.SendEnter,
 		kittyLookupWindow: kitty.LookupWindow,
+		kittyGetText:      kitty.GetText,
 	}
 	if strings.TrimSpace(shortcut) != "" {
 		if names, err := hotkey.ReleaseKeyNames(shortcut); err == nil {
@@ -81,6 +83,7 @@ type KittyHooks struct {
 	SendText     func(ctx context.Context, id, text string) error
 	SendEnter    func(ctx context.Context, id string) error
 	LookupWindow func(ctx context.Context, id string) (*kitty.WindowInfo, error)
+	GetText      func(ctx context.Context, id string) (string, error)
 }
 
 // SetKittyHooks swaps the kitty CLI shell-outs for fakes — used by
@@ -101,6 +104,9 @@ func (i *Injector) SetKittyHooks(h KittyHooks) {
 	}
 	if h.LookupWindow != nil {
 		i.kittyLookupWindow = h.LookupWindow
+	}
+	if h.GetText != nil {
+		i.kittyGetText = h.GetText
 	}
 }
 
@@ -289,8 +295,70 @@ func (i *Injector) deliverViaKittyDirect(ctx context.Context, target platform.Ta
 	// closed/replaced window — the smoking gun for "transcript
 	// disappeared" reports.
 	i.logKittyWindowSnapshot(ctx, "post-send", target.KittyWindowID)
+	if i.cfg.KittyVerifyPaste {
+		i.verifyKittyPaste(ctx, target.KittyWindowID, text)
+	}
 	span.SetAttributes(attribute.Bool("kitty.delivered", true))
 	return true, nil
+}
+
+// verifyKittyPaste fetches the rendered screen of the target kitty
+// window and checks that either the head of the payload or the
+// bracketed-paste indicator appears in it. send-text exits 0 even when
+// the receiving program silently swallows the bytes (alt-screen TUI in
+// an odd input mode, claude while it's mid-stream, a shell with
+// bracketed-paste turned off), so a successful return tells us
+// nothing about what actually rendered. This probe is the only
+// reliable post-hoc check for the "paste vanished" failure mode.
+//
+// Diagnostic only: every outcome is logged but nothing is retried or
+// surfaced to the caller. The aim is to leave a clear smoking-gun line
+// in the session log so a future report can be triaged without
+// reproducing the bug.
+func (i *Injector) verifyKittyPaste(ctx context.Context, id, text string) {
+	if i.kittyGetText == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	screen, err := i.kittyGetText(ctx, id)
+	if err != nil {
+		sessionlog.Debugf("kitty verify-paste id=%s get-text failed: %v", id, err)
+		return
+	}
+	if screen == "" {
+		sessionlog.Warnf(
+			"kitty verify-paste id=%s: get-text returned empty screen — window may be closed or kitty hit an internal hiccup",
+			id,
+		)
+		return
+	}
+	// Probe heuristics: a programs-running TUI may render the payload
+	// verbatim, but bracketed-paste-aware UIs (claude, some shells)
+	// collapse big pastes to a "[Pasted text +N lines]" indicator
+	// without echoing the bytes. Either is success; only "no payload
+	// AND no marker" is the smoking gun for "send-text exited 0 but
+	// the program never received the bytes."
+	const headProbe = 20
+	probe := text
+	if len(probe) > headProbe {
+		probe = probe[:headProbe]
+	}
+	headFound := probe != "" && strings.Contains(screen, probe)
+	markerFound := strings.Contains(screen, "Pasted text")
+
+	tail := screen
+	if len(tail) > 400 {
+		tail = tail[len(tail)-400:]
+	}
+	sessionlog.Debugf(
+		"kitty verify-paste id=%s screen.len=%d head_in_screen=%t marker_in_screen=%t screen_tail=%q",
+		id, len(screen), headFound, markerFound, tail,
+	)
+	if !headFound && !markerFound {
+		sessionlog.Warnf(
+			"kitty verify-paste id=%s: payload head %q NOT visible and no `Pasted text` marker — send-text returned 0 but the program in the window appears to have swallowed the bytes",
+			id, probe,
+		)
+	}
 }
 
 // InsertLive types a partial segment without doing any clipboard work.
