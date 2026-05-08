@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -52,6 +53,8 @@ type chatAudioSession struct {
 	streamSSE       bool
 	tailSilenceMS   int
 	contextMode     string
+	minChunkPeak    float64
+	minChunkRMS     float64
 
 	// Audio assumptions: PCM16 mono at this sample rate. Lemonade's
 	// gemma audio path expects 16 kHz; the recorder already produces
@@ -136,6 +139,8 @@ func startChatAudioSession(
 		streamSSE:            cfg.ChatAudio.Stream,
 		tailSilenceMS:        streaming.TailSilenceMS,
 		contextMode:          contextMode,
+		minChunkPeak:         cfg.ChatAudio.MinChunkPeak,
+		minChunkRMS:          cfg.ChatAudio.MinChunkRMS,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		events:               make(chan DictationEvent, 16),
@@ -361,6 +366,20 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 				return
 			}
 			if len(chunk.pcm) == 0 {
+				if chunk.trailing {
+					return
+				}
+				continue
+			}
+			// Energy gate: never POST a chunk that's below the
+			// configured peak/RMS thresholds. Without VAD, a hold
+			// over silence would otherwise send the entire silent
+			// buffer to Gemma, which then hallucinates a long
+			// "I cannot transcribe..." response. With VAD on, this
+			// is just defense in depth.
+			if peak, rms, ok := s.passEnergyGate(chunk.pcm); !ok {
+				sessionlog.Infof("chat-audio: dropped silent chunk peak=%.4f rms=%.4f (min_peak=%.4f min_rms=%.4f)",
+					peak, rms, s.minChunkPeak, s.minChunkRMS)
 				if chunk.trailing {
 					return
 				}
@@ -744,6 +763,45 @@ func (s *chatAudioSession) finishPump(err error) {
 	case s.pumpDone <- err:
 	default:
 	}
+}
+
+// passEnergyGate returns (peak, rms, ok) for the chunk. ok=false when
+// either threshold is configured (>0) and the chunk falls below it.
+// Both metrics are normalized to 0-1 by /32768. A chunk that's mostly
+// silence with a brief loud spike still passes if peak alone is high
+// enough; a chunk with sustained low-level noise (fan, room tone)
+// fails the RMS check while peak alone might falsely pass it.
+func (s *chatAudioSession) passEnergyGate(pcm []int16) (float64, float64, bool) {
+	if s.minChunkPeak <= 0 && s.minChunkRMS <= 0 {
+		return 0, 0, true
+	}
+	var peak int16
+	var sumSq int64
+	for _, v := range pcm {
+		a := v
+		if a < 0 {
+			a = -a
+			if a < 0 { // -math.MinInt16 overflows back to itself
+				a = 32767
+			}
+		}
+		if a > peak {
+			peak = a
+		}
+		sumSq += int64(v) * int64(v)
+	}
+	peakNorm := float64(peak) / 32768.0
+	var rmsNorm float64
+	if len(pcm) > 0 {
+		rmsNorm = math.Sqrt(float64(sumSq)/float64(len(pcm))) / 32768.0
+	}
+	if s.minChunkPeak > 0 && peakNorm < s.minChunkPeak {
+		return peakNorm, rmsNorm, false
+	}
+	if s.minChunkRMS > 0 && rmsNorm < s.minChunkRMS {
+		return peakNorm, rmsNorm, false
+	}
+	return peakNorm, rmsNorm, true
 }
 
 func (s *chatAudioSession) isHallucination(text string) bool {

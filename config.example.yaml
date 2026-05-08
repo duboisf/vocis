@@ -95,6 +95,17 @@ transcription:
     #                  prior transcript, so cross-chunk consistency is
     #                  weaker.
     context_mode: few_shot
+    # min_chunk_peak / min_chunk_rms: drop a chunk client-side when
+    # its peak (max-abs / 32768) or RMS (sqrt(mean(sample^2))/32768)
+    # falls below these thresholds, BEFORE the /chat/completions POST.
+    # Critical when Silero isn't installed: without VAD, a hotkey hold
+    # over silence sends the entire silent buffer to Gemma, which then
+    # hallucinates a long "I cannot transcribe..." response. Defaults
+    # match the recall daemon's segment filters and reject fan/room
+    # tone while keeping quiet speech. Set either to 0 to disable that
+    # arm of the check.
+    min_chunk_peak: 0.02
+    min_chunk_rms: 0.005
 
 recording:
   backend: auto

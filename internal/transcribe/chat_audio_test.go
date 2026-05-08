@@ -440,6 +440,59 @@ func TestChatAudioSessionEndToEnd(t *testing.T) {
 	}
 }
 
+// TestChatAudioSessionDropsSilentChunk verifies the energy gate
+// prevents a chunk of all-zero PCM from ever reaching the model. This
+// is the defense against Gemma hallucinating a long "I cannot
+// transcribe..." response when there's no real speech in the buffer
+// (the typical case when Silero VAD isn't installed and a hold
+// captures pure silence).
+func TestChatAudioSessionDropsSilentChunk(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		http.Error(w, "should not have been called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	cfg := config.TranscriptionConfig{
+		Backend: config.BackendLemonadeChat,
+		BaseURL: server.URL,
+		Model:   "gemma-test",
+		ChatAudio: config.ChatAudioConfig{
+			ChunkMaxSeconds: 10,
+			HistoryTurns:    1,
+			Prompt:          "Transcribe.",
+			Language:        "en",
+			Stream:          true,
+			MinChunkPeak:    0.02,
+			MinChunkRMS:     0.005,
+		},
+	}
+	samples := make(chan []int16, 1)
+	opts := DictationOpts{
+		SampleRate: 8000,
+		Channels:   1,
+		Samples:    samples,
+	}
+	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, &http.Client{Timeout: 5 * time.Second}, opts)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	// Pure zeros — peak=0, rms=0, both below the gate.
+	samples <- make([]int16, 80000)
+	close(samples)
+	res, err := session.Finalize(context.Background())
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if called {
+		t.Fatalf("server was called for an all-silence chunk; energy gate failed")
+	}
+	if strings.TrimSpace(res.Text) != "" {
+		t.Fatalf("text=%q want empty (silence dropped)", res.Text)
+	}
+}
+
 // TestChatAudioSessionDropsHallucination wires a server that returns
 // a stock Whisper-hallucination phrase and verifies the filter drops
 // it on the trailing path.

@@ -945,8 +945,16 @@ func (a *App) handleDictationEvent(
 		}
 		// Live-subtitle mode: the partial replaces the previous in-flight
 		// partial. Rendered preview = committed segments + current partial.
+		// For chat-audio, the SSE response only starts after the user
+		// releases the hotkey, by which point the overlay has transitioned
+		// from Listening to Finishing. SetListeningText short-circuits
+		// outside Listening state, so we'd silently drop every partial.
+		// Route to both — each setter short-circuits when its title isn't
+		// the active one, so exactly one update fires per call.
 		state.currentPartial = strings.TrimSpace(event.Text)
-		a.overlay.SetListeningText(state.target.WindowClass, renderPreview(state.displayText, state.currentPartial))
+		preview := renderPreview(state.displayText, state.currentPartial)
+		a.overlay.SetListeningText(state.target.WindowClass, preview)
+		a.overlay.SetFinishingText(preview)
 		return nil
 
 	case transcribe.DictationEventSegment:

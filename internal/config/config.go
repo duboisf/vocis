@@ -284,6 +284,20 @@ type ChatAudioConfig struct {
 	// Empty value defaults to "few_shot" for backward compatibility
 	// with users who set up the backend before this knob existed.
 	ContextMode string `yaml:"context_mode"`
+	// MinChunkPeak / MinChunkRMS gate every chunk on peak (max-abs)
+	// and RMS sample energy (each normalized to 0-1 by /32768) before
+	// a /chat/completions POST. Below either threshold the chunk is
+	// dropped client-side. Critical when Silero isn't installed —
+	// without VAD, a hold over silence sends the entire silent buffer
+	// to the model, and Gemma helpfully invents a long
+	// "I cannot transcribe..." response. With Silero installed, VAD
+	// already trims silence around utterances, so this gate rarely
+	// fires; it just provides defense in depth.
+	//
+	// Defaults match recall's segment filters (0.02 / 0.005). Set
+	// either to 0 to disable that arm of the check.
+	MinChunkPeak float64 `yaml:"min_chunk_peak"`
+	MinChunkRMS  float64 `yaml:"min_chunk_rms"`
 }
 
 const (
@@ -512,6 +526,10 @@ func Default() Config {
 				Language:     "its original language",
 				Stream:       true,
 				ContextMode:  ChatAudioContextFewShot,
+				// Energy gate matching recall's defaults. Rejects fan
+				// hum / room tone but keeps quiet speech.
+				MinChunkPeak: 0.02,
+				MinChunkRMS:  0.005,
 			},
 		},
 		Recording: RecordingConfig{
@@ -835,6 +853,12 @@ func (c Config) Validate() error {
 				"transcription.chat_audio.context_mode must be %q or %q",
 				ChatAudioContextFewShot, ChatAudioContextInlineClips,
 			)
+		}
+		if ca.MinChunkPeak < 0 || ca.MinChunkPeak > 1 {
+			return errors.New("transcription.chat_audio.min_chunk_peak must be between 0 and 1")
+		}
+		if ca.MinChunkRMS < 0 || ca.MinChunkRMS > 1 {
+			return errors.New("transcription.chat_audio.min_chunk_rms must be between 0 and 1")
 		}
 	}
 
