@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -20,6 +21,10 @@ import (
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
 )
+
+// Bound OTLP exporter shutdown so an unreachable collector can't stall Ctrl-C
+// on the SDK's default 10s-per-batch retry.
+const telemetryShutdownTimeout = 3 * time.Second
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
@@ -35,6 +40,14 @@ func runServe() error {
 		return err
 	}
 	defer session.Close()
+	var shutdownStart time.Time
+	defer func() {
+		if shutdownStart.IsZero() {
+			sessionlog.Infof("exiting.")
+			return
+		}
+		sessionlog.Infof("exiting after %s", time.Since(shutdownStart).Round(time.Millisecond))
+	}()
 
 	sessionlog.Infof("vocis %s", version)
 	sessionlog.Infof("session log: %s", session.Path())
@@ -51,7 +64,16 @@ func runServe() error {
 	if err != nil {
 		return fmt.Errorf("init telemetry: %w", err)
 	}
-	defer shutdownTelemetry(context.Background())
+	defer func() {
+		t := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), telemetryShutdownTimeout)
+		defer cancel()
+		if err := shutdownTelemetry(ctx); err != nil {
+			sessionlog.Warnf("telemetry shutdown: %v (after %s)", err, time.Since(t).Round(time.Millisecond))
+			return
+		}
+		sessionlog.Debugf("telemetry shutdown ok in %s", time.Since(t).Round(time.Millisecond))
+	}()
 
 	if cfg.Telemetry.Enabled {
 		sessionlog.Infof("telemetry enabled, exporting to %s", cfg.Telemetry.Endpoint)
@@ -69,13 +91,15 @@ func runServe() error {
 	sessionlog.Infof("compositor backend: %s", compositorBackend)
 
 	registrar, backend := pickHotkeyRegistrar()
-	return app.New(cfg, app.Deps{
+	runErr := app.New(cfg, app.Deps{
 		Overlay:        ov,
 		Injector:       inject.New(cfg.Insertion, compositor, cfg.Hotkey),
 		Ducker:         audio.NewDucker(cfg.Recording.DuckVolume),
 		RegisterHotkey: registrar,
 		HotkeyBackend:  backend,
 	}).Run(ctx)
+	shutdownStart = time.Now()
+	return runErr
 }
 
 // pickCompositor returns the platform.Compositor matching the current
