@@ -141,20 +141,20 @@ func startChatAudioSession(
 	}
 	s.liveSegments.Store(true)
 
-	// "Connection ready" is synthetic for the chat-audio backend — there's
-	// no upfront handshake to await. Fire OnConnected immediately so the
-	// overlay drops the connecting spinner.
-	if opts.Callbacks.OnConnecting != nil {
-		opts.Callbacks.OnConnecting(1, 1)
-	}
-	if opts.Callbacks.OnConnected != nil {
-		opts.Callbacks.OnConnected()
-	}
-
 	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t",
 		s.model, chunkMax, s.historyTurns, s.streamSSE)
 
-	go s.run(pumpCtx, opts.Samples, streaming)
+	// "Connection ready" is synthetic for the chat-audio backend — there
+	// is no upfront handshake to await. The run goroutine fires
+	// OnConnected on the first audio chunk it sees, which guarantees
+	// app.go has finished initialization (ShowListening transitions the
+	// overlay to the Listening state). A synchronous call here would
+	// no-op because SetConnected short-circuits when the overlay isn't
+	// yet Listening; a goroutine without a sync point would race
+	// ShowListening. OnConnecting is skipped entirely — there's no real
+	// connecting phase to surface, and the default Listening subtitle
+	// shows "Connecting" until OnConnected swaps it.
+	go s.run(pumpCtx, opts.Samples, streaming, opts.Callbacks)
 	go s.worker(pumpCtx)
 	return s, nil
 }
@@ -209,11 +209,15 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 // run is the audio pump. It reads samples, feeds Silero, and emits
 // chunks on speech_stopped or chunk_max_samples force-cut. On samples
 // channel close (hotkey release / recorder stop), it flushes any
-// remaining buffered audio as the trailing chunk.
+// remaining buffered audio as the trailing chunk. Fires OnConnected
+// on the first audio chunk so the overlay transition out of the
+// default "Connecting" subtitle lands after app.go has reached the
+// Listening state.
 func (s *chatAudioSession) run(
 	ctx context.Context,
 	samples <-chan []int16,
 	streaming config.StreamingConfig,
+	callbacks ConnectCallbacks,
 ) {
 	var vad *SileroVAD
 	if err := initSilero(streaming.OnnxruntimeLibrary); err != nil {
@@ -245,6 +249,16 @@ func (s *chatAudioSession) run(
 	}
 
 	var buf []int16
+	connectedFired := false
+	fireConnected := func() {
+		if connectedFired {
+			return
+		}
+		connectedFired = true
+		if callbacks.OnConnected != nil {
+			callbacks.OnConnected()
+		}
+	}
 	flush := func(reason string, trailing bool) {
 		if len(buf) == 0 {
 			if trailing {
@@ -279,6 +293,7 @@ func (s *chatAudioSession) run(
 			if len(chunk) == 0 {
 				continue
 			}
+			fireConnected()
 			buf = append(buf, chunk...)
 			if vad != nil {
 				if evt := vad.Feed(chunk); evt == VADSpeechStopped {

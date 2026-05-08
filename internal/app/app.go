@@ -932,7 +932,15 @@ func (a *App) handleDictationEvent(
 ) error {
 	switch event.Type {
 	case transcribe.DictationEventPartial:
-		if !a.cfg.Streaming.ShowPartialOverlay {
+		// Chat-audio always emits partials (SSE deltas while the LLM is
+		// generating the chunk's transcript) and they're inherently useful
+		// — they're the only signal the user has that the model is
+		// processing their audio. Realtime backends gate on the explicit
+		// show_partial_overlay flag because they emit interim transcripts
+		// continuously while you're speaking, which can flicker.
+		showPartials := a.cfg.Streaming.ShowPartialOverlay ||
+			a.cfg.Transcription.Backend == config.BackendLemonadeChat
+		if !showPartials {
 			return nil
 		}
 		// Live-subtitle mode: the partial replaces the previous in-flight
