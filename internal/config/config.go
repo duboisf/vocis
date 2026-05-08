@@ -264,7 +264,32 @@ type ChatAudioConfig struct {
 	// per-token deltas to the overlay as they arrive; false waits for
 	// the full completion before showing the chunk transcript.
 	Stream bool `yaml:"stream"`
+	// ContextMode picks how prior chunks are threaded into a new
+	// request:
+	//   "few_shot"     — each prior chunk becomes a (user-audio,
+	//                    assistant-transcript) turn pair. The model
+	//                    sees its own transcripts verbatim, which
+	//                    keeps proper-noun spelling stable across
+	//                    chunks. Cost: re-uploads the prior audio
+	//                    bytes on every request.
+	//   "inline_clips" — prior chunks are appended as additional
+	//                    `input_audio` parts inside the same user
+	//                    message, alongside the current chunk. The
+	//                    model gets all audio at once and produces
+	//                    one transcript covering only the final clip
+	//                    (per the prompt instruction). Matches the
+	//                    multi-clip shape Google's Gemma docs show.
+	//                    Cost: model has to re-decode prior audio
+	//                    instead of trusting a prior transcript.
+	// Empty value defaults to "few_shot" for backward compatibility
+	// with users who set up the backend before this knob existed.
+	ContextMode string `yaml:"context_mode"`
 }
+
+const (
+	ChatAudioContextFewShot     = "few_shot"
+	ChatAudioContextInlineClips = "inline_clips"
+)
 
 const (
 	BackendOpenAI       = "openai"
@@ -486,6 +511,7 @@ func Default() Config {
 				Prompt:       DefaultChatAudioPrompt,
 				Language:     "its original language",
 				Stream:       true,
+				ContextMode:  ChatAudioContextFewShot,
 			},
 		},
 		Recording: RecordingConfig{
@@ -801,6 +827,14 @@ func (c Config) Validate() error {
 		}
 		if strings.TrimSpace(ca.Language) == "" {
 			return errors.New("transcription.chat_audio.language must not be empty")
+		}
+		switch ca.ContextMode {
+		case "", ChatAudioContextFewShot, ChatAudioContextInlineClips:
+		default:
+			return fmt.Errorf(
+				"transcription.chat_audio.context_mode must be %q or %q",
+				ChatAudioContextFewShot, ChatAudioContextInlineClips,
+			)
 		}
 	}
 

@@ -77,6 +77,24 @@ transcription:
     # SSE streaming for live overlay updates. Off uses one round-trip
     # per chunk and shows the full chunk transcript only on completion.
     stream: true
+    # context_mode: how prior chunks are threaded into a new request.
+    #   few_shot     - each prior chunk becomes a (user-audio,
+    #                  assistant-transcript) turn pair. The model sees
+    #                  its own transcripts verbatim, which keeps
+    #                  proper-noun spelling stable across chunks. Cost:
+    #                  re-uploads the prior audio bytes on every
+    #                  request.
+    #   inline_clips - prior chunks are appended as additional
+    #                  input_audio parts inside the same user message,
+    #                  alongside the current chunk. The model gets all
+    #                  audio at once and produces one transcript
+    #                  covering only the final clip (per the prompt
+    #                  instruction). Matches the multi-clip shape
+    #                  Google's Gemma docs show. Cost: model has to
+    #                  re-decode prior audio instead of trusting a
+    #                  prior transcript, so cross-chunk consistency is
+    #                  weaker.
+    context_mode: few_shot
 
 recording:
   backend: auto

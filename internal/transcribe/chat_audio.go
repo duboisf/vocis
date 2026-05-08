@@ -51,6 +51,7 @@ type chatAudioSession struct {
 	language        string
 	streamSSE       bool
 	tailSilenceMS   int
+	contextMode     string
 
 	// Audio assumptions: PCM16 mono at this sample rate. Lemonade's
 	// gemma audio path expects 16 kHz; the recorder already produces
@@ -119,6 +120,10 @@ func startChatAudioSession(
 	if chunkMax <= 0 {
 		chunkMax = 28
 	}
+	contextMode := cfg.ChatAudio.ContextMode
+	if contextMode == "" {
+		contextMode = config.ChatAudioContextFewShot
+	}
 	pumpCtx, cancel := context.WithCancel(ctx)
 	s := &chatAudioSession{
 		httpClient:           httpClient,
@@ -130,6 +135,7 @@ func startChatAudioSession(
 		language:             cfg.ChatAudio.Language,
 		streamSSE:            cfg.ChatAudio.Stream,
 		tailSilenceMS:        streaming.TailSilenceMS,
+		contextMode:          contextMode,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		events:               make(chan DictationEvent, 16),
@@ -141,8 +147,8 @@ func startChatAudioSession(
 	}
 	s.liveSegments.Store(true)
 
-	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t",
-		s.model, chunkMax, s.historyTurns, s.streamSSE)
+	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t context_mode=%s",
+		s.model, chunkMax, s.historyTurns, s.streamSSE, s.contextMode)
 
 	// "Connection ready" is synthetic for the chat-audio backend — there
 	// is no upfront handshake to await. The run goroutine fires
@@ -277,6 +283,27 @@ func (s *chatAudioSession) run(
 			reason, len(chunk), len(chunk)*1000/s.sampleRate, trailing)
 		s.chunksCh <- chatChunk{pcm: chunk, trailing: trailing}
 	}
+	// flushAtCap emits exactly chunkMaxSamples and keeps the remainder
+	// in buf for the next chunk. Used by the force-cut path so a single
+	// large samples-channel chunk that exceeds the cap doesn't get
+	// flushed whole (which would put a chunk *over* the documented 30 s
+	// audio cap on the wire).
+	flushAtCap := func() {
+		if len(buf) <= s.chunkMaxSamples {
+			flush("chunk_max", false)
+			return
+		}
+		head := make([]int16, s.chunkMaxSamples)
+		copy(head, buf[:s.chunkMaxSamples])
+		// Keep the tail in buf — copy down so the underlying array
+		// doesn't grow unbounded across many force-cuts.
+		tailLen := len(buf) - s.chunkMaxSamples
+		copy(buf, buf[s.chunkMaxSamples:])
+		buf = buf[:tailLen]
+		sessionlog.Debugf("chat-audio: flush chunk reason=chunk_max samples=%d (~%dms) trailing=false (%dms tail kept)",
+			len(head), len(head)*1000/s.sampleRate, tailLen*1000/s.sampleRate)
+		s.chunksCh <- chatChunk{pcm: head}
+	}
 
 	for {
 		select {
@@ -302,10 +329,15 @@ func (s *chatAudioSession) run(
 					continue
 				}
 			}
-			if len(buf) >= s.chunkMaxSamples {
+			// One samples-channel write may push buf well past the cap
+			// if the recorder hands us a chunk larger than chunk_max
+			// at once. Loop the slice-and-flush so a single oversize
+			// arrival emits multiple capped chunks without losing tail
+			// audio between them.
+			for len(buf) >= s.chunkMaxSamples {
 				sessionlog.Warnf("chat-audio: forced cut at %ds (utterance > chunk_max_seconds)",
-					len(buf)/s.sampleRate)
-				flush("chunk_max", false)
+					s.chunkMaxSamples/s.sampleRate)
+				flushAtCap()
 				if vad != nil {
 					vad.Reset()
 				}
@@ -548,22 +580,39 @@ func parseSSEDelta(payload string) (string, string, error) {
 	return "", c.FinishReason, nil
 }
 
-// buildMessages assembles the few-shot message list for one chunk.
-// Pattern (matches the user's tested payload):
+// buildMessages assembles the message list for one chunk. Two shapes
+// are supported, picked by ContextMode:
 //
-//	user:      [text instruction, input_audio: prior chunk 1]
-//	assistant: prior transcript 1
-//	user:      [text instruction, input_audio: prior chunk 2]
-//	assistant: prior transcript 2
-//	user:      [text instruction, input_audio: current chunk]
+//	few_shot:
+//	  user:      [text instruction, input_audio: prior chunk 1]
+//	  assistant: prior transcript 1
+//	  user:      [text instruction, input_audio: prior chunk 2]
+//	  assistant: prior transcript 2
+//	  user:      [text instruction, input_audio: current chunk]
 //
-// historyTurns caps the history fed back to the model. When 0, only
-// the current chunk is sent.
+//	inline_clips:
+//	  user: [
+//	    text instruction (with explicit "transcribe only the LAST clip"),
+//	    text "[prior clip 1]:",  input_audio: prior chunk 1,
+//	    text "[prior clip 2]:",  input_audio: prior chunk 2,
+//	    text "[current clip]:",  input_audio: current chunk,
+//	  ]
+//
+// historyTurns caps the history fed back to the model. When 0 (or no
+// history yet) the request reduces to the single user message form.
 func (s *chatAudioSession) buildMessages(currentWAV []byte) []map[string]any {
 	prompt := s.renderPrompt()
 	history := s.historySnapshot()
 	if s.historyTurns < len(history) {
 		history = history[len(history)-s.historyTurns:]
+	}
+	if s.contextMode == config.ChatAudioContextInlineClips {
+		return []map[string]any{
+			{
+				"role":    "user",
+				"content": inlineClipsContent(prompt, history, currentWAV),
+			},
+		}
 	}
 	msgs := make([]map[string]any, 0, 2*len(history)+1)
 	for _, turn := range history {
@@ -583,8 +632,10 @@ func (s *chatAudioSession) buildMessages(currentWAV []byte) []map[string]any {
 	return msgs
 }
 
-// userContent builds the multimodal content array: a text instruction
-// followed by an input_audio part with base64-encoded WAV bytes.
+// userContent builds the few-shot multimodal content array: a text
+// instruction followed by an input_audio part with base64-encoded WAV
+// bytes. Used when ContextMode is "few_shot" (and for the leaf user
+// turn there).
 func userContent(prompt string, wav []byte) []map[string]any {
 	return []map[string]any{
 		{"type": "text", "text": prompt},
@@ -594,6 +645,52 @@ func userContent(prompt string, wav []byte) []map[string]any {
 				"data":   base64.StdEncoding.EncodeToString(wav),
 				"format": "wav",
 			},
+		},
+	}
+}
+
+// inlineClipsContent builds the inline-clips multimodal content array:
+// the transcription instruction (rewritten to mark the LAST clip as
+// the target), then alternating text label + input_audio for each
+// prior clip, and finally the label + input_audio for the current
+// clip. Matches the multi-audio shape Google's Gemma 4 docs show, but
+// uses Lemonade's OpenAI-compat input_audio part shape (base64 WAV).
+func inlineClipsContent(prompt string, history []chatTurn, currentWAV []byte) []map[string]any {
+	// When there's no prior context, the instruction is the same as
+	// few-shot's. When there is, prepend a sentence that scopes the
+	// answer to the LAST clip only — the model otherwise tends to
+	// transcribe every clip and join them, doubling up audio that
+	// was already delivered to the user on prior chunks.
+	leadingText := prompt
+	if len(history) > 0 {
+		leadingText = "You will receive several short audio clips, in order. " +
+			"Transcribe ONLY the FINAL clip; the earlier clips are provided " +
+			"as continuous context so you can keep proper-noun spelling, " +
+			"language, and turn boundaries consistent. " + prompt
+	}
+	parts := make([]map[string]any, 0, 2+2*(len(history)+1))
+	parts = append(parts, map[string]any{"type": "text", "text": leadingText})
+	for i, turn := range history {
+		parts = append(parts,
+			map[string]any{"type": "text", "text": fmt.Sprintf("[prior clip %d]:", i+1)},
+			audioPart(turn.wav),
+		)
+	}
+	parts = append(parts,
+		map[string]any{"type": "text", "text": "[current clip]:"},
+		audioPart(currentWAV),
+	)
+	return parts
+}
+
+// audioPart wraps PCM-WAV bytes as a single input_audio content part
+// in Lemonade's OpenAI-compat shape.
+func audioPart(wav []byte) map[string]any {
+	return map[string]any{
+		"type": "input_audio",
+		"input_audio": map[string]any{
+			"data":   base64.StdEncoding.EncodeToString(wav),
+			"format": "wav",
 		},
 	}
 }

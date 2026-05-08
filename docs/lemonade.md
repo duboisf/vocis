@@ -164,11 +164,22 @@ Notes on the chat-audio path:
   caps each chunk at `chunk_max_seconds` (default 28) and force-cuts
   long monologues. Most pause-driven utterances finish well under
   this, so the cap rarely fires in practice.
-- **Few-shot history** — `history_turns` (default 2) prior chunks are
-  resent as `user`/`assistant` pairs on each request so the model
-  keeps proper-noun spelling, code-switching, and natural turn
-  boundaries consistent across chunk boundaries. Larger values balloon
-  request body size fast (~1.3 MB base64 audio per turn at 30s).
+- **Cross-chunk context** — `history_turns` (default 2) controls how
+  many prior chunks come along on each request. The shape of those
+  priors is picked by `context_mode`:
+  - `few_shot` (default) — each prior chunk is sent as a
+    `(user-audio, assistant-transcript)` turn pair. The model sees
+    its own prior transcripts verbatim, which keeps proper-noun
+    spelling stable across chunks.
+  - `inline_clips` — prior chunks are appended as additional
+    `input_audio` parts inside the same user message, alongside the
+    current chunk; the leading instruction is rewritten to scope the
+    answer to the FINAL clip. Matches the multi-audio shape in
+    Google's Gemma 4 docs. Cost: model has to re-decode the prior
+    audio every request rather than trusting a pinned transcript, so
+    cross-chunk consistency is somewhat weaker.
+  Both modes balloon request body size with `history_turns` —
+  ~1.3 MB of base64 audio per prior chunk at 30s.
 - **Streaming** — `stream: true` (default) drives live overlay
   partials from SSE deltas. Disable for slightly lower latency at the
   cost of the live-typing UX.

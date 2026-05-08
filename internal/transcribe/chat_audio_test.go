@@ -169,6 +169,86 @@ func TestBuildMessagesRespectsHistoryTurnsCap(t *testing.T) {
 	}
 }
 
+func TestBuildMessagesInlineClipsSingleUserTurn(t *testing.T) {
+	t.Parallel()
+	s := &chatAudioSession{
+		promptTemplate: "Transcribe in {language}.",
+		language:       "en",
+		historyTurns:   2,
+		contextMode:    config.ChatAudioContextInlineClips,
+	}
+	s.history = []chatTurn{
+		{wav: []byte("wavA"), transcript: "alpha"},
+		{wav: []byte("wavB"), transcript: "bravo"},
+	}
+	msgs := s.buildMessages([]byte("wavCurrent"))
+	if len(msgs) != 1 {
+		t.Fatalf("len=%d want 1 (single user message)", len(msgs))
+	}
+	if msgs[0]["role"] != "user" {
+		t.Fatalf("role=%v want user", msgs[0]["role"])
+	}
+	parts, ok := msgs[0]["content"].([]map[string]any)
+	if !ok {
+		t.Fatalf("content type=%T", msgs[0]["content"])
+	}
+	// 1 leading text + 2*(prior count) + 2 (current label + audio) =
+	// 1 + 4 + 2 = 7 parts
+	if len(parts) != 7 {
+		t.Fatalf("parts=%d want 7", len(parts))
+	}
+	// Leading instruction must scope to the FINAL clip when context
+	// is non-empty.
+	leading := parts[0]
+	if leading["type"] != "text" {
+		t.Fatalf("leading type=%v", leading["type"])
+	}
+	if !strings.Contains(leading["text"].(string), "FINAL clip") {
+		t.Fatalf("leading instruction missing FINAL-clip directive: %q", leading["text"])
+	}
+	// Parts 1,3 are prior labels; parts 2,4 are prior audio.
+	if parts[1]["text"] != "[prior clip 1]:" {
+		t.Fatalf("parts[1]=%v", parts[1])
+	}
+	if parts[3]["text"] != "[prior clip 2]:" {
+		t.Fatalf("parts[3]=%v", parts[3])
+	}
+	if parts[2]["type"] != "input_audio" || parts[4]["type"] != "input_audio" {
+		t.Fatalf("prior audio parts wrong types: %v %v", parts[2]["type"], parts[4]["type"])
+	}
+	// Last two parts: current label + current audio.
+	if parts[5]["text"] != "[current clip]:" {
+		t.Fatalf("parts[5]=%v", parts[5])
+	}
+	if parts[6]["type"] != "input_audio" {
+		t.Fatalf("parts[6]=%v", parts[6])
+	}
+	audio := parts[6]["input_audio"].(map[string]any)
+	decoded, err := base64.StdEncoding.DecodeString(audio["data"].(string))
+	if err != nil || string(decoded) != "wavCurrent" {
+		t.Fatalf("current audio decode mismatch err=%v got=%q", err, decoded)
+	}
+}
+
+func TestBuildMessagesInlineClipsNoHistoryUsesPlainPrompt(t *testing.T) {
+	t.Parallel()
+	s := &chatAudioSession{
+		promptTemplate: "Transcribe in {language}.",
+		language:       "en",
+		historyTurns:   2,
+		contextMode:    config.ChatAudioContextInlineClips,
+	}
+	msgs := s.buildMessages([]byte("wavCurrent"))
+	parts := msgs[0]["content"].([]map[string]any)
+	leading := parts[0]["text"].(string)
+	if strings.Contains(leading, "FINAL clip") {
+		t.Fatalf("expected plain prompt without FINAL-clip directive when no history; got %q", leading)
+	}
+	if leading != "Transcribe in en." {
+		t.Fatalf("plain prompt mismatch: %q", leading)
+	}
+}
+
 func TestBuildMessagesNoHistoryWhenZeroTurns(t *testing.T) {
 	t.Parallel()
 	s := &chatAudioSession{

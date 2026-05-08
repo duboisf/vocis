@@ -80,3 +80,58 @@ func TestChatAudioLiveLemonade(t *testing.T) {
 	}
 	t.Logf("live transcript: %q", strings.TrimSpace(res.Text))
 }
+
+// TestChatAudioLiveLemonadeInlineClips verifies the inline-clips
+// context mode produces a request shape Lemonade accepts. Sends two
+// short clips through the session (forcing a force-cut), the second
+// of which carries the first's audio inline as a [prior clip 1] part.
+// Same gating as the few-shot live test.
+func TestChatAudioLiveLemonadeInlineClips(t *testing.T) {
+	if os.Getenv("VOCIS_LIVE_LEMONADE") != "1" {
+		t.Skip("VOCIS_LIVE_LEMONADE not set; skipping live Lemonade integration test")
+	}
+
+	cfg := config.TranscriptionConfig{
+		Backend: config.BackendLemonadeChat,
+		BaseURL: "http://localhost:13305/api/v1",
+		Model:   "gemma4-it-e2b-FLM",
+		ChatAudio: config.ChatAudioConfig{
+			ChunkMaxSeconds: 2, // force a 2-chunk run from 4s of audio
+			HistoryTurns:    1,
+			Prompt: "Transcribe the following speech segment in {language}. " +
+				"Only output the transcription, with no newlines.",
+			Language:    "en",
+			Stream:      true,
+			ContextMode: config.ChatAudioContextInlineClips,
+		},
+	}
+	samples := make(chan []int16, 1)
+	opts := DictationOpts{
+		SampleRate: 16000,
+		Channels:   1,
+		Samples:    samples,
+	}
+
+	const seconds = 4
+	audio := make([]int16, 16000*seconds)
+	amp := int16(math.MaxInt16 / 10)
+	for i := range audio {
+		audio[i] = int16(float64(amp) * math.Sin(2*math.Pi*440*float64(i)/16000))
+	}
+
+	httpClient := &http.Client{Timeout: 60 * time.Second}
+	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, httpClient, opts)
+	if err != nil {
+		t.Fatalf("startChatAudioSession: %v", err)
+	}
+	samples <- audio
+	close(samples)
+
+	finalCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	res, err := session.Finalize(finalCtx)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	t.Logf("inline-clips live transcript: %q", strings.TrimSpace(res.Text))
+}
