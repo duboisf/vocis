@@ -144,6 +144,37 @@ After the patch, `/health` reports `whisper-v3-turbo-FLM` with
 llm slot for postprocess. The patch is overwritten on every FLM
 package upgrade — track upstream until a permanent fix lands.
 
+### gemma4 chat-audio workaround for the audio→llm reclassification
+
+**Workaround as of vocis main:** flip
+`transcription.backend: lemonade-chat` and use Gemma's native audio
+mode through `/chat/completions`. The model accepts a multimodal
+content array with an `input_audio` part (base64 WAV); vocis chunks
+speech with Silero VAD, sends one POST per chunk, and threads context
+across chunks via a few-shot history of prior `(audio, transcript)`
+pairs. See [`chat_audio.go`](../internal/transcribe/chat_audio.go) and
+the `transcription.chat_audio` block in `config.example.yaml`.
+
+Run `vocis config backend` and pick option 3 to flip the backend; it
+also rewrites `model` to `gemma4-it-e2b-FLM` automatically.
+
+Notes on the chat-audio path:
+
+- **30-second cap per request** — Gemma's documented limit. vocis
+  caps each chunk at `chunk_max_seconds` (default 28) and force-cuts
+  long monologues. Most pause-driven utterances finish well under
+  this, so the cap rarely fires in practice.
+- **Few-shot history** — `history_turns` (default 2) prior chunks are
+  resent as `user`/`assistant` pairs on each request so the model
+  keeps proper-noun spelling, code-switching, and natural turn
+  boundaries consistent across chunk boundaries. Larger values balloon
+  request body size fast (~1.3 MB base64 audio per turn at 30s).
+- **Streaming** — `stream: true` (default) drives live overlay
+  partials from SSE deltas. Disable for slightly lower latency at the
+  cost of the live-typing UX.
+- **Hallucination filters still apply** — backend-agnostic; Whisper
+  and Gemma both emit "Thank you." on quiet audio.
+
 ### Older versions
 
 vocis may still work against pre-10.3 Lemonade for basic

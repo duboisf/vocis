@@ -189,9 +189,10 @@ func runConfigBackend() error {
 
 	fmt.Printf("Current backend: %s\n\n", cfg.Transcription.Backend)
 	fmt.Println("Available backends:")
-	fmt.Println("  1) openai    — hosted OpenAI realtime API (requires API key)")
-	fmt.Println("  2) lemonade  — local Lemonade Server (no auth, autodetected on localhost)")
-	fmt.Print("\nPick [1-2]: ")
+	fmt.Println("  1) openai         — hosted OpenAI realtime API (requires API key)")
+	fmt.Println("  2) lemonade       — local Lemonade Server, realtime WS (Whisper-FLM family)")
+	fmt.Println("  3) lemonade-chat  — local Lemonade Server, chat-completions with input_audio (Gemma audio)")
+	fmt.Print("\nPick [1-3]: ")
 
 	choice, err := readLine()
 	if err != nil {
@@ -214,6 +215,23 @@ func runConfigBackend() error {
 			status = "detected running Lemonade Server"
 		}
 		fmt.Printf("\nSet backend=lemonade (%s)\n  base_url=%s\n  realtime_url=%s\n", status, base, ws)
+	case "3", "lemonade-chat":
+		cfg.Transcription.Backend = config.BackendLemonadeChat
+		base, _, detected := detectLemonade()
+		cfg.Transcription.BaseURL = base
+		// realtime_url is unused by this backend; leave whatever the
+		// user already had so they can flip back to lemonade without
+		// losing the WS endpoint.
+		// Default the model to the user-tested Gemma 4 audio variant.
+		if cfg.Transcription.Model == "" || cfg.Transcription.Model == "whisper-v3-turbo-FLM" {
+			cfg.Transcription.Model = "gemma4-it-e2b-FLM"
+		}
+		status := "used defaults (no server responded)"
+		if detected {
+			status = "detected running Lemonade Server"
+		}
+		fmt.Printf("\nSet backend=lemonade-chat (%s)\n  base_url=%s\n  model=%s\n",
+			status, base, cfg.Transcription.Model)
 	default:
 		return fmt.Errorf("invalid choice: %q", strings.TrimSpace(choice))
 	}
@@ -312,7 +330,7 @@ func runConfigModels() error {
 
 func fetchModels(cfg config.Config) (tx, pp []modelChoice, err error) {
 	switch cfg.Transcription.Backend {
-	case config.BackendLemonade:
+	case config.BackendLemonade, config.BackendLemonadeChat:
 		return fetchLemonadeModels(cfg)
 	case config.BackendOpenAI, "":
 		return fetchOpenAIModels(cfg)

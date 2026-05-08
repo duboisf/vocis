@@ -45,6 +45,7 @@ type Client struct {
 	client       openaisdk.Client
 	chatStreamer chatCompletionStreamer
 	transport    Transport
+	httpClient   *http.Client
 	writeTimeout time.Duration
 }
 
@@ -55,7 +56,7 @@ func New(apiKey string, cfg config.TranscriptionConfig, streaming config.Streami
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
-	if cfg.Backend != config.BackendLemonade && baseURL != defaultBaseURL {
+	if !config.IsLocalBackend(cfg.Backend) && baseURL != defaultBaseURL {
 		sessionlog.Warnf("openai base_url is non-default: %s", baseURL)
 	}
 
@@ -96,9 +97,19 @@ func New(apiKey string, cfg config.TranscriptionConfig, streaming config.Streami
 				streaming.Threshold)
 		}
 		transport = newLemonadeTransport(cfg, streaming, timeout)
+	case config.BackendLemonadeChat:
+		// chat-audio backend has no realtime WS transport — it runs
+		// /chat/completions per chunk through Client.httpClient. Leave
+		// transport nil; StartDictation dispatches before touching it.
 	default:
 		transport = newOpenAITransport(cfg, streaming, sdkClient, baseURL, timeout)
 	}
+
+	// Plain http.Client for the chat-audio backend. timeout=0 disables
+	// the per-request cap (matches the SDK option above) so a cold
+	// local model load can complete on first request without tripping
+	// a fixed deadline.
+	httpClient := &http.Client{Timeout: timeout}
 
 	return &Client{
 		cfg:          cfg,
@@ -106,6 +117,7 @@ func New(apiKey string, cfg config.TranscriptionConfig, streaming config.Streami
 		client:       sdkClient,
 		chatStreamer: &sdkChatStreamer{completions: &sdkClient.Chat.Completions},
 		transport:    transport,
+		httpClient:   httpClient,
 		writeTimeout: minDuration(timeout, 5*time.Second),
 	}
 }
@@ -796,6 +808,15 @@ type FinalizeResult struct {
 	Text string
 }
 
+// Dictation is the surface every backend's session must expose to the
+// app and recall packages. The realtime-WS path returns *DictationSession;
+// the lemonade-chat path returns *chatAudioSession. Callers don't need
+// to know which — they only consume Events() and Finalize().
+type Dictation interface {
+	Events() <-chan DictationEvent
+	Finalize(ctx context.Context) (FinalizeResult, error)
+}
+
 // ConnectCallbacks receives notifications about connection status.
 type ConnectCallbacks struct {
 	OnConnecting func(attempt, max int)
@@ -851,12 +872,16 @@ type finalResult struct {
 	err  error
 }
 
-func (c *Client) StartDictation(ctx context.Context, opts DictationOpts) (*DictationSession, error) {
+func (c *Client) StartDictation(ctx context.Context, opts DictationOpts) (Dictation, error) {
 	if opts.SampleRate <= 0 {
 		return nil, errors.New("recording.sample_rate must be greater than zero")
 	}
 	if opts.Channels <= 0 {
 		return nil, errors.New("recording.channels must be greater than zero")
+	}
+
+	if c.cfg.Backend == config.BackendLemonadeChat {
+		return startChatAudioSession(ctx, c.cfg, c.streaming, c.httpClient, opts)
 	}
 
 	pumpCtx, cancel := context.WithCancel(ctx)

@@ -208,7 +208,7 @@ func runRecallStart() error {
 	defer shutdownTelemetry(context.Background())
 
 	apiKey := ""
-	if cfg.Transcription.Backend != config.BackendLemonade {
+	if !config.IsLocalBackend(cfg.Transcription.Backend) {
 		key, err := securestore.New().APIKey()
 		if err != nil {
 			return fmt.Errorf("load api key: %w", err)

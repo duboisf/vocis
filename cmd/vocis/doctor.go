@@ -91,7 +91,7 @@ func runDoctor() error {
 		}
 	}
 
-	if cfg, _, err := config.Load(); err == nil && cfg.Transcription.Backend == config.BackendLemonade {
+	if cfg, _, err := config.Load(); err == nil && config.IsLocalBackend(cfg.Transcription.Backend) {
 		checkLemonadeModels(cfg)
 	}
 

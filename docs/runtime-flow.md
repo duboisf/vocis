@@ -241,7 +241,7 @@ When telemetry is enabled, the following OpenTelemetry spans are emitted per dic
     - `vocis.capture_target` — identify the focused window. `capture.source` = `xdotool` or `extension`; the extension path nests `vocis.gnome.get_focused_window` for the D-Bus call.
     - `vocis.recorder.start` — PulseAudio client init and stream creation
     - `vocis.recording.active` — the user speaking (from dictation start to release)
-    - `vocis.transcribe.connect` — WebSocket dial and session setup (may appear multiple times on retry). `transcribe.backend` = `openai` or `lemonade`.
+    - `vocis.transcribe.connect` — WebSocket dial and session setup (may appear multiple times on retry). `transcribe.backend` = `openai` or `lemonade`. Not emitted on the `lemonade-chat` backend, which has no upfront connection — it instead emits one `vocis.transcribe.chat_audio.chunk` span per VAD-bounded audio chunk, with `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, and `chunk.request_bytes` attributes. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing` instead of the WS-flavoured `commit`/`wait_final` spans.
     - `vocis.recorder.stop` — stream stop and resource cleanup
     - `vocis.transcribe.finalize` — post-recording finalization
       - `vocis.transcribe.commit` — commit trailing audio buffer to the backend (skipped when server VAD already drained the buffer; `commit.empty_swallowed=true` when we raced VAD)

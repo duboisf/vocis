@@ -223,12 +223,70 @@ type TranscriptionConfig struct {
 	// "Thanks for watching." — on silence or very quiet audio. Exact
 	// match only; a substring filter would eat legitimate speech.
 	HallucinationFilters []string `yaml:"hallucination_filters"`
+	// ChatAudio holds the knobs for the lemonade-chat backend, which
+	// transcribes by POSTing WAV-wrapped audio chunks to an OpenAI-
+	// compatible /chat/completions endpoint with the audio embedded
+	// as an `input_audio` content part. Unused for the openai and
+	// lemonade (realtime WS) backends.
+	ChatAudio ChatAudioConfig `yaml:"chat_audio"`
+}
+
+// ChatAudioConfig drives the lemonade-chat backend. The audio path is
+// fundamentally different from the realtime WebSocket transports — it
+// chunks speech with Silero VAD, wraps each chunk in a WAV header,
+// and sends one /chat/completions request per chunk. Each request
+// carries a few-shot history of prior (audio, transcript) pairs so
+// the model keeps cross-chunk context (matters for proper nouns,
+// code-switching, and natural turn boundaries beyond the 30s cap).
+type ChatAudioConfig struct {
+	// ChunkMaxSeconds is the upper bound on a single chunk's audio
+	// duration, in seconds. Gemma 3n / 4 cap audio at 30s per request,
+	// so we hold a safety margin under that. A long monologue without
+	// a VAD-detected pause gets force-cut at this boundary and the
+	// remainder rolls into the next chunk.
+	ChunkMaxSeconds int `yaml:"chunk_max_seconds"`
+	// HistoryTurns is how many prior (user-audio, assistant-transcript)
+	// pairs to include as few-shot context on each request. 0 disables
+	// history entirely (each chunk transcribed in isolation). Larger
+	// values balloon the request body fast — at 30s of 16 kHz mono
+	// PCM16 each prior turn adds ~1.3 MB of base64 audio, so keep it
+	// modest. Default 2 matches the user's tested payload shape.
+	HistoryTurns int `yaml:"history_turns"`
+	// Prompt is the instruction text sent alongside every audio chunk.
+	// Defaults to the Google-recommended ASR prompt with formatting
+	// rules. {language} expands to Language at send time.
+	Prompt string `yaml:"prompt"`
+	// Language is the spoken language hint substituted into Prompt.
+	// "its original language" lets the model auto-detect (and is what
+	// the user tested with). Set to "en", "fr", etc. to force.
+	Language string `yaml:"language"`
+	// Stream controls whether requests use SSE streaming. true emits
+	// per-token deltas to the overlay as they arrive; false waits for
+	// the full completion before showing the chunk transcript.
+	Stream bool `yaml:"stream"`
 }
 
 const (
-	BackendOpenAI   = "openai"
-	BackendLemonade = "lemonade"
+	BackendOpenAI       = "openai"
+	BackendLemonade     = "lemonade"
+	BackendLemonadeChat = "lemonade-chat"
 )
+
+// IsLocalBackend reports whether the backend points at a local
+// Lemonade Server (either WS realtime or chat-audio). Local backends
+// run unauthenticated, so callers use this to skip API-key resolution
+// and to gate Lemonade-specific preflight / health probes.
+func IsLocalBackend(backend string) bool {
+	return backend == BackendLemonade || backend == BackendLemonadeChat
+}
+
+// DefaultChatAudioPrompt is the transcription instruction validated
+// against gemma4-it-e2b-FLM via Lemonade. The {language} token
+// expands to ChatAudioConfig.Language at request build time.
+const DefaultChatAudioPrompt = "Transcribe the following speech segment in {language}. " +
+	"Follow these specific instructions for formatting the answer:\n" +
+	"* Only output the transcription, with no newlines.\n" +
+	"* When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three."
 
 type RecordingConfig struct {
 	Backend            string  `yaml:"backend"`
@@ -416,6 +474,18 @@ func Default() Config {
 				"Bye.",
 				"you",
 				".",
+			},
+			ChatAudio: ChatAudioConfig{
+				// 28s holds a 2s margin under the documented 30s cap so
+				// rounding/header overhead can't trip the limit.
+				ChunkMaxSeconds: 28,
+				// 2 prior turns matches the user-tested payload. Adds
+				// ~2.6 MB worst-case base64 to a request body — large
+				// but well under any sane HTTP body limit.
+				HistoryTurns: 2,
+				Prompt:       DefaultChatAudioPrompt,
+				Language:     "its original language",
+				Stream:       true,
 			},
 		},
 		Recording: RecordingConfig{
@@ -712,9 +782,26 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Transcription.Backend {
-	case "", BackendOpenAI, BackendLemonade:
+	case "", BackendOpenAI, BackendLemonade, BackendLemonadeChat:
 	default:
-		return fmt.Errorf("transcription.backend must be %q or %q", BackendOpenAI, BackendLemonade)
+		return fmt.Errorf("transcription.backend must be %q, %q, or %q",
+			BackendOpenAI, BackendLemonade, BackendLemonadeChat)
+	}
+
+	if c.Transcription.Backend == BackendLemonadeChat {
+		ca := c.Transcription.ChatAudio
+		if ca.ChunkMaxSeconds < 1 || ca.ChunkMaxSeconds > 30 {
+			return errors.New("transcription.chat_audio.chunk_max_seconds must be between 1 and 30")
+		}
+		if ca.HistoryTurns < 0 || ca.HistoryTurns > 8 {
+			return errors.New("transcription.chat_audio.history_turns must be between 0 and 8")
+		}
+		if strings.TrimSpace(ca.Prompt) == "" {
+			return errors.New("transcription.chat_audio.prompt must not be empty")
+		}
+		if strings.TrimSpace(ca.Language) == "" {
+			return errors.New("transcription.chat_audio.language must not be empty")
+		}
 	}
 
 	switch c.HotkeyMode {

@@ -199,7 +199,7 @@ Generate shell completions:
 
 ## Backends
 
-`vocis` supports two transcription backends, configured under `transcription:`:
+`vocis` supports three transcription backends, configured under `transcription:`:
 
 ### Lemonade (local, default)
 
@@ -225,6 +225,25 @@ which 10.3 protocol/classification changes vocis depends on (the
 `input_audio_buffer.cleared` finalize handshake, the
 `gemma4-it-e2b-FLM` audio→llm reclassification, and the preflight
 label guard).
+
+### Lemonade chat-audio (local Gemma)
+
+- `transcription.backend: lemonade-chat`
+- `transcription.base_url: http://localhost:13305/api/v1`
+- `transcription.model: gemma4-it-e2b-FLM` (or another Gemma audio variant)
+
+Drives Gemma's native multimodal audio mode through Lemonade's
+OpenAI-compatible `/chat/completions` endpoint instead of the realtime
+WebSocket. Speech is segmented client-side with Silero VAD, each chunk
+is wrapped in a WAV and sent as one POST with the audio embedded as an
+`input_audio` content part, and a few-shot history of prior `(audio,
+transcript)` pairs threads context across the documented 30-second
+per-call cap. SSE streaming drives live overlay partials.
+
+Tunable knobs live under `transcription.chat_audio:` —
+`chunk_max_seconds`, `history_turns`, `prompt`, `language`, `stream`.
+Run `vocis config backend` and pick option 3 to flip; it also rewrites
+`model` to `gemma4-it-e2b-FLM` automatically.
 
 ### OpenAI Cloud
 

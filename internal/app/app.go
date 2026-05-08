@@ -47,7 +47,7 @@ type recordingState struct {
 	id        uint64
 	startedAt time.Time
 	session   *recorder.Session
-	dictation *transcribe.DictationSession
+	dictation transcribe.Dictation
 	cancel    context.CancelFunc
 	target      platform.Target
 	liveText    string
@@ -142,8 +142,8 @@ func (a *App) Run(ctx context.Context) error {
 	sessionlog.Infof("starting vocis session")
 	recorder.CleanupStale()
 
-	if a.cfg.Transcription.Backend == config.BackendLemonade {
-		// Lemonade runs locally with no auth.
+	if config.IsLocalBackend(a.cfg.Transcription.Backend) {
+		// Local Lemonade backends run unauthenticated.
 		a.apiKey = ""
 	} else {
 		apiKey, err := a.store.APIKey()
