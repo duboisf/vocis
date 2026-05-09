@@ -432,18 +432,18 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		spanCtx:    spanCtx,
 		submitMode: a.cfg.Insertion.AutoSubmit,
 	}
-	// When chat-audio + combine_postprocess + postprocess.enabled, fold
-	// postprocess.prompt into the chat-audio system message so a single
-	// /chat/completions round-trip covers transcription AND cleanup.
-	// The corresponding skip lives in finishRecording (gated on
-	// state.combinedPostProcess) so we don't make a second call.
+	// chat-audio is an LLM doing transcription, so it's just as capable
+	// of cleanup as a dedicated postprocess pass. Whenever postprocess
+	// is enabled we fold its prompt into the chat-audio system message
+	// and skip the separate /chat/completions round-trip — same final
+	// text, half the latency. The corresponding skip lives in
+	// finishRecording (gated on state.combinedPostProcess).
 	state.combinedPostProcess = a.cfg.Transcription.Backend == config.BackendLemonadeChat &&
-		a.cfg.Transcription.ChatAudio.CombinePostProcess &&
 		a.cfg.PostProcess.Enabled
 	var extraSystemPrompt string
 	if state.combinedPostProcess {
 		extraSystemPrompt = a.cfg.PostProcess.Prompt
-		sessionlog.Infof("chat-audio: combine_postprocess on; folding postprocess.prompt (%d chars) into system message", len(extraSystemPrompt))
+		sessionlog.Infof("chat-audio: folding postprocess.prompt (%d chars) into system message; skipping separate postprocess call", len(extraSystemPrompt))
 	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
 		SampleRate:        a.cfg.Recording.SampleRate,
