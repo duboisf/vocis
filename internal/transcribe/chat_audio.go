@@ -85,8 +85,18 @@ type chatAudioSession struct {
 // trailing=true marks the last chunk produced after the samples
 // channel closed — the worker treats it as the trigger to close the
 // finals channel.
+//
+// Most chunks are single-clip (clips has one entry) — VAD-stopped
+// utterances or short holds. When the user holds the hotkey through
+// a long monologue and chunk_max_seconds force-cuts fire, the cut
+// audio accumulates without going on the wire. The next natural
+// flush (VAD-stopped pause or hotkey release) emits a multi-clip
+// chunk that carries every accumulated force-cut as its own audio
+// part. Lemonade's gemma-audio handles multiple input_audio parts
+// in one user message per Google's docs, so the model sees the full
+// utterance context in one round-trip.
 type chatChunk struct {
-	pcm      []int16
+	clips    [][]int16
 	trailing bool
 }
 
@@ -260,6 +270,13 @@ func (s *chatAudioSession) run(
 	}
 
 	var buf []int16
+	// pendingForceCuts accumulates clips force-cut at chunk_max_seconds.
+	// They don't go on the wire individually — they wait for the next
+	// natural flush (VAD-stopped pause or hotkey release) to be sent
+	// as a single multi-clip request. Gives the model the full
+	// utterance audio in one round-trip and avoids per-chunk
+	// transcribe/respond cycles for long uninterrupted speech.
+	var pendingForceCuts [][]int16
 	connectedFired := false
 	fireConnected := func() {
 		if connectedFired {
@@ -271,45 +288,46 @@ func (s *chatAudioSession) run(
 		}
 	}
 	flush := func(reason string, trailing bool) {
-		if len(buf) == 0 {
+		if len(buf) == 0 && len(pendingForceCuts) == 0 {
 			if trailing {
-				// No trailing audio — still send the sentinel so
+				// No audio at all — still send the sentinel so
 				// the worker closes finals.
 				s.chunksCh <- chatChunk{trailing: true}
 			}
 			return
 		}
-		// Copy the slice so the worker owns its own memory. The
-		// pump reuses buf across chunks. No tail-silence pad here —
-		// Gemma audio handles trailing words cleanly without one,
-		// unlike Whisper which needs the pad to segment the last word.
-		chunk := make([]int16, len(buf))
-		copy(chunk, buf)
-		buf = buf[:0]
-		sessionlog.Debugf("chat-audio: flush chunk reason=%s samples=%d (~%dms) trailing=%t",
-			reason, len(chunk), len(chunk)*1000/s.sampleRate, trailing)
-		s.chunksCh <- chatChunk{pcm: chunk, trailing: trailing}
-	}
-	// flushAtCap emits exactly chunkMaxSamples and keeps the remainder
-	// in buf for the next chunk. Used by the force-cut path so a single
-	// large samples-channel chunk that exceeds the cap doesn't get
-	// flushed whole (which would put a chunk *over* the documented 30 s
-	// audio cap on the wire).
-	flushAtCap := func() {
-		if len(buf) <= s.chunkMaxSamples {
-			flush("chunk_max", false)
-			return
+		// Drain pendingForceCuts ahead of the current buffer so the
+		// model sees clips in spoken order.
+		clips := pendingForceCuts
+		pendingForceCuts = nil
+		if len(buf) > 0 {
+			tail := make([]int16, len(buf))
+			copy(tail, buf)
+			buf = buf[:0]
+			clips = append(clips, tail)
 		}
+		var totalSamples int
+		for _, c := range clips {
+			totalSamples += len(c)
+		}
+		sessionlog.Debugf("chat-audio: flush chunk reason=%s clips=%d total_samples=%d (~%dms) trailing=%t",
+			reason, len(clips), totalSamples, totalSamples*1000/s.sampleRate, trailing)
+		s.chunksCh <- chatChunk{clips: clips, trailing: trailing}
+	}
+	// flushAtCap slices off exactly chunkMaxSamples from buf and
+	// appends it to pendingForceCuts. The cut clip waits for the next
+	// natural flush instead of going out as its own request — this is
+	// the batching that lets a long monologue produce one multi-clip
+	// POST instead of N separate ones.
+	flushAtCap := func() {
 		head := make([]int16, s.chunkMaxSamples)
 		copy(head, buf[:s.chunkMaxSamples])
-		// Keep the tail in buf — copy down so the underlying array
-		// doesn't grow unbounded across many force-cuts.
 		tailLen := len(buf) - s.chunkMaxSamples
 		copy(buf, buf[s.chunkMaxSamples:])
 		buf = buf[:tailLen]
-		sessionlog.Debugf("chat-audio: flush chunk reason=chunk_max samples=%d (~%dms) trailing=false (%dms tail kept)",
-			len(head), len(head)*1000/s.sampleRate, tailLen*1000/s.sampleRate)
-		s.chunksCh <- chatChunk{pcm: head}
+		pendingForceCuts = append(pendingForceCuts, head)
+		sessionlog.Warnf("chat-audio: force-cut at %ds (utterance > chunk_max_seconds), %d clip(s) batched, %dms tail kept",
+			s.chunkMaxSamples/s.sampleRate, len(pendingForceCuts), tailLen*1000/s.sampleRate)
 	}
 
 	for {
@@ -367,27 +385,33 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			if !ok {
 				return
 			}
-			if len(chunk.pcm) == 0 {
+			if len(chunk.clips) == 0 {
 				if chunk.trailing {
 					return
 				}
 				continue
 			}
-			// Energy gate: never POST a chunk that's below the
-			// configured peak/RMS thresholds. Without VAD, a hold
-			// over silence would otherwise send the entire silent
-			// buffer to Gemma, which then hallucinates a long
-			// "I cannot transcribe..." response. With VAD on, this
-			// is just defense in depth.
-			if peak, rms, ok := s.passEnergyGate(chunk.pcm); !ok {
-				sessionlog.Infof("chat-audio: dropped silent chunk peak=%.4f rms=%.4f (min_peak=%.4f min_rms=%.4f)",
-					peak, rms, s.minChunkPeak, s.minChunkRMS)
+			// Energy gate per clip — drop any silent clips before
+			// the POST. Without VAD, a hold over silence would
+			// otherwise send the entire silent buffer to Gemma,
+			// which hallucinates a long "I cannot transcribe..."
+			// response. With VAD on, this is defense in depth.
+			liveClips := chunk.clips[:0:0]
+			for _, c := range chunk.clips {
+				if peak, rms, ok := s.passEnergyGate(c); !ok {
+					sessionlog.Infof("chat-audio: dropped silent clip peak=%.4f rms=%.4f (min_peak=%.4f min_rms=%.4f)",
+						peak, rms, s.minChunkPeak, s.minChunkRMS)
+					continue
+				}
+				liveClips = append(liveClips, c)
+			}
+			if len(liveClips) == 0 {
 				if chunk.trailing {
 					return
 				}
 				continue
 			}
-			text, err := s.transcribeChunk(ctx, chunk.pcm)
+			text, err := s.transcribeChunk(ctx, liveClips)
 			if err != nil {
 				sessionlog.Errorf("chat-audio: chunk transcription failed: %v", err)
 				if !s.liveSegments.Load() {
@@ -409,8 +433,14 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			if text != "" {
 				// Push to history regardless of live/final routing —
 				// the model needs continuity across the chunk boundary
-				// even when the result hasn't been delivered yet.
-				s.appendHistory(chatTurn{wav: encodePCM16WAV(chunk.pcm, s.sampleRate), transcript: text})
+				// even when the result hasn't been delivered yet. For
+				// multi-clip requests we fold the clips into a single
+				// concatenated WAV for the history slot since that
+				// matches the assistant turn's transcript scope.
+				s.appendHistory(chatTurn{
+					wav:        encodePCM16WAV(concatClips(liveClips), s.sampleRate),
+					transcript: text,
+				})
 				formatted := s.formatSegmentText(text)
 				if s.liveSegments.Load() {
 					select {
@@ -431,19 +461,27 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 	}
 }
 
-// transcribeChunk wraps PCM as WAV, builds the few-shot message list,
+// transcribeChunk wraps each clip as WAV, builds the message list,
 // posts to /chat/completions, and returns the assembled transcript.
 // Emits SSE deltas as DictationEventPartial events while the response
-// streams (when streamSSE is on).
-func (s *chatAudioSession) transcribeChunk(ctx context.Context, pcm []int16) (string, error) {
+// streams (when streamSSE is on). Multi-clip chunks (force-cut
+// batches) produce one POST with N input_audio parts and skip
+// few-shot history — the audio itself IS the cross-chunk context.
+func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16) (string, error) {
+	var totalSamples int
+	wavs := make([][]byte, len(clips))
+	for i, c := range clips {
+		wavs[i] = encodePCM16WAV(c, s.sampleRate)
+		totalSamples += len(c)
+	}
 	chunkCtx, span := telemetry.StartSpan(ctx, "vocis.transcribe.chat_audio.chunk",
-		attribute.Int("chunk.samples", len(pcm)),
-		attribute.Int("chunk.duration_ms", len(pcm)*1000/s.sampleRate),
+		attribute.Int("chunk.clip_count", len(clips)),
+		attribute.Int("chunk.total_samples", totalSamples),
+		attribute.Int("chunk.duration_ms", totalSamples*1000/s.sampleRate),
 	)
 	defer telemetry.EndSpan(span, nil)
 
-	wav := encodePCM16WAV(pcm, s.sampleRate)
-	messages := s.buildMessages(wav)
+	messages := s.buildMessages(wavs)
 	body := map[string]any{
 		"model":    s.model,
 		"messages": messages,
@@ -453,13 +491,17 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, pcm []int16) (st
 	if err != nil {
 		return "", fmt.Errorf("marshal chat-audio request: %w", err)
 	}
+	var totalWAVBytes int
+	for _, w := range wavs {
+		totalWAVBytes += len(w)
+	}
 	span.SetAttributes(
-		attribute.Int("chunk.wav_bytes", len(wav)),
+		attribute.Int("chunk.wav_bytes", totalWAVBytes),
 		attribute.Int("chunk.history_turns", s.historyLen()),
 		attribute.Int("chunk.request_bytes", len(raw)),
 	)
-	sessionlog.Infof("chat-audio: posting chunk wav=%dB history=%d req=%dB",
-		len(wav), s.historyLen(), len(raw))
+	sessionlog.Infof("chat-audio: posting chunk clips=%d wav=%dB history=%d req=%dB",
+		len(clips), totalWAVBytes, s.historyLen(), len(raw))
 	// Audit log of the exact request shape with audio bytes redacted
 	// to a "<wav N bytes>" placeholder. Lets a session-log reader
 	// inspect the prompt, model, message structure, and few-shot vs
@@ -614,42 +656,55 @@ func parseSSEDelta(payload string) (string, string, error) {
 // All instruction text lives in a single role:system message — keeping
 // the prompt out of role:user content is the regurgitation fix: small
 // instruct models like gemma4-it-e2b-FLM tend to echo prompt text
-// back when it sits next to the audio in user content (observed in
-// session 20260508-195858 — "transcribe the following segments which
-// contains possibly english french or a mix of both" came out
-// verbatim at the tail of a transcript whose last spoken word was
-// "transcribe"). The system role frames the same content as
-// meta-instruction the model treats as out-of-band.
+// back when it sits next to the audio in user content. The system
+// role frames the same content as meta-instruction the model treats
+// as out-of-band.
 //
-// User content carries only audio (plus audio-ordering text labels in
-// inline_clips mode). Two shapes are supported, picked by ContextMode:
+// User content carries only audio. Three shapes:
 //
-//	system:    instruction prompt (+ optional postprocess prompt)
-//	few_shot:
-//	  user:      [input_audio: prior chunk 1]
-//	  assistant: prior transcript 1
-//	  user:      [input_audio: prior chunk 2]
-//	  assistant: prior transcript 2
-//	  user:      [input_audio: current chunk]
+//	1. Single-clip, history-aware (few_shot mode):
+//	   system:   instruction
+//	   user:     [audio prior 1]
+//	   assistant: prior transcript 1
+//	   ...
+//	   user:     [audio current]
 //
-//	system:    instruction prompt (+ optional postprocess prompt) +
-//	             "transcribe ONLY the FINAL clip" addendum
-//	inline_clips:
-//	  user: [
-//	    text "[prior clip 1]:",  input_audio: prior chunk 1,
-//	    text "[prior clip 2]:",  input_audio: prior chunk 2,
-//	    text "[current clip]:",  input_audio: current chunk,
-//	  ]
+//	2. Single-clip, history-aware (inline_clips mode):
+//	   system:   instruction (+ "transcribe ONLY the FINAL clip" framing
+//	             when history non-empty)
+//	   user:     [text "[prior clip 1]:", audio prior 1, ..., text
+//	             "[current clip]:", audio current]
+//
+//	3. Multi-clip current (force-cut batch):
+//	   system:   instruction (+ "transcribe ALL clips as one continuous
+//	             utterance" framing)
+//	   user:     [text "[clip 1]:", audio 1, text "[clip 2]:", audio 2, ...]
+//	   History is intentionally skipped — the audio is the context.
 //
 // historyTurns caps the history fed back to the model. When 0 (or no
-// history yet) the request reduces to the single user message form.
-func (s *chatAudioSession) buildMessages(currentWAV []byte) []map[string]any {
+// history yet, or multi-clip) the request reduces to one user message.
+func (s *chatAudioSession) buildMessages(currentWAVs [][]byte) []map[string]any {
+	multiClip := len(currentWAVs) > 1
 	history := s.historySnapshot()
-	if s.historyTurns < len(history) {
+	if multiClip {
+		// Skip history for multi-clip requests — the clips themselves
+		// already give the model the full utterance audio. Mixing
+		// per-clip and per-utterance history shapes confuses the
+		// transcript boundary, and a multi-clip request body is
+		// already large; not adding more.
+		history = nil
+	} else if s.historyTurns < len(history) {
 		history = history[len(history)-s.historyTurns:]
 	}
+
 	systemPrompt := s.renderPrompt()
-	if s.contextMode == config.ChatAudioContextInlineClips && len(history) > 0 {
+	switch {
+	case multiClip:
+		systemPrompt = "You will receive several short audio clips that together form ONE continuous utterance " +
+			"(the audio was split for size). Transcribe ALL clips IN ORDER as a single continuous text — " +
+			"no clip labels, no separators, just the spoken content as if it were one recording.\n\n" +
+			systemPrompt
+	case s.contextMode == config.ChatAudioContextInlineClips && len(history) > 0:
 		systemPrompt = "You will receive several short audio clips, in order. " +
 			"Transcribe ONLY the FINAL clip; the earlier clips are provided " +
 			"as continuous context so you can keep proper-noun spelling, " +
@@ -665,10 +720,17 @@ func (s *chatAudioSession) buildMessages(currentWAV []byte) []map[string]any {
 		"content": systemPrompt,
 	})
 
-	if s.contextMode == config.ChatAudioContextInlineClips {
+	switch {
+	case multiClip:
 		msgs = append(msgs, map[string]any{
 			"role":    "user",
-			"content": inlineClipsContent(history, currentWAV),
+			"content": multiClipContent(currentWAVs),
+		})
+		return msgs
+	case s.contextMode == config.ChatAudioContextInlineClips:
+		msgs = append(msgs, map[string]any{
+			"role":    "user",
+			"content": inlineClipsContent(history, currentWAVs[0]),
 		})
 		return msgs
 	}
@@ -684,9 +746,25 @@ func (s *chatAudioSession) buildMessages(currentWAV []byte) []map[string]any {
 	}
 	msgs = append(msgs, map[string]any{
 		"role":    "user",
-		"content": []map[string]any{audioPart(currentWAV)},
+		"content": []map[string]any{audioPart(currentWAVs[0])},
 	})
 	return msgs
+}
+
+// multiClipContent builds the user message body for a force-cut batch —
+// each clip gets a "[clip N]:" label so the model can see the order,
+// then the input_audio part. The labels are conventional ordering
+// hints; the system message asks the model to ignore them in the
+// output and produce one continuous transcript.
+func multiClipContent(wavs [][]byte) []map[string]any {
+	parts := make([]map[string]any, 0, 2*len(wavs))
+	for i, w := range wavs {
+		parts = append(parts,
+			map[string]any{"type": "text", "text": fmt.Sprintf("[clip %d]:", i+1)},
+			audioPart(w),
+		)
+	}
+	return parts
 }
 
 // inlineClipsContent builds the inline-clips multimodal content array
@@ -706,6 +784,22 @@ func inlineClipsContent(history []chatTurn, currentWAV []byte) []map[string]any 
 		audioPart(currentWAV),
 	)
 	return parts
+}
+
+// concatClips joins multiple PCM clips into one slice. Used when
+// folding a multi-clip transcribed result into history — the
+// assistant's transcript covers the whole concatenated audio, so a
+// single chatTurn with all the audio is the right shape.
+func concatClips(clips [][]int16) []int16 {
+	total := 0
+	for _, c := range clips {
+		total += len(c)
+	}
+	out := make([]int16, 0, total)
+	for _, c := range clips {
+		out = append(out, c...)
+	}
+	return out
 }
 
 // audioPart wraps PCM-WAV bytes as a single input_audio content part

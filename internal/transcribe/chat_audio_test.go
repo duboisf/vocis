@@ -100,7 +100,7 @@ func TestBuildMessagesIncludesHistoryThenCurrent(t *testing.T) {
 		{wav: []byte("wav2"), transcript: "second"},
 	}
 	current := []byte("wavCurrent")
-	msgs := s.buildMessages(current)
+	msgs := s.buildMessages([][]byte{current})
 	// system + 2*(user/assistant) + final user = 6
 	if len(msgs) != 6 {
 		t.Fatalf("len=%d want 6 (system + 2 user/assistant pairs + 1 user)", len(msgs))
@@ -157,7 +157,7 @@ func TestBuildMessagesAppendsExtraSystemPrompt(t *testing.T) {
 		historyTurns:      0,
 		extraSystemPrompt: "Also clean up filler words.",
 	}
-	msgs := s.buildMessages([]byte("wav"))
+	msgs := s.buildMessages([][]byte{[]byte("wav")})
 	if msgs[0]["role"] != "system" {
 		t.Fatalf("msg[0].role=%v", msgs[0]["role"])
 	}
@@ -182,7 +182,7 @@ func TestBuildMessagesRespectsHistoryTurnsCap(t *testing.T) {
 		{wav: []byte("b"), transcript: "bravo"},
 		{wav: []byte("c"), transcript: "charlie"},
 	}
-	msgs := s.buildMessages([]byte("now"))
+	msgs := s.buildMessages([][]byte{[]byte("now")})
 	// system + user (charlie audio) + assistant "charlie" + user (now audio) = 4
 	if len(msgs) != 4 {
 		t.Fatalf("len=%d want 4", len(msgs))
@@ -204,7 +204,7 @@ func TestBuildMessagesInlineClipsSplitsSystemAndUser(t *testing.T) {
 		{wav: []byte("wavA"), transcript: "alpha"},
 		{wav: []byte("wavB"), transcript: "bravo"},
 	}
-	msgs := s.buildMessages([]byte("wavCurrent"))
+	msgs := s.buildMessages([][]byte{[]byte("wavCurrent")})
 	if len(msgs) != 2 {
 		t.Fatalf("len=%d want 2 (system + user)", len(msgs))
 	}
@@ -244,7 +244,7 @@ func TestBuildMessagesInlineClipsNoHistoryOmitsLastClipFraming(t *testing.T) {
 		historyTurns:   2,
 		contextMode:    config.ChatAudioContextInlineClips,
 	}
-	msgs := s.buildMessages([]byte("wavCurrent"))
+	msgs := s.buildMessages([][]byte{[]byte("wavCurrent")})
 	sys := msgs[0]["content"].(string)
 	if strings.Contains(sys, "FINAL clip") {
 		t.Fatalf("expected plain system prompt without FINAL-clip directive when no history; got %q", sys)
@@ -264,7 +264,7 @@ func TestBuildMessagesNoHistoryWhenZeroTurns(t *testing.T) {
 	s.history = []chatTurn{
 		{wav: []byte("a"), transcript: "alpha"},
 	}
-	msgs := s.buildMessages([]byte("now"))
+	msgs := s.buildMessages([][]byte{[]byte("now")})
 	// system + user(audio) = 2
 	if len(msgs) != 2 || msgs[0]["role"] != "system" || msgs[1]["role"] != "user" {
 		t.Fatalf("msgs=%v", msgs)
@@ -365,20 +365,21 @@ func TestEncodePCM16WAVHeader(t *testing.T) {
 	}
 }
 
-// TestChatAudioSessionEndToEnd drives a full session against an
-// httptest server that mimics Lemonade's SSE chat-completions response.
-// Verifies: VAD-bounded chunking, per-chunk POST, history accumulation
-// across two chunks, and Finalize collecting the trailing transcript
-// when liveSegments is off at chunk arrival time.
-func TestChatAudioSessionEndToEnd(t *testing.T) {
+// TestChatAudioSessionMultiClipForceCutBatching verifies that two
+// force-cut clips accumulate into a SINGLE /chat/completions POST
+// with two input_audio parts, instead of two separate POSTs. The
+// system message must carry the multi-clip framing that asks gemma
+// to transcribe all clips as one continuous text, and history must
+// be skipped (the audio itself is the cross-clip context).
+func TestChatAudioSessionMultiClipForceCutBatching(t *testing.T) {
 	type seenRequest struct {
 		body []byte
 	}
 	var (
-		mu       sync.Mutex
-		seen     []seenRequest
-		replies  = []string{"hello", "world"}
-		callIdx  int
+		mu      sync.Mutex
+		seen    []seenRequest
+		replies = []string{"hello world"}
+		callIdx int
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -440,48 +441,54 @@ func TestChatAudioSessionEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
-	if !strings.Contains(res.Text, "hello") || !strings.Contains(res.Text, "world") {
-		t.Fatalf("joined text=%q want hello+world", res.Text)
+	if !strings.Contains(res.Text, "hello world") {
+		t.Fatalf("joined text=%q want \"hello world\"", res.Text)
 	}
 
 	mu.Lock()
 	calls := len(seen)
-	first := seen[0].body
-	second := seen[1].body
+	body := seen[0].body
 	mu.Unlock()
-	if calls != 2 {
-		t.Fatalf("calls=%d want 2", calls)
+	if calls != 1 {
+		t.Fatalf("calls=%d want 1 (force-cuts must batch into a single multi-clip POST)", calls)
 	}
 
-	// Second request must include the first response as an assistant
-	// turn (few-shot history). Decode and inspect.
-	var req2 struct {
+	var req struct {
 		Messages []map[string]any `json:"messages"`
 	}
-	if err := json.Unmarshal(second, &req2); err != nil {
-		t.Fatalf("decode req2: %v", err)
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("decode body: %v", err)
 	}
-	foundHistory := false
-	for _, m := range req2.Messages {
-		if m["role"] == "assistant" && m["content"] == "hello" {
-			foundHistory = true
-			break
+	// Expect: system message with multi-clip framing + one user
+	// message with TWO input_audio parts (one per force-cut clip).
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages=%d want 2 (system + user)", len(req.Messages))
+	}
+	if req.Messages[0]["role"] != "system" {
+		t.Fatalf("messages[0].role=%v want system", req.Messages[0]["role"])
+	}
+	sys := req.Messages[0]["content"].(string)
+	if !strings.Contains(sys, "ALL clips") {
+		t.Fatalf("system message missing multi-clip framing: %q", sys)
+	}
+	if req.Messages[1]["role"] != "user" {
+		t.Fatalf("messages[1].role=%v want user", req.Messages[1]["role"])
+	}
+	parts := req.Messages[1]["content"].([]any)
+	audioCount := 0
+	for _, p := range parts {
+		m := p.(map[string]any)
+		if m["type"] == "input_audio" {
+			audioCount++
 		}
 	}
-	if !foundHistory {
-		t.Fatalf("second request missing assistant=hello in history; messages=%+v", req2.Messages)
+	if audioCount != 2 {
+		t.Fatalf("user content audio parts=%d want 2", audioCount)
 	}
-
-	// First request must NOT contain any assistant turn.
-	var req1 struct {
-		Messages []map[string]any `json:"messages"`
-	}
-	if err := json.Unmarshal(first, &req1); err != nil {
-		t.Fatalf("decode req1: %v", err)
-	}
-	for _, m := range req1.Messages {
+	// Multi-clip mode skips history, so no assistant turn anywhere.
+	for _, m := range req.Messages {
 		if m["role"] == "assistant" {
-			t.Fatalf("first request unexpectedly has assistant turn: %v", m)
+			t.Fatalf("multi-clip request unexpectedly has assistant turn: %v", m)
 		}
 	}
 }
