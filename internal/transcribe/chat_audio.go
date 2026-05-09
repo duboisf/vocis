@@ -282,12 +282,21 @@ func (s *chatAudioSession) run(
 			return
 		}
 		// Copy the slice so the worker owns its own memory. The
-		// pump reuses buf across chunks.
-		chunk := make([]int16, len(buf))
+		// pump reuses buf across chunks. For trailing chunks (hotkey
+		// release), append tail_silence_ms of silent PCM to give the
+		// model a confident silence tail to segment on — without it,
+		// releasing mid-word can drop the trailing word, same Whisper
+		// behavior the realtime backends pad against.
+		extra := 0
+		if trailing && s.tailSilenceMS > 0 {
+			extra = s.tailSilenceMS * s.sampleRate / 1000
+		}
+		chunk := make([]int16, len(buf)+extra)
 		copy(chunk, buf)
+		// Remaining slots stay zero-valued — that's the silence pad.
 		buf = buf[:0]
-		sessionlog.Debugf("chat-audio: flush chunk reason=%s samples=%d (~%dms) trailing=%t",
-			reason, len(chunk), len(chunk)*1000/s.sampleRate, trailing)
+		sessionlog.Debugf("chat-audio: flush chunk reason=%s samples=%d (~%dms) trailing=%t tail_silence=%dms",
+			reason, len(chunk), len(chunk)*1000/s.sampleRate, trailing, extra*1000/s.sampleRate)
 		s.chunksCh <- chatChunk{pcm: chunk, trailing: trailing}
 	}
 	// flushAtCap emits exactly chunkMaxSamples and keeps the remainder
@@ -783,11 +792,12 @@ func (s *chatAudioSession) historyLen() int {
 }
 
 func (s *chatAudioSession) emitPartial(text string) {
-	if !s.liveSegments.Load() {
-		// Past Finalize, partials would race with the trailing-text
-		// drain; the joined transcript is what matters.
-		return
-	}
+	// chat-audio's SSE deltas typically arrive AFTER Finalize() flips
+	// liveSegments to false (the trailing chunk gets POSTed at hotkey
+	// release, and the response streams in during the Finishing phase).
+	// Always emit the partial — app.go routes it to whichever overlay
+	// state is active (Listening or Finishing), so the user sees the
+	// model's output as it generates regardless of phase.
 	select {
 	case s.events <- DictationEvent{Type: DictationEventPartial, Text: text}:
 	default:
