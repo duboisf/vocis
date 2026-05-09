@@ -440,10 +440,27 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// finishRecording (gated on state.combinedPostProcess).
 	state.combinedPostProcess = a.cfg.Transcription.Backend == config.BackendLemonadeChat &&
 		a.cfg.PostProcess.Enabled
-	var extraSystemPrompt string
+	// Assemble the chat-audio system-message extras. transcription.prompt_hint
+	// is normally consumed by the realtime backends as a Whisper-style
+	// vocabulary bias; on chat-audio it would otherwise be dead config, so
+	// fold it in too. Order: vocabulary bias, then cleanup rules, so the
+	// final-form instructions read naturally.
+	var extras []string
+	if a.cfg.Transcription.Backend == config.BackendLemonadeChat {
+		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
+			extras = append(extras, hint)
+		}
+	}
 	if state.combinedPostProcess {
-		extraSystemPrompt = a.cfg.PostProcess.Prompt
-		sessionlog.Infof("chat-audio: folding postprocess.prompt (%d chars) into system message; skipping separate postprocess call", len(extraSystemPrompt))
+		extras = append(extras, a.cfg.PostProcess.Prompt)
+	}
+	extraSystemPrompt := strings.Join(extras, "\n\n")
+	if extraSystemPrompt != "" {
+		sessionlog.Infof("chat-audio: folding %d chars of extras into system message (prompt_hint=%t combine_postprocess=%t)",
+			len(extraSystemPrompt),
+			a.cfg.Transcription.Backend == config.BackendLemonadeChat && strings.TrimSpace(a.cfg.Transcription.PromptHint) != "",
+			state.combinedPostProcess,
+		)
 	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
 		SampleRate:        a.cfg.Recording.SampleRate,
