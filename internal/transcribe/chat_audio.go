@@ -458,6 +458,14 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, pcm []int16) (st
 	)
 	sessionlog.Infof("chat-audio: posting chunk wav=%dB history=%d req=%dB",
 		len(wav), s.historyLen(), len(raw))
+	// Audit log of the exact request shape with audio bytes redacted
+	// to a "<wav N bytes>" placeholder. Lets a session-log reader
+	// inspect the prompt, model, message structure, and few-shot vs
+	// inline-clips layout without dumping megabytes of base64 PCM
+	// into the log file.
+	if redacted, err := redactedRequestJSON(body); err == nil {
+		sessionlog.Debugf("chat-audio: request body (audio redacted) → %s", redacted)
+	}
 
 	req, err := http.NewRequestWithContext(chunkCtx, http.MethodPost, s.endpoint, bytes.NewReader(raw))
 	if err != nil {
@@ -714,6 +722,31 @@ func audioPart(wav []byte) map[string]any {
 	}
 }
 
+// redactedRequestJSON returns a pretty-printed JSON view of the
+// request body with every input_audio.data payload replaced by a
+// "<wav N bytes>" placeholder so the session log can show the exact
+// prompt and message structure without spilling the raw audio.
+// The original body is not mutated; a deep-redacted copy is built
+// in place.
+func redactedRequestJSON(body map[string]any) (string, error) {
+	// Round-trip through JSON to get a generic map[string]any tree
+	// we can walk safely without aliasing the live request body.
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", err
+	}
+	var clone any
+	if err := json.Unmarshal(raw, &clone); err != nil {
+		return "", err
+	}
+	redactAudioInPlace(clone)
+	pretty, err := json.MarshalIndent(clone, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(pretty), nil
+}
+
 func (s *chatAudioSession) renderPrompt() string {
 	if s.language == "" {
 		return s.promptTemplate
@@ -853,6 +886,32 @@ func encodePCM16WAV(samples []int16, rate int) []byte {
 		binary.LittleEndian.PutUint16(buf[44+i*2:], uint16(sample))
 	}
 	return buf
+}
+
+// redactAudioInPlace walks a JSON-decoded tree and replaces every
+// input_audio.data string with a placeholder describing the original
+// base64 length in approximate decoded WAV bytes. Recurses into all
+// maps and slices.
+func redactAudioInPlace(node any) {
+	switch v := node.(type) {
+	case map[string]any:
+		if audio, ok := v["input_audio"].(map[string]any); ok {
+			if data, ok := audio["data"].(string); ok {
+				// Base64 expands by 4/3; estimate decoded bytes for
+				// the placeholder so the reader can sanity-check the
+				// chunk size against `posting chunk wav=NB`.
+				approx := len(data) * 3 / 4
+				audio["data"] = fmt.Sprintf("<wav ~%d bytes, base64=%d chars>", approx, len(data))
+			}
+		}
+		for _, child := range v {
+			redactAudioInPlace(child)
+		}
+	case []any:
+		for _, child := range v {
+			redactAudioInPlace(child)
+		}
+	}
 }
 
 // buildChatCompletionsURL canonicalizes the configured base into a

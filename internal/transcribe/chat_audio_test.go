@@ -298,6 +298,45 @@ func TestBuildChatCompletionsURL(t *testing.T) {
 	}
 }
 
+func TestRedactedRequestJSONStripsAudio(t *testing.T) {
+	t.Parallel()
+	body := map[string]any{
+		"model":  "gemma-test",
+		"stream": true,
+		"messages": []map[string]any{
+			{
+				"role": "user",
+				"content": []map[string]any{
+					{"type": "text", "text": "Transcribe the speech."},
+					{
+						"type": "input_audio",
+						"input_audio": map[string]any{
+							"data":   base64.StdEncoding.EncodeToString([]byte("fake-wav-bytes")),
+							"format": "wav",
+						},
+					},
+				},
+			},
+		},
+	}
+	out, err := redactedRequestJSON(body)
+	if err != nil {
+		t.Fatalf("redactedRequestJSON: %v", err)
+	}
+	if strings.Contains(out, base64.StdEncoding.EncodeToString([]byte("fake-wav-bytes"))) {
+		t.Fatalf("redacted output still contains base64 data: %s", out)
+	}
+	if !strings.Contains(out, "<wav") || !strings.Contains(out, "base64=") {
+		t.Fatalf("redacted output missing placeholder: %s", out)
+	}
+	if !strings.Contains(out, "Transcribe the speech.") {
+		t.Fatalf("redacted output dropped the prompt text: %s", out)
+	}
+	if !strings.Contains(out, `"model": "gemma-test"`) {
+		t.Fatalf("redacted output dropped the model field: %s", out)
+	}
+}
+
 func TestEncodePCM16WAVHeader(t *testing.T) {
 	t.Parallel()
 	samples := []int16{0, 1, -1, 2}
