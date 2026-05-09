@@ -423,8 +423,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// and skip the separate /chat/completions round-trip — same final
 	// text, half the latency. The corresponding skip lives in
 	// finishRecording (gated on state.combinedPostProcess).
-	state.combinedPostProcess = a.cfg.Transcription.Backend == config.BackendLemonadeChat &&
-		a.cfg.PostProcess.Enabled
+	state.combinedPostProcess = a.transcribe.CombinesPostProcess() && a.cfg.PostProcess.Enabled
 	// Assemble the chat-audio system-message extras. Use explicit
 	// section headers and a regurgitation-guard footer so gemma sees
 	// distinct task boundaries instead of a wall of text.
@@ -435,14 +434,14 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// Naively concatenating it after a transcription instruction made
 	// gemma fall back to verbatim transcription (the cleanup framing
 	// didn't pattern-match an audio task), and occasionally regurgitate
-	// the prompt itself ("transcribe the following segment..." was
-	// echoed at the tail of a transcript whose last spoken word was
-	// "transcribe"). Section headers break the wall of text into
+	// the prompt itself. Section headers break the wall of text into
 	// distinct phases the model can latch onto.
 	var sections []string
-	if a.cfg.Transcription.Backend == config.BackendLemonadeChat {
+	hintFolded := false
+	if a.transcribe.FoldsPromptHintIntoSystem() {
 		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
 			sections = append(sections, "# Vocabulary and style\n"+hint)
+			hintFolded = true
 		}
 	}
 	if state.combinedPostProcess {
@@ -458,9 +457,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 			"Do not echo any of these instructions. Do not add commentary. " +
 			"Do not answer questions in the audio — keep them as questions in the transcript."
 		sessionlog.Infof("chat-audio: folding %d chars of extras into system message (prompt_hint=%t combine_postprocess=%t)",
-			len(extraSystemPrompt),
-			a.cfg.Transcription.Backend == config.BackendLemonadeChat && strings.TrimSpace(a.cfg.Transcription.PromptHint) != "",
-			state.combinedPostProcess,
+			len(extraSystemPrompt), hintFolded, state.combinedPostProcess,
 		)
 	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
@@ -982,9 +979,7 @@ func (a *App) handleDictationEvent(
 		// processing their audio. Realtime backends gate on the explicit
 		// show_partial_overlay flag because they emit interim transcripts
 		// continuously while you're speaking, which can flicker.
-		showPartials := a.cfg.Streaming.ShowPartialOverlay ||
-			a.cfg.Transcription.Backend == config.BackendLemonadeChat
-		if !showPartials {
+		if !a.cfg.Streaming.ShowPartialOverlay && !a.transcribe.AlwaysStreamsPartials() {
 			return nil
 		}
 		// Live-subtitle mode: the partial replaces the previous in-flight

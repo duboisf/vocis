@@ -94,14 +94,12 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 		return fmt.Errorf("transcription.base_url is empty")
 	}
 
-	// Label guard only applies to the realtime-WS Lemonade backend,
-	// where the configured model must carry the `transcription` label
-	// or the WS silently returns empty deltas. The chat-audio backend
-	// drives /chat/completions instead, where the only requirement is
-	// the model accepts the input_audio content part — gemma-FLM-llm
-	// models satisfy that even though they don't carry the
-	// `transcription` label, so skip the guard here.
-	if cfg.Backend == config.BackendLemonade {
+	// Label guard only applies to backends where the configured model
+	// must carry the `transcription` label — realtime WS silently
+	// returns empty deltas otherwise. Chat-audio drives
+	// /chat/completions, which works on llm-typed models like
+	// gemma-FLM that don't carry the `transcription` label.
+	if cfg.NeedsTranscriptionLabelGuard() {
 		if entry, err := FetchLemonadeModel(ctx, baseURL, model); err != nil {
 			// Catalog fetch failed — don't block on it. The user's model
 			// might be a user-pulled custom that doesn't show up in the
@@ -162,13 +160,12 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 		sessionlog.Debugf("lemonade: transcription model %s already loaded", txModel)
 	}
 
-	// Skip warming the postprocess model on the chat-audio backend:
-	// app.go folds postprocess.prompt into the chat-audio system
-	// message and never makes a separate /chat/completions postprocess
-	// call, so loading that model would just waste a slot (and on
-	// Lemonade max_models.llm=1, would evict the gemma-audio model).
-	skipPostProcessWarm := cfg.Transcription.Backend == config.BackendLemonadeChat
-	if cfg.PostProcess.Enabled && transcribeClient != nil && !skipPostProcessWarm {
+	// Skip warming the postprocess model on backends that combine
+	// transcription + cleanup in a single call (chat-audio): app.go
+	// never makes a separate postprocess request there, so loading a
+	// separate llm model would just evict gemma from the single llm
+	// slot Lemonade allows.
+	if cfg.PostProcess.Enabled && transcribeClient != nil && !cfg.Transcription.SkipPostProcessModelWarm() {
 		ppModel := strings.TrimSpace(cfg.PostProcess.Model)
 		if ppModel != "" && !health.IsLoaded(ppModel) {
 			sessionlog.Infof("lemonade: %s not loaded (resident: %v) — warming in background", ppModel, health.LoadedNames())

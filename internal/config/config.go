@@ -300,6 +300,53 @@ const (
 	BackendLemonadeChat = "lemonade-chat"
 )
 
+// Backend-capability methods centralize the "what does this backend
+// do differently?" branches that used to live as scattered
+// `if backend == X` checks throughout the codebase. Adding a backend
+// means updating these methods, not chasing 8 conditional sites.
+
+// CombinesPostProcess reports whether this backend folds postprocess
+// instructions into its own call and produces a cleaned transcript in
+// one shot. Callers skip the separate /chat/completions postprocess
+// pass when this is true.
+func (t TranscriptionConfig) CombinesPostProcess() bool {
+	return t.Backend == BackendLemonadeChat
+}
+
+// AlwaysStreamsPartials reports whether this backend's partial events
+// are always useful (independent of streaming.show_partial_overlay).
+// Chat-audio's SSE deltas are the only signal the user has that the
+// model is generating; realtime-WS interim transcripts can flicker
+// and are gated by the explicit flag.
+func (t TranscriptionConfig) AlwaysStreamsPartials() bool {
+	return t.Backend == BackendLemonadeChat
+}
+
+// FoldsPromptHintIntoSystem reports whether transcription.prompt_hint
+// should be passed via the chat-audio system message rather than via
+// a backend-native field. Realtime WS has its own session.prompt slot
+// so folding would just duplicate.
+func (t TranscriptionConfig) FoldsPromptHintIntoSystem() bool {
+	return t.Backend == BackendLemonadeChat
+}
+
+// NeedsTranscriptionLabelGuard reports whether the configured model
+// must carry the `transcription` label on Lemonade. Realtime WS
+// silently emits empty deltas for non-transcription-typed models.
+// Chat-audio routes through /chat/completions which works on llm-
+// typed models too.
+func (t TranscriptionConfig) NeedsTranscriptionLabelGuard() bool {
+	return t.Backend == BackendLemonade
+}
+
+// SkipPostProcessModelWarm reports whether the postprocess model
+// should be left out of the startup warm. Chat-audio combines, so
+// loading a separate llm model would just evict gemma from the
+// single llm slot.
+func (t TranscriptionConfig) SkipPostProcessModelWarm() bool {
+	return t.Backend == BackendLemonadeChat
+}
+
 // DefaultChatAudioPrompt is the transcription instruction validated
 // against gemma4-it-e2b-FLM via Lemonade. The {language} token
 // expands to ChatAudioConfig.Language at request build time.
