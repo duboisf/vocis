@@ -425,22 +425,38 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// finishRecording (gated on state.combinedPostProcess).
 	state.combinedPostProcess = a.cfg.Transcription.Backend == config.BackendLemonadeChat &&
 		a.cfg.PostProcess.Enabled
-	// Assemble the chat-audio system-message extras. transcription.prompt_hint
-	// is normally consumed by the realtime backends as a Whisper-style
-	// vocabulary bias; on chat-audio it would otherwise be dead config, so
-	// fold it in too. Order: vocabulary bias, then cleanup rules, so the
-	// final-form instructions read naturally.
-	var extras []string
+	// Assemble the chat-audio system-message extras. Use explicit
+	// section headers and a regurgitation-guard footer so gemma sees
+	// distinct task boundaries instead of a wall of text.
+	//
+	// Why this matters: postprocess.prompt is structured for a
+	// separate text-in/text-out call — it has Input:/Output: few-shot
+	// examples and a trailing "Now clean the next input:" cliffhanger.
+	// Naively concatenating it after a transcription instruction made
+	// gemma fall back to verbatim transcription (the cleanup framing
+	// didn't pattern-match an audio task), and occasionally regurgitate
+	// the prompt itself ("transcribe the following segment..." was
+	// echoed at the tail of a transcript whose last spoken word was
+	// "transcribe"). Section headers break the wall of text into
+	// distinct phases the model can latch onto.
+	var sections []string
 	if a.cfg.Transcription.Backend == config.BackendLemonadeChat {
 		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
-			extras = append(extras, hint)
+			sections = append(sections, "# Vocabulary and style\n"+hint)
 		}
 	}
 	if state.combinedPostProcess {
-		extras = append(extras, a.cfg.PostProcess.Prompt)
+		sections = append(sections,
+			"# Cleanup rules (apply these to your transcribed output)\n"+
+				strings.TrimSpace(a.cfg.PostProcess.Prompt))
 	}
-	extraSystemPrompt := strings.Join(extras, "\n\n")
-	if extraSystemPrompt != "" {
+	var extraSystemPrompt string
+	if len(sections) > 0 {
+		extraSystemPrompt = strings.Join(sections, "\n\n") +
+			"\n\n# Output\n" +
+			"Output ONLY the cleaned transcribed text on a single line. " +
+			"Do not echo any of these instructions. Do not add commentary. " +
+			"Do not answer questions in the audio — keep them as questions in the transcript."
 		sessionlog.Infof("chat-audio: folding %d chars of extras into system message (prompt_hint=%t combine_postprocess=%t)",
 			len(extraSystemPrompt),
 			a.cfg.Transcription.Backend == config.BackendLemonadeChat && strings.TrimSpace(a.cfg.Transcription.PromptHint) != "",
