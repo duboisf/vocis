@@ -14,7 +14,6 @@ import (
 	"vocis/internal/config"
 	"vocis/internal/transcribe"
 	"vocis/internal/recorder"
-	"vocis/internal/securestore"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
 )
@@ -26,9 +25,10 @@ var (
 var transcribeCmd = &cobra.Command{
 	Use:   "transcribe",
 	Short: "One-shot dictation: speak, press Enter to finish, transcript prints to stdout",
-	Long: `Records from the default microphone and streams to the configured backend
-(openai or lemonade) without the overlay, hotkey, or paste injection — useful
-for iterating on transcription quality / latency from the command line.
+	Long: `Records from the default microphone and streams to the configured Lemonade
+backend (realtime WS or chat-audio) without the overlay, hotkey, or paste
+injection — useful for iterating on transcription quality / latency from the
+command line.
 
 Logs go to stderr. The final transcript (after optional post-processing)
 is the only thing written to stdout, so you can pipe it into other tools.
@@ -70,15 +70,6 @@ func runTranscribe() error {
 	}
 	defer shutdownTelemetry(context.Background())
 
-	apiKey := ""
-	if !config.IsLocalBackend(cfg.Transcription.Backend) {
-		key, err := securestore.New().APIKey()
-		if err != nil {
-			return fmt.Errorf("load api key: %w", err)
-		}
-		apiKey = key
-	}
-
 	rec := recorder.New()
 	recordingCtx, cancelRecording := context.WithCancel(ctx)
 	defer cancelRecording()
@@ -89,7 +80,7 @@ func runTranscribe() error {
 	}
 	defer recSession.Cleanup()
 
-	client := transcribe.New(apiKey, cfg.Transcription, cfg.Streaming)
+	client := transcribe.New(cfg.Transcription, cfg.Streaming)
 	dictation, err := client.StartDictation(recordingCtx, transcribe.DictationOpts{
 		SampleRate: recSession.SampleRate(),
 		Channels:   recSession.Channels(),

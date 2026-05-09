@@ -3,16 +3,12 @@ hotkey_mode: hold
 log_window_title: false
 
 transcription:
-  # backend: pick the transcription protocol. Three values:
-  #   "lemonade"      (default) — local Lemonade Server over its realtime
-  #                   WebSocket. Pairs with the Whisper-FLM family
+  # backend: pick the Lemonade transcription protocol. Two values:
+  #   "lemonade"      (default) — Lemonade Server's realtime WebSocket.
+  #                   Pairs with the Whisper-FLM family
   #                   (whisper-v3-turbo-FLM, etc.). Streams interim
   #                   transcripts. base_url + realtime_url both used.
-  #   "openai"        — hosted OpenAI realtime API. Requires an API key
-  #                   set via `vocis key set` or $OPENAI_API_KEY. Swap
-  #                   base_url/model to https://api.openai.com/v1 +
-  #                   gpt-4o-mini-transcribe.
-  #   "lemonade-chat" — local Lemonade Server over /chat/completions
+  #   "lemonade-chat" — Lemonade Server's /chat/completions endpoint
   #                   with `input_audio` content parts. Pairs with
   #                   Gemma audio variants (gemma4-it-e2b-FLM,
   #                   gemma3n-e4b-it-FLM). One HTTP POST per VAD-bounded
@@ -24,8 +20,6 @@ transcription:
   base_url: http://localhost:13305/api/v1
   realtime_url: ws://localhost:9000
   model: whisper-v3-turbo-FLM
-  organization: ""
-  project: ""
   language: en
   prompt_hint: >-
     Transcribe naturally for a programmer. Remove filler words (um, uh, like,
@@ -127,19 +121,16 @@ streaming:
   # default manual_commit=true disables interim streaming.
   show_partial_overlay: false
   # prefix_padding_ms / silence_duration_ms / threshold: zero means "let
-  # the backend use its own server-VAD defaults." Lemonade's defaults as
-  # of 10.2 are threshold=0.01 (RMS energy), silence=800, prefix=250.
-  # OpenAI's are threshold=0.5 (probability), silence=500, prefix=300.
-  # Override per-field only if you know the scale for the backend you're
-  # targeting — the `threshold` semantics differ between backends.
+  # Lemonade use its own server-VAD defaults." As of 10.4 those are
+  # threshold=0.01 (RMS energy), silence=800, prefix=250.
   prefix_padding_ms: 0
   silence_duration_ms: 0
   threshold: 0
   # manual_commit: disables server-side VAD on Lemonade and commits the
   # audio buffer explicitly when the hotkey is released. Trades live
   # partials for lower end-of-utterance latency (Lemonade stops running
-  # an interim transcription in parallel with the final). OpenAI backend
-  # ignores this flag. Must be paired with show_partial_overlay=false.
+  # an interim transcription in parallel with the final). Must be paired
+  # with show_partial_overlay=false.
   manual_commit: true
   # client_vad: runs an energy-threshold pause detector client-side and
   # sends input_audio_buffer.commit every time you pause, chunking a
@@ -163,9 +154,8 @@ streaming:
   # consulted when client_vad is true.
   onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
   # Minimum seconds to wait for the trailing transcript after Finalize
-  # commits the audio buffer. Cloud backends answer in under a second;
-  # the default 15 matches local Lemonade where Whisper inference
-  # commonly takes 5–15s. Drop to 3 when pointing at OpenAI Cloud.
+  # commits the audio buffer. Default 15 matches local Lemonade where
+  # Whisper inference commonly takes 5–15 s.
   wait_final_seconds: 15
   # tail_silence_ms: append this many ms of silent PCM to the audio
   # buffer right before the finalize commit. Whisper-family models
@@ -179,9 +169,8 @@ streaming:
   #   ""           - off (default)
   #   "near_field" - close-talk mics, headsets, handsets
   #   "far_field"  - laptop built-ins, conference/room mics
-  # Honored by the OpenAI backend. Lemonade currently ignores unknown
-  # session fields — setting it there is a no-op until Lemonade adds
-  # support, but harmless.
+  # Lemonade currently ignores unknown session fields — setting it now
+  # is a no-op until Lemonade adds support, but harmless.
   noise_reduction: ""
 
 insertion:
@@ -236,8 +225,7 @@ overlay:
     reconnecting: "○ Reconnecting... (attempt {attempt}/{max})"
     connected: "● Ready to type into {window}"
     # Shown while vocis is force-loading the configured transcription
-    # model on the Lemonade backend (session-start preflight). Not
-    # used on the OpenAI backend.
+    # model on the Lemonade backend (session-start preflight).
     loading_model: "○ Loading {model}..."
   finishing:
     title: Finishing
@@ -294,20 +282,19 @@ postprocess:
   min_word_count: 10
   # first_token_timeout_seconds: how long to wait for the LLM's first
   # token before declaring the postprocess attempt failed and falling
-  # back to the raw transcript. Cloud OpenAI typically answers in
-  # under a second; local Lemonade with a cold model can take 5-10s.
+  # back to the raw transcript. Lemonade with a cold model can take
+  # 5-10 s.
   first_token_timeout_seconds: 10
   # total_timeout_seconds: hard cap on the postprocess request. If the
   # full response hasn't arrived by then we give up and paste the raw
   # transcript with a `postprocess_skipped` warning overlay.
   total_timeout_seconds: 15
   # Sampling knobs. Omit any field to let the backend use its default.
-  # OpenAI-standard (honored on all backends): temperature, top_p,
+  # OpenAI-compatible (honored on Lemonade): temperature, top_p,
   # frequency_penalty, presence_penalty, stop.
-  # Non-standard (honored by Lemonade / llama.cpp, ignored by OpenAI
-  # Cloud): min_p, repetition_penalty. Note: `seed` is NOT supported —
-  # Lemonade's onnxruntime-genai backend accepts the field but does not
-  # thread it to the sampler.
+  # Lemonade / llama.cpp extras: min_p, repetition_penalty. `seed` is
+  # NOT supported — Lemonade's onnxruntime-genai backend accepts the
+  # field but does not thread it to the sampler.
   temperature: 0.2
   # top_p: 0.9
   # min_p: 0.05

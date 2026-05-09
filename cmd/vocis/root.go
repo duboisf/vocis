@@ -23,7 +23,6 @@ func init() {
 	rootCmd.AddCommand(serveCmd)
 	rootCmd.AddCommand(configCmd)
 	rootCmd.AddCommand(doctorCmd)
-	rootCmd.AddCommand(keyCmd)
 }
 
 func Execute() error {

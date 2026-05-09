@@ -202,20 +202,18 @@ const (
 )
 
 type TranscriptionConfig struct {
-	Backend      string   `yaml:"backend"`
-	BaseURL      string   `yaml:"base_url"`
-	RealtimeURL  string   `yaml:"realtime_url"`
-	Model        string   `yaml:"model"`
-	Organization string   `yaml:"organization"`
-	Project      string   `yaml:"project"`
-	Language     string   `yaml:"language"`
-	PromptHint   string   `yaml:"prompt_hint"`
+	Backend     string `yaml:"backend"`
+	BaseURL     string `yaml:"base_url"`
+	RealtimeURL string `yaml:"realtime_url"`
+	Model       string `yaml:"model"`
+	Language    string `yaml:"language"`
+	PromptHint  string `yaml:"prompt_hint"`
 	// RequestLimit is the HTTP request timeout (seconds) applied to the
 	// transcription SDK client. Gates postprocess `/chat/completions`
-	// and any OpenAI REST calls (ephemeral client_secret mint). Set to
-	// 0 to disable the timeout entirely — useful on Lemonade where a
-	// cold local model load can legitimately take minutes. The WS
-	// handshake and write deadlines still get a 5 s floor regardless.
+	// and any other REST calls. Set to 0 to disable the timeout
+	// entirely — useful on Lemonade where a cold local model load can
+	// legitimately take minutes. The WS handshake and write deadlines
+	// still get a 5 s floor regardless.
 	RequestLimit int `yaml:"request_timeout_seconds"`
 	// HallucinationFilters drops finals whose trimmed text exactly
 	// matches one of these entries (case-insensitive). Whisper and
@@ -226,8 +224,8 @@ type TranscriptionConfig struct {
 	// ChatAudio holds the knobs for the lemonade-chat backend, which
 	// transcribes by POSTing WAV-wrapped audio chunks to an OpenAI-
 	// compatible /chat/completions endpoint with the audio embedded
-	// as an `input_audio` content part. Unused for the openai and
-	// lemonade (realtime WS) backends.
+	// as an `input_audio` content part. Unused for the lemonade
+	// (realtime WS) backend.
 	ChatAudio ChatAudioConfig `yaml:"chat_audio"`
 }
 
@@ -306,18 +304,9 @@ const (
 )
 
 const (
-	BackendOpenAI       = "openai"
 	BackendLemonade     = "lemonade"
 	BackendLemonadeChat = "lemonade-chat"
 )
-
-// IsLocalBackend reports whether the backend points at a local
-// Lemonade Server (either WS realtime or chat-audio). Local backends
-// run unauthenticated, so callers use this to skip API-key resolution
-// and to gate Lemonade-specific preflight / health probes.
-func IsLocalBackend(backend string) bool {
-	return backend == BackendLemonade || backend == BackendLemonadeChat
-}
 
 // DefaultChatAudioPrompt is the transcription instruction validated
 // against gemma4-it-e2b-FLM via Lemonade. The {language} token
@@ -826,10 +815,10 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Transcription.Backend {
-	case "", BackendOpenAI, BackendLemonade, BackendLemonadeChat:
+	case "", BackendLemonade, BackendLemonadeChat:
 	default:
-		return fmt.Errorf("transcription.backend must be %q, %q, or %q",
-			BackendOpenAI, BackendLemonade, BackendLemonadeChat)
+		return fmt.Errorf("transcription.backend must be %q or %q",
+			BackendLemonade, BackendLemonadeChat)
 	}
 
 	if c.Transcription.Backend == BackendLemonadeChat {

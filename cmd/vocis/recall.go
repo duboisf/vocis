@@ -19,7 +19,6 @@ import (
 
 	"vocis/internal/config"
 	"vocis/internal/recall"
-	"vocis/internal/securestore"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
 )
@@ -207,16 +206,7 @@ func runRecallStart() error {
 	}
 	defer shutdownTelemetry(context.Background())
 
-	apiKey := ""
-	if !config.IsLocalBackend(cfg.Transcription.Backend) {
-		key, err := securestore.New().APIKey()
-		if err != nil {
-			return fmt.Errorf("load api key: %w", err)
-		}
-		apiKey = key
-	}
-
-	d := recall.NewDaemon(recall.DaemonOpts{Config: cfg, APIKey: apiKey})
+	d := recall.NewDaemon(recall.DaemonOpts{Config: cfg})
 	fmt.Fprintln(os.Stderr, "recall daemon started — speak normally; use `vocis recall pick` from another terminal to transcribe a segment")
 	return d.Run(ctx)
 }

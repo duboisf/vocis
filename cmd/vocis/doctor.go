@@ -14,7 +14,6 @@ import (
 	"vocis/internal/config"
 	"vocis/internal/platform/gnome"
 	"vocis/internal/recorder"
-	"vocis/internal/securestore"
 	"vocis/internal/sessionlog"
 	"vocis/internal/transcribe"
 )
@@ -76,13 +75,6 @@ func runDoctor() error {
 	}
 	fmt.Printf("%-14s ok (%s)\n", "log-dir", logDir)
 
-	store := securestore.New()
-	if _, err := store.APIKey(); err == nil {
-		fmt.Printf("%-14s ok (keyring or env)\n", "openai-key")
-	} else {
-		fmt.Printf("%-14s missing (%v)\n", "openai-key", err)
-	}
-
 	if isWaylandLikeSession() {
 		if gnome.Available() {
 			fmt.Printf("%-14s ok (vocis-gnome extension responding on %s)\n", "wayland-hk", gnome.BusName)
@@ -91,7 +83,7 @@ func runDoctor() error {
 		}
 	}
 
-	if cfg, _, err := config.Load(); err == nil && config.IsLocalBackend(cfg.Transcription.Backend) {
+	if cfg, _, err := config.Load(); err == nil {
 		checkLemonadeModels(cfg)
 	}
 

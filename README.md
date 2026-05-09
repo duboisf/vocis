@@ -6,10 +6,9 @@ short).
 
 `vocis` is a Linux voice-to-text desktop helper written in Go. Hold a global
 hotkey, speak, release — the transcript is pasted back into the app you were
-already using. Local-first by default (NPU-accelerated Whisper via Lemonade
-Server, no API key, no network), with OpenAI Cloud as an opt-in backend. An
-always-on-top X11 overlay gives you the same "record / transcribe / typed"
-rhythm that keeps dictation feeling fast.
+already using. Local-first: NPU-accelerated transcription via Lemonade Server,
+no API key, no network. An always-on-top X11 overlay gives you the same
+"record / transcribe / typed" rhythm that keeps dictation feeling fast.
 
 It was very much vibe-coded from scratch to... scratch an itch.
 
@@ -29,15 +28,14 @@ text (or text into audio):
 
 ### Both modes
 
-- **Local-first transcription.** Defaults to [Lemonade Server](https://github.com/lemonade-sdk/lemonade)
-  ≥ 10.3.0 with `whisper-v3-turbo-FLM` running on NPU via FLM — no
-  API key, no network. Flip to OpenAI Cloud (`vocis config backend openai`) if you'd
-  rather use `gpt-4o-mini-transcribe`. Both backends speak the same realtime
-  WebSocket protocol; the rest of the pipeline is identical.
+- **Local-first transcription.** [Lemonade Server](https://github.com/lemonade-sdk/lemonade)
+  ≥ 10.3.0 with `whisper-v3-turbo-FLM` (realtime WS) or
+  `gemma4-it-e2b-FLM` (chat-audio) running on NPU via FLM — no API key,
+  no network. Pick a backend with `vocis config backend`.
 - **LLM post-processing** that cleans up filler words ("um", "uh", "like")
   and false starts without changing your meaning. Few-shot prompted to
   *never* answer questions in the transcript — "what time is it?" stays a
-  question. Backend-agnostic via OpenAI-compatible `/chat/completions`.
+  question. Uses Lemonade's OpenAI-compatible `/chat/completions`.
 - **Mic preroll during model preflight.** On Lemonade with a cold model,
   vocis opens the mic *before* the 5–10 s NPU load and replays those samples
   into the realtime session once it's ready, so the first words after you
@@ -67,8 +65,8 @@ text (or text into audio):
   app, vocis tries `ctrl+alt+space`, `f8`, `f9`, `shift+f8` in order and
   warns in the log which one it ended up with.
 - **Live partial overlay** showing in-flight transcription as you speak
-  (cloud OpenAI only — Lemonade in manual-commit mode skips interim
-  inference for lower end-of-utterance latency).
+  (off by default in manual-commit mode for lower end-of-utterance
+  latency; chat-audio always shows partials during the response stream).
 - **Client-side Silero VAD** for mid-hold segmentation on the local
   Lemonade backend: long monologues get chunked into multiple committed
   segments instead of one giant final inference. Configurable hysteresis,
@@ -155,14 +153,6 @@ make build
 ./bin/vocis serve     # default backend is local Lemonade — no key needed
 ```
 
-If you're on OpenAI Cloud instead:
-
-```bash
-./bin/vocis config backend openai
-./bin/vocis key set     # paste your API key, stored in the system keyring
-./bin/vocis serve
-```
-
 While `vocis serve` is running:
 
 1. Focus any text field (or kitty pane).
@@ -199,9 +189,9 @@ Generate shell completions:
 
 ## Backends
 
-`vocis` supports three transcription backends, configured under `transcription:`:
+`vocis` supports two Lemonade backends, configured under `transcription:`:
 
-### Lemonade (local, default)
+### Lemonade realtime WS (default)
 
 [Lemonade Server](https://github.com/lemonade-sdk/lemonade) **≥ 10.3.0**
 exposes an OpenAI-compatible REST API plus a realtime-transcription
@@ -242,15 +232,8 @@ per-call cap. SSE streaming drives live overlay partials.
 
 Tunable knobs live under `transcription.chat_audio:` —
 `chunk_max_seconds`, `history_turns`, `prompt`, `language`, `stream`.
-Run `vocis config backend` and pick option 3 to flip; it also rewrites
+Run `vocis config backend` and pick option 2 to flip; it also rewrites
 `model` to `gemma4-it-e2b-FLM` automatically.
-
-### OpenAI Cloud
-
-- `transcription.backend: openai`
-- `transcription.model: gpt-4o-mini-transcribe`
-- API key from the system keyring (`vocis key set`) or `OPENAI_API_KEY`.
-- Org/project/language overrides via `transcription.organization` etc.
 
 ## GNOME Wayland
 
@@ -315,14 +298,13 @@ opens Neovim in diff mode so you can merge new defaults.
 
 Other `config` subcommands:
 
-- `vocis config backend` — interactively pick `openai` or `lemonade`;
-  autodetects a running Lemonade on localhost and rewrites the URLs and
-  default model.
+- `vocis config backend` — interactively pick `lemonade` (realtime WS)
+  or `lemonade-chat` (chat-completions with input_audio); autodetects a
+  running Lemonade on localhost and rewrites the URLs and default model.
 - `vocis config models` — interactive picker for transcription and
-  post-processing models from the configured backend. **Important on
-  Lemonade**: `postprocess.model` defaults to `gpt-4o-mini` (an OpenAI
-  model name) which Lemonade doesn't have; use `config models` to pick
-  a Lemonade-resident LLM, or set `postprocess.enabled: false`.
+  post-processing models from the configured backend. Use `config
+  models` to pick a Lemonade-resident LLM for `postprocess.model`, or
+  set `postprocess.enabled: false`.
 - `vocis config edit` — open the config file in `$VISUAL` / `$EDITOR`
   (falls back to `nvim`/`vim`/`nano`).
 
@@ -330,7 +312,7 @@ A few useful fields (see `config.example.yaml` for everything):
 
 - `hotkey`: global shortcut, e.g. `ctrl+shift+space`
 - `hotkey_mode`: `hold` or `toggle`
-- `transcription.backend`: `lemonade` (default) or `openai`
+- `transcription.backend`: `lemonade` (default) or `lemonade-chat`
 - `transcription.request_timeout_seconds`: HTTP timeout, `0` to disable
   (useful for cold local model loads)
 - `streaming.manual_commit` / `streaming.client_vad`: see "Backends" above

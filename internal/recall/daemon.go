@@ -28,8 +28,7 @@ import (
 // transcribe/drop/status/shutdown requests from the `vocis recall`
 // subcommands.
 type Daemon struct {
-	cfg    config.Config
-	apiKey string
+	cfg config.Config
 
 	ring *Ring
 
@@ -47,11 +46,9 @@ type Daemon struct {
 	wg           sync.WaitGroup
 }
 
-// DaemonOpts bundles the dependencies the daemon needs. apiKey is only
-// required for cloud backends — Lemonade runs unauthenticated.
+// DaemonOpts bundles the dependencies the daemon needs.
 type DaemonOpts struct {
 	Config config.Config
-	APIKey string
 }
 
 // NewDaemon constructs a Daemon but does not start capture or open the
@@ -61,10 +58,9 @@ func NewDaemon(opts DaemonOpts) *Daemon {
 		time.Duration(opts.Config.Recall.RetentionSeconds)*time.Second)
 	return &Daemon{
 		cfg:              opts.Config,
-		apiKey:           opts.APIKey,
 		ring:             ring,
 		shutdown:         make(chan struct{}),
-		transcribeClient: transcribe.New(opts.APIKey, opts.Config.Transcription, opts.Config.Streaming),
+		transcribeClient: transcribe.New(opts.Config.Transcription, opts.Config.Streaming),
 	}
 }
 

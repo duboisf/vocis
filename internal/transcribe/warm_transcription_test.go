@@ -12,25 +12,6 @@ import (
 	"vocis/internal/config"
 )
 
-func TestEnsureTranscribeModelLoaded_NoopForOpenAI(t *testing.T) {
-	t.Parallel()
-
-	called := false
-	err := EnsureTranscribeModelLoaded(context.Background(), config.TranscriptionConfig{
-		Backend: config.BackendOpenAI,
-		Model:   "gpt-4o-mini-transcribe",
-		BaseURL: "http://this-must-never-be-called.invalid",
-	}, func(string) {
-		called = true
-	})
-	if err != nil {
-		t.Fatalf("want nil error for openai backend, got %v", err)
-	}
-	if called {
-		t.Fatalf("onLoading must not fire for the openai backend")
-	}
-}
-
 func TestEnsureTranscribeModelLoaded_NoopWhenAlreadyLoaded(t *testing.T) {
 	t.Parallel()
 

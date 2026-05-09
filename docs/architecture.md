@@ -11,7 +11,7 @@ internal/app/       ← orchestration via interfaces (no platform imports)
     ↓
 internal/hotkey/    ← state machine, parsing (platform-agnostic)
 internal/ui/        ← drawing, text, easing (platform-agnostic)
-internal/transcribe/    ← transcription (OpenAI + Lemonade backends) + post-processing
+internal/transcribe/    ← transcription (Lemonade WS + Lemonade chat-audio) + post-processing
 internal/recorder/  ← PulseAudio capture
 internal/audio/     ← volume ducking
     ↓
@@ -26,7 +26,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 
 ## Top-level entry points
 
-- [`cmd/vocis/`](/home/fred/git/vtt/cmd/vocis/): Cobra-based CLI with one file per command group (`root.go`, `serve.go`, `config_cmd.go`, `doctor.go`, `key.go`, `recall.go`, `speak.go`). `config_cmd.go` hosts the `config` parent plus `config init|backend|models` subcommands. `recall.go` hosts the `recall` parent plus `recall start|pick|last|status|stop|drop|replay` subcommands for the always-on Wokis Recall daemon. `last <duration>` batches every segment in the window through one joint transcription. `speak.go` hosts the one-shot text-to-speech command — sends text to Lemonade Kokoro TTS and streams the result through paplay (or writes a WAV with `--out`).
+- [`cmd/vocis/`](/home/fred/git/vtt/cmd/vocis/): Cobra-based CLI with one file per command group (`root.go`, `serve.go`, `config_cmd.go`, `doctor.go`, `recall.go`, `speak.go`, `transcribe.go`). `config_cmd.go` hosts the `config` parent plus `config init|backend|models` subcommands. `recall.go` hosts the `recall` parent plus `recall start|pick|last|status|stop|drop|replay` subcommands for the always-on Wokis Recall daemon. `last <duration>` batches every segment in the window through one joint transcription. `speak.go` hosts the one-shot text-to-speech command — sends text to Lemonade Kokoro TTS and streams the result through paplay (or writes a WAV with `--out`).
 - [`README.md`](/home/fred/git/vtt/README.md): user-facing setup and usage
 - [`config.example.yaml`](/home/fred/git/vtt/config.example.yaml): config shape example
 
@@ -41,15 +41,13 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - [`internal/recorder/recorder.go`](/home/fred/git/vtt/internal/recorder/recorder.go): in-process PulseAudio/PipeWire microphone capture and live sample stream.
 - [`internal/recall/`](/home/fred/git/vtt/internal/recall/): Wokis Recall daemon. `segment.go` holds the bounded ring buffer, `daemon.go` runs recorder + Silero VAD and exposes a Unix-socket control protocol, `client.go` is the pick/status/stop client, `protocol.go` defines the request/response JSON shapes, `selection.go` parses the picker's range syntax (`3-5`, `3-`, `all`, etc.), `persist.go` provides an optional `FilePersister` that mirrors each segment to `<dir>/seg-<id>.json` so the ring survives daemon restarts, `batch.go` handles `recall last <duration>` — concatenates in-window segments with a configurable silence gap (`recall.batch_gap_ms`) and feeds them through one realtime session, capped by `recall.batch_max_seconds`. Segments are stored as raw 16 kHz int16 PCM; transcription is lazy — done only when the `pick` or `last` client requests it. Persistence is opt-in via `recall.persist.mode=disk` (default is `in_memory`) and writes to `recall.persist.dir` (default `$XDG_STATE_HOME/vocis/recall`).
 - [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go): realtime transcription orchestration — connect with retries, buffered audio handoff, turn assembly, finalization. Backend-agnostic; differences live behind `Transport`.
-- [`internal/transcribe/transport.go`](/home/fred/git/vtt/internal/transcribe/transport.go): `Transport` interface (Dial, SessionUpdate, SampleRate) — abstracts backend-specific connect, auth, payload shape, and PCM rate.
-- [`internal/transcribe/transport_openai.go`](/home/fred/git/vtt/internal/transcribe/transport_openai.go): OpenAI realtime transport — ephemeral client secret auth, 24 kHz PCM, nested `session.audio.input.transcription` payload.
-- [`internal/transcribe/transport_lemonade.go`](/home/fred/git/vtt/internal/transcribe/transport_lemonade.go): local Lemonade Server transport — no auth, 16 kHz PCM, flat `session.model` payload, model passed via `?model=` query.
+- [`internal/transcribe/transport.go`](/home/fred/git/vtt/internal/transcribe/transport.go): `Transport` interface (Dial, SessionUpdate, SampleRate) — abstracts backend-specific connect, payload shape, and PCM rate.
+- [`internal/transcribe/transport_lemonade.go`](/home/fred/git/vtt/internal/transcribe/transport_lemonade.go): Lemonade Server realtime WS transport — no auth, 16 kHz PCM, flat `session.model` payload, model passed via `?model=` query.
 - [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go): `lemonade-chat` backend for Gemma audio variants — non-WS path. Bypasses the `Transport` interface entirely. Reads samples → Silero VAD → per-chunk WAV → POST to `/chat/completions` with the audio embedded as an `input_audio` content part. SSE deltas drive live overlay partials. Maintains a rolling few-shot history of prior `(audio, transcript)` pairs so context survives the documented 30s per-call cap. Implements the `Dictation` interface so `app` and `recall` consume it identically to the realtime-WS path.
 - [`internal/transcribe/silero.go`](/home/fred/git/vtt/internal/transcribe/silero.go): Silero VAD wrapper — embedded ONNX model, onnxruntime_go session (pinned single-threaded), two-threshold hysteresis (0.5 speech / 0.35 silence with an ambiguous hold band). Used by both client-VAD during serve and segment boundaries in recall. See [docs/silero.md](/home/fred/git/vtt/docs/silero.md) for the full design.
-- [`internal/transcribe/postprocess.go`](/home/fred/git/vtt/internal/transcribe/postprocess.go): LLM post-processing to clean up filler words and hesitations. Backend-agnostic — uses OpenAI-compatible `/chat/completions`, so it works against either backend via `base_url`.
+- [`internal/transcribe/postprocess.go`](/home/fred/git/vtt/internal/transcribe/postprocess.go): LLM post-processing to clean up filler words and hesitations via Lemonade's OpenAI-compatible `/chat/completions`.
 - [`internal/tts/lemonade.go`](/home/fred/git/vtt/internal/tts/lemonade.go): Lemonade Kokoro TTS client — POSTs to `/audio/speech` with `response_format=pcm` and parses the PCM16 LE stream + sample rate out of the `audio/l16;rate=N` content-type. `wav.go` writes a 24 kHz mono PCM16 WAV header for the `vocis speak --out` path. Used by `cmd/vocis/speak.go` only.
 - [`internal/audio/duck.go`](/home/fred/git/vtt/internal/audio/duck.go): lower speaker volume during recording via `wpctl`.
-- [`internal/securestore/keyring.go`](/home/fred/git/vtt/internal/securestore/keyring.go): keyring-backed API key storage.
 - [`internal/sessionlog/sessionlog.go`](/home/fred/git/vtt/internal/sessionlog/sessionlog.go): per-session logs on disk with DEBUG/INFO/WARN/ERROR levels.
 - [`internal/telemetry/telemetry.go`](/home/fred/git/vtt/internal/telemetry/telemetry.go): OpenTelemetry tracing (OTLP/gRPC exporter, span helpers).
 

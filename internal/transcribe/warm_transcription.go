@@ -63,7 +63,7 @@ func LoadLemonadeModel(ctx context.Context, baseURL, model string) error {
 // callers that want errors logged and swallowed (the async warm
 // path from EnsureLemonadeModelsLoaded).
 func loadLemonadeModelLogging(ctx context.Context, cfg config.TranscriptionConfig) {
-	if !config.IsLocalBackend(cfg.Backend) || strings.TrimSpace(cfg.Model) == "" {
+	if strings.TrimSpace(cfg.Model) == "" {
 		return
 	}
 	if err := LoadLemonadeModel(ctx, cfg.BaseURL, cfg.Model); err != nil {
@@ -83,12 +83,8 @@ func loadLemonadeModelLogging(ctx context.Context, cfg config.TranscriptionConfi
 // "Loading <model>..." overlay state so the user knows why the
 // session hasn't started yet.
 //
-// No-op (returns nil) for non-Lemonade backends, empty base_url, or
-// empty model.
+// No-op (returns nil) for empty base_url or empty model.
 func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionConfig, onLoading func(model string)) error {
-	if !config.IsLocalBackend(cfg.Backend) {
-		return nil
-	}
 	model := strings.TrimSpace(cfg.Model)
 	if model == "" {
 		return nil
@@ -152,9 +148,6 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 // The model-load requests themselves remain fire-and-forget — they
 // take 5-10 s and would otherwise stall startup for no good reason.
 func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcribeClient *Client) error {
-	if !config.IsLocalBackend(cfg.Transcription.Backend) {
-		return nil
-	}
 	baseURL := cfg.Transcription.BaseURL
 	health, err := FetchLemonadeHealth(ctx, baseURL)
 	if err != nil {

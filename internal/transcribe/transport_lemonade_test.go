@@ -290,7 +290,7 @@ func TestClientLemonadeBackendDialsWithoutClientSecret(t *testing.T) {
 	cfg.Transcription.Model = "Whisper-Tiny"
 	cfg.Transcription.BaseURL = server.URL // not used for transcribe but keeps SDK happy
 
-	client := New("", cfg.Transcription, cfg.Streaming)
+	client := New(cfg.Transcription, cfg.Streaming)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 

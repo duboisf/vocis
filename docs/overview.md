@@ -8,12 +8,12 @@ At a high level:
 - the overlay appears immediately with connection status
 - local microphone capture starts first
 - target-window capture happens after local recording has already started
-- early audio is buffered while the OpenAI realtime transcription session connects (retries up to 3 times)
+- early audio is buffered while the Lemonade realtime transcription session connects (retries up to 3 times)
 - buffered audio is flushed into the realtime session as soon as it is ready
-- audio is streamed to OpenAI after that
+- audio is streamed to Lemonade after that
 - completed phrases accumulate in the overlay as you speak (one line per segment)
 - on release or stop, the dictation session collects any trailing audio
-- the text is optionally cleaned up by an LLM (post-processing via gpt-4o-mini)
+- the text is optionally cleaned up by an LLM (post-processing via Lemonade's chat-completions)
 - the accumulated text plus any trailing transcript is inserted back into the previously focused app as a single paste
 - if submit mode was toggled on during recording, Enter is pressed after paste
 
@@ -21,7 +21,7 @@ Important constraints:
 
 - Linux X11 only for now
 - PulseAudio / PipeWire input capture
-- OpenAI API key stored in the system keyring or provided by `OPENAI_API_KEY`
+- Lemonade Server running locally (no API key, no network)
 - overlay is intentionally lightweight and non-interactive (except Escape during finishing)
 
 Core product choices:
@@ -32,7 +32,7 @@ Core product choices:
 - terminal windows use a terminal-safe paste shortcut
 - kitty terminals get **direct, focus-free delivery**: vocis records the focused kitty internal window id at recording start (via `kitty @ ls`) and at delivery time pushes the transcript straight into that exact tab/pane via `kitty @ send-text` — no focus change, no clipboard touch, no paste shortcut. This means switching kitty tabs (or even moving to a non-kitty window) mid-dictation is safe: the transcript still lands where you started, and your current keystrokes elsewhere aren't disrupted. Submit-mode Enter is also routed through kitty remote control (`send-text "\r"`), so it lands in the same tab. If the original tab/pane has been closed by delivery time, the transcript is written to the clipboard and a warning is shown instead. If the kitty CLI itself is unreachable, vocis falls back transparently to the OS-window focus + paste flow so dictation still completes — just without tab targeting. Requires `allow_remote_control` (and ideally `listen_on`) configured in kitty.conf, or vocis to inherit `KITTY_LISTEN_ON` by being launched from inside kitty. Disable with `insertion.kitty_remote_control: false`.
 - transcription is realtime-streamed, not uploaded from a WAV file
-- turn assembly and trailing-flush decisions live in the OpenAI dictation session, not in the app layer
+- turn assembly and trailing-flush decisions live in the dictation session, not in the app layer
 - post-processing cleans up filler words and hesitations but never answers questions or changes intent
 - config is reloaded on each recording start — no restart needed for most changes
 - all overlay text is configurable via named templates in the config file

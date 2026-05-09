@@ -15,7 +15,6 @@ import (
 	"vocis/internal/transcribe"
 	"vocis/internal/platform"
 	"vocis/internal/recorder"
-	"vocis/internal/securestore"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
 )
@@ -26,8 +25,6 @@ type App struct {
 	recorder       *recorder.Recorder
 	injector       InjectorClient
 	transcribe     *transcribe.Client
-	store          *securestore.Store
-	apiKey         string
 	ducker         AudioDucker
 	registerHotkey HotkeyRegistrar
 	hotkeyBackend  string
@@ -136,7 +133,6 @@ func New(cfg config.Config, deps Deps) *App {
 		ducker:         deps.Ducker,
 		registerHotkey: deps.RegisterHotkey,
 		hotkeyBackend:  deps.HotkeyBackend,
-		store:          securestore.New(),
 	}
 }
 
@@ -147,19 +143,8 @@ func (a *App) Run(ctx context.Context) error {
 	sessionlog.Infof("starting vocis session")
 	recorder.CleanupStale()
 
-	if config.IsLocalBackend(a.cfg.Transcription.Backend) {
-		// Local Lemonade backends run unauthenticated.
-		a.apiKey = ""
-	} else {
-		apiKey, err := a.store.APIKey()
-		if err != nil {
-			return err
-		}
-		a.apiKey = apiKey
-	}
-
 	a.recorder = recorder.New()
-	a.transcribe = transcribe.New(a.apiKey, a.cfg.Transcription, a.cfg.Streaming)
+	a.transcribe = transcribe.New(a.cfg.Transcription, a.cfg.Streaming)
 
 	// Defer overlay close before the Lemonade preflight so that path
 	// can use ShowError below — without this, a failed preflight would
@@ -319,7 +304,7 @@ func (a *App) reloadConfig() {
 	a.cfg.Streaming = cfg.Streaming
 	a.cfg.PostProcess = cfg.PostProcess
 	a.cfg.LogWindowTitle = cfg.LogWindowTitle
-	a.transcribe = transcribe.New(a.apiKey, a.cfg.Transcription, a.cfg.Streaming)
+	a.transcribe = transcribe.New(a.cfg.Transcription, a.cfg.Streaming)
 	sessionlog.Infof("config reloaded: %s", path)
 }
 
@@ -356,10 +341,10 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	stopDrain := drainPreroll(session.Samples())
 
 	// Preflight: make sure the configured transcription model is resident
-	// on the Lemonade backend before we open the WS for live audio. No-op
-	// for OpenAI. Runs inline so the overlay clearly says "Loading X..."
-	// while the user waits — but the mic is hot the whole time, so any
-	// speech during the load is preserved as preroll.
+	// on the Lemonade backend before we open the WS for live audio. Runs
+	// inline so the overlay clearly says "Loading X..." while the user
+	// waits — but the mic is hot the whole time, so any speech during
+	// the load is preserved as preroll.
 	preflightStart := time.Now()
 	if err := transcribe.EnsureTranscribeModelLoaded(spanCtx, a.cfg.Transcription, func(model string) {
 		a.overlay.SetLoadingModel(model)
@@ -914,9 +899,9 @@ func userFacingError(err error) error {
 	case errors.Is(err, context.DeadlineExceeded):
 		return errors.New("Timed out waiting for transcription")
 	case strings.Contains(msg, "i/o timeout"):
-		return errors.New("Could not connect to OpenAI (network timeout)")
+		return errors.New("Could not connect to Lemonade (network timeout)")
 	case strings.Contains(msg, "stream was not established"):
-		return errors.New("Could not connect to OpenAI")
+		return errors.New("Could not connect to Lemonade")
 	default:
 		return err
 	}

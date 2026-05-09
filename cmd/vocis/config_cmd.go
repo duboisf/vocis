@@ -17,7 +17,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"vocis/internal/config"
-	"vocis/internal/securestore"
 )
 
 // Lemonade protocol defaults used when probing /health fails or is unreachable.
@@ -47,7 +46,7 @@ Use --force to overwrite without diffing.`,
 
 var configBackendCmd = &cobra.Command{
 	Use:   "backend",
-	Short: "Pick the transcription backend (openai or lemonade)",
+	Short: "Pick the transcription backend (lemonade or lemonade-chat)",
 	Long: `Interactively pick the backend and rewrite transcription.backend plus the URL
 fields. Selecting lemonade probes http://localhost:13305/api/v1/health for the
 websocket_port and sets realtime_url accordingly; falls back to ws://localhost:9000
@@ -189,10 +188,9 @@ func runConfigBackend() error {
 
 	fmt.Printf("Current backend: %s\n\n", cfg.Transcription.Backend)
 	fmt.Println("Available backends:")
-	fmt.Println("  1) openai         — hosted OpenAI realtime API (requires API key)")
-	fmt.Println("  2) lemonade       — local Lemonade Server, realtime WS (Whisper-FLM family)")
-	fmt.Println("  3) lemonade-chat  — local Lemonade Server, chat-completions with input_audio (Gemma audio)")
-	fmt.Print("\nPick [1-3]: ")
+	fmt.Println("  1) lemonade       — local Lemonade Server, realtime WS (Whisper-FLM family)")
+	fmt.Println("  2) lemonade-chat  — local Lemonade Server, chat-completions with input_audio (Gemma audio)")
+	fmt.Print("\nPick [1-2]: ")
 
 	choice, err := readLine()
 	if err != nil {
@@ -200,12 +198,7 @@ func runConfigBackend() error {
 	}
 
 	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "1", "openai":
-		cfg.Transcription.Backend = config.BackendOpenAI
-		cfg.Transcription.BaseURL = "https://api.openai.com/v1"
-		cfg.Transcription.RealtimeURL = ""
-		fmt.Printf("\nSet backend=openai\n  base_url=%s\n  realtime_url=(empty)\n", cfg.Transcription.BaseURL)
-	case "2", "lemonade":
+	case "1", "lemonade":
 		cfg.Transcription.Backend = config.BackendLemonade
 		base, ws, detected := detectLemonade()
 		cfg.Transcription.BaseURL = base
@@ -215,7 +208,7 @@ func runConfigBackend() error {
 			status = "detected running Lemonade Server"
 		}
 		fmt.Printf("\nSet backend=lemonade (%s)\n  base_url=%s\n  realtime_url=%s\n", status, base, ws)
-	case "3", "lemonade-chat":
+	case "2", "lemonade-chat":
 		cfg.Transcription.Backend = config.BackendLemonadeChat
 		base, _, detected := detectLemonade()
 		cfg.Transcription.BaseURL = base
@@ -329,104 +322,7 @@ func runConfigModels() error {
 }
 
 func fetchModels(cfg config.Config) (tx, pp []modelChoice, err error) {
-	switch cfg.Transcription.Backend {
-	case config.BackendLemonade, config.BackendLemonadeChat:
-		return fetchLemonadeModels(cfg)
-	case config.BackendOpenAI, "":
-		return fetchOpenAIModels(cfg)
-	default:
-		return nil, nil, fmt.Errorf("unknown backend %q", cfg.Transcription.Backend)
-	}
-}
-
-func fetchOpenAIModels(cfg config.Config) (tx, pp []modelChoice, err error) {
-	store := securestore.New()
-	key, err := store.APIKey()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	baseURL := strings.TrimRight(cfg.Transcription.BaseURL, "/")
-	if baseURL == "" {
-		baseURL = "https://api.openai.com/v1"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	if org := strings.TrimSpace(cfg.Transcription.Organization); org != "" {
-		req.Header.Set("OpenAI-Organization", org)
-	}
-	if proj := strings.TrimSpace(cfg.Transcription.Project); proj != "" {
-		req.Header.Set("OpenAI-Project", proj)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("GET %s/models: %w", baseURL, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("GET %s/models: status %d", baseURL, resp.StatusCode)
-	}
-
-	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, nil, fmt.Errorf("decode models: %w", err)
-	}
-
-	ids := make([]string, 0, len(payload.Data))
-	for _, m := range payload.Data {
-		ids = append(ids, m.ID)
-	}
-	sort.Strings(ids)
-
-	for _, id := range ids {
-		if looksLikeOpenAITXModel(id) {
-			tx = append(tx, modelChoice{ID: id})
-		}
-		if looksLikeOpenAIPPModel(id) {
-			pp = append(pp, modelChoice{ID: id})
-		}
-	}
-	return tx, pp, nil
-}
-
-// looksLikeOpenAITXModel tags OpenAI realtime-transcription-capable models.
-// The /v1/models endpoint doesn't carry capability metadata so we apply
-// name-based heuristics: anything with "transcribe" or "whisper" in the id.
-func looksLikeOpenAITXModel(id string) bool {
-	lower := strings.ToLower(id)
-	return strings.Contains(lower, "transcribe") || strings.Contains(lower, "whisper")
-}
-
-// looksLikeOpenAIPPModel tags chat-completion-capable models. Again,
-// capability metadata isn't in the list response — we keep gpt-* and o[0-9]*
-// families and drop obviously non-chat suffixes (transcribe, tts, embedding,
-// image, moderation, search, realtime, audio).
-func looksLikeOpenAIPPModel(id string) bool {
-	lower := strings.ToLower(id)
-	for _, bad := range []string{"transcribe", "tts", "embedding", "image", "moderation", "search", "realtime", "audio", "dall-e"} {
-		if strings.Contains(lower, bad) {
-			return false
-		}
-	}
-	if strings.HasPrefix(lower, "gpt-") {
-		return true
-	}
-	if len(lower) >= 2 && lower[0] == 'o' && lower[1] >= '0' && lower[1] <= '9' {
-		return true
-	}
-	return false
+	return fetchLemonadeModels(cfg)
 }
 
 func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {

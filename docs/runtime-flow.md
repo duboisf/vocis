@@ -10,7 +10,7 @@ sequenceDiagram
     participant App
     participant Overlay
     participant Recorder
-    participant OpenAI
+    participant Lemonade
     participant Injector
     participant PostProcess
 
@@ -23,23 +23,23 @@ sequenceDiagram
     App->>Recorder: Start capture
     Recorder-->>App: Audio samples channel
     App->>Injector: CaptureTarget (window ID)
-    App->>OpenAI: StartDictation (spawns pump)
+    App->>Lemonade: StartDictation (spawns pump)
 
     par Buffer audio while connecting
-        Recorder->>OpenAI: Audio chunks (buffered)
+        Recorder->>Lemonade: Audio chunks (buffered)
     and Connect WebSocket
-        OpenAI->>OpenAI: connectAndBuffer (retry up to 3x)
-        OpenAI-->>App: OnConnected callback
+        Lemonade->>Lemonade: connectAndBuffer (retry up to 3x)
+        Lemonade-->>App: OnConnected callback
         App->>Overlay: SetConnected("● Ready to type into kitty")
     end
 
-    Note over OpenAI: Flush buffered audio, stream live
+    Note over Lemonade: Flush buffered audio, stream live
 
     loop While recording
-        Recorder->>OpenAI: Audio chunks (live)
-        OpenAI-->>App: Partial events
+        Recorder->>Lemonade: Audio chunks (live)
+        Lemonade-->>App: Partial events
         App->>Overlay: SetListeningText (live preview)
-        OpenAI-->>App: Segment events (on VAD pause)
+        Lemonade-->>App: Segment events (on VAD pause)
         App->>App: Accumulate liveText + displayText
         App->>Overlay: Update overlay (one line per segment)
     end
@@ -56,15 +56,15 @@ sequenceDiagram
     App->>Overlay: GrabEscape
     App->>Recorder: Stop capture
 
-    Note over OpenAI: collectTrailing
+    Note over Lemonade: collectTrailing
 
     alt Server VAD already drained buffer
-        OpenAI->>OpenAI: Skip commit (BufferDrainedByServerVAD)
+        Lemonade->>Lemonade: Skip commit (BufferDrainedByServerVAD)
     else
-        OpenAI->>OpenAI: AppendSilence (tail pad) + Commit
+        Lemonade->>Lemonade: AppendSilence (tail pad) + Commit
     end
-    OpenAI->>OpenAI: waitForCompletion (drain finals until HasInflightWork=false or timeout)
-    OpenAI-->>App: Combined transcript (zero or more drained segments)
+    Lemonade->>Lemonade: waitForCompletion (drain finals until HasInflightWork=false or timeout)
+    Lemonade-->>App: Combined transcript (zero or more drained segments)
 
     App->>Overlay: SetFinishingText (full text with newlines)
 
@@ -113,8 +113,7 @@ When `vocis serve` runs:
 1. [`cmd/vocis/serve.go`](/home/fred/git/vtt/cmd/vocis/serve.go) starts a session log and loads config.
 2. `serve.go` creates the X11 platform implementations (overlay, injector, hotkey registrar).
 3. `serve.go` injects them into [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) via `app.New(cfg, deps)`.
-4. [`internal/securestore/keyring.go`](/home/fred/git/vtt/internal/securestore/keyring.go) resolves the OpenAI API key.
-5. `app.Run()` registers the hotkey (with fallback candidates) and enters the event loop.
+4. `app.Run()` registers the hotkey (with fallback candidates) and enters the event loop.
 
 ## Config Reload
 
@@ -149,7 +148,7 @@ When the hotkey starts dictation:
 5. [`internal/recorder/recorder.go`](/home/fred/git/vtt/internal/recorder/recorder.go) starts local microphone capture immediately.
 6. The injector captures the active target window after capture has already started so focus can be restored later.
 7. [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go) starts a `DictationSession`.
-8. The `DictationSession` creates the realtime transcription session through the OpenAI SDK and connects the WebSocket. If the connect fails, it retries up to 3 times (2s timeout per attempt).
+8. The `DictationSession` creates the realtime transcription session and connects the WebSocket. If the connect fails, it retries up to 3 times (2s timeout per attempt).
 9. Audio chunks that arrive before the WebSocket is ready are buffered in memory inside the dictation session (`connectAndBuffer`).
 10. Once the WebSocket is ready, the overlay updates to "● Ready to type into {window}" and buffered audio is flushed, then live audio continues streaming (`streamAudio`).
 
@@ -197,7 +196,7 @@ After transcription completes:
 
 Server VAD is always enabled. While the hotkey is held:
 
-1. OpenAI server VAD detects pauses.
+1. Lemonade server VAD detects pauses.
 2. Completed phrases are emitted as segment events from the dictation session.
 3. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) accumulates segment text in `recordingState.liveText` (for pasting) and `recordingState.displayText` (for the overlay, with newlines between segments).
 4. The overlay displays each segment on a separate line, growing vertically as text accumulates. Partial transcription text is prepended with the accumulated segments so previously completed text stays visible.
@@ -241,7 +240,7 @@ When telemetry is enabled, the following OpenTelemetry spans are emitted per dic
     - `vocis.capture_target` — identify the focused window. `capture.source` = `xdotool` or `extension`; the extension path nests `vocis.gnome.get_focused_window` for the D-Bus call.
     - `vocis.recorder.start` — PulseAudio client init and stream creation
     - `vocis.recording.active` — the user speaking (from dictation start to release)
-    - `vocis.transcribe.connect` — WebSocket dial and session setup (may appear multiple times on retry). `transcribe.backend` = `openai` or `lemonade`. Not emitted on the `lemonade-chat` backend, which has no upfront connection — it instead emits one `vocis.transcribe.chat_audio.chunk` span per VAD-bounded audio chunk, with `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, and `chunk.request_bytes` attributes. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing` instead of the WS-flavoured `commit`/`wait_final` spans.
+    - `vocis.transcribe.connect` — WebSocket dial and session setup (may appear multiple times on retry). `transcribe.backend` = `lemonade` or `lemonade-chat`. Not emitted on the `lemonade-chat` backend, which has no upfront connection — it instead emits one `vocis.transcribe.chat_audio.chunk` span per VAD-bounded audio chunk, with `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, and `chunk.request_bytes` attributes. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing` instead of the WS-flavoured `commit`/`wait_final` spans.
     - `vocis.recorder.stop` — stream stop and resource cleanup
     - `vocis.transcribe.finalize` — post-recording finalization
       - `vocis.transcribe.commit` — commit trailing audio buffer to the backend (skipped when server VAD already drained the buffer; `commit.empty_swallowed=true` when we raced VAD)
@@ -265,7 +264,7 @@ Very short recordings are treated as a silent cancel:
 
 Errors are translated to user-friendly messages in the overlay:
 
-- Network timeouts → "Could not connect to OpenAI (network timeout)"
+- Network timeouts → "Could not connect to Lemonade (network timeout)"
 - Context deadline → "Timed out waiting for transcription"
 - Empty audio buffer → "No speech detected" (yellow warning, not red error)
 - Post-processing failure → "Raw text pasted — cleanup was skipped" (yellow warning)

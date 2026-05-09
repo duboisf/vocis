@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,7 +27,6 @@ import (
 )
 
 const (
-	defaultBaseURL    = "https://api.openai.com/v1"
 	connectTimeout    = 2 * time.Second
 	maxConnectRetries = 3
 )
@@ -49,42 +47,23 @@ type Client struct {
 	writeTimeout time.Duration
 }
 
-func New(apiKey string, cfg config.TranscriptionConfig, streaming config.StreamingConfig) *Client {
+func New(cfg config.TranscriptionConfig, streaming config.StreamingConfig) *Client {
 	timeout := time.Duration(cfg.RequestLimit) * time.Second
 
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
-	if baseURL == "" {
-		baseURL = defaultBaseURL
-	}
-	if !config.IsLocalBackend(cfg.Backend) && baseURL != defaultBaseURL {
-		sessionlog.Warnf("openai base_url is non-default: %s", baseURL)
-	}
 
 	opts := []option.RequestOption{
 		option.WithBaseURL(baseURL),
 	}
 	// RequestLimit=0 disables the HTTP request timeout entirely — useful
-	// when pointing at Lemonade, whose first-request postprocess call
-	// can take minutes on a cold local model load. Only apply a timeout
-	// when the user picked a positive value. The WS write / handshake
-	// timeouts further down still get a 5 s floor via minDuration.
+	// because Lemonade's first-request postprocess call can take minutes
+	// on a cold local model load. Only apply a timeout when the user
+	// picked a positive value. The WS write / handshake timeouts further
+	// down still get a 5 s floor via minDuration.
 	if timeout > 0 {
 		opts = append(opts, option.WithRequestTimeout(timeout))
 	} else {
 		sessionlog.Infof("transcription: request timeout disabled (request_timeout_seconds=0)")
-	}
-	// Only attach an API key when one is actually configured. Passing
-	// WithAPIKey("") makes the SDK send `Authorization: Bearer ` (empty
-	// token) which Lemonade returns 500 on. Lemonade is unauthenticated;
-	// OpenAI rejects empty keys at the auth layer with a 401 anyway.
-	if apiKey != "" {
-		opts = append(opts, option.WithAPIKey(apiKey))
-	}
-	if org := organization(cfg); org != "" {
-		opts = append(opts, option.WithOrganization(org))
-	}
-	if project := project(cfg); project != "" {
-		opts = append(opts, option.WithProject(project))
 	}
 
 	sdkClient := openaisdk.NewClient(opts...)
@@ -101,8 +80,6 @@ func New(apiKey string, cfg config.TranscriptionConfig, streaming config.Streami
 		// chat-audio backend has no realtime WS transport — it runs
 		// /chat/completions per chunk through Client.httpClient. Leave
 		// transport nil; StartDictation dispatches before touching it.
-	default:
-		transport = newOpenAITransport(cfg, streaming, sdkClient, baseURL, timeout)
 	}
 
 	// Plain http.Client for the chat-audio backend. timeout=0 disables
@@ -331,7 +308,7 @@ func (c *Client) StartStream(ctx context.Context, sampleRate, channels int) (*St
 
 func (c *Client) backendName() string {
 	if c.cfg.Backend == "" {
-		return config.BackendOpenAI
+		return config.BackendLemonade
 	}
 	return c.cfg.Backend
 }
@@ -2028,26 +2005,6 @@ func formatRealtimeError(code, message string) error {
 		return fmt.Errorf("%w: %s", ErrInputAudioBufferCommitEmpty, message)
 	}
 	return fmt.Errorf("%s (%s)", message, code)
-}
-
-func organization(cfg config.TranscriptionConfig) string {
-	if value := strings.TrimSpace(cfg.Organization); value != "" {
-		return value
-	}
-	if value := strings.TrimSpace(os.Getenv("OPENAI_ORGANIZATION")); value != "" {
-		return value
-	}
-	return strings.TrimSpace(os.Getenv("OPENAI_ORG_ID"))
-}
-
-func project(cfg config.TranscriptionConfig) string {
-	if value := strings.TrimSpace(cfg.Project); value != "" {
-		return value
-	}
-	if value := strings.TrimSpace(os.Getenv("OPENAI_PROJECT")); value != "" {
-		return value
-	}
-	return strings.TrimSpace(os.Getenv("OPENAI_PROJECT_ID"))
 }
 
 func requestIDSuffix(requestID string) string {
