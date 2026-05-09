@@ -46,15 +46,16 @@ type chatAudioSession struct {
 	endpoint   string
 	model      string
 
-	chunkMaxSamples   int
-	historyTurns      int
-	promptTemplate    string
-	language          string
-	streamSSE         bool
-	contextMode       string
-	minChunkPeak      float64
-	minChunkRMS       float64
-	extraSystemPrompt string
+	chunkMaxSamples      int
+	historyTurns         int
+	promptTemplate       string
+	language             string
+	streamSSE            bool
+	contextMode          string
+	minChunkPeak         float64
+	minChunkRMS          float64
+	extraSystemPrompt    string
+	systemPromptOverride string
 
 	// Audio assumptions: PCM16 mono at this sample rate. Lemonade's
 	// gemma audio path expects 16 kHz; the recorder already produces
@@ -151,6 +152,7 @@ func startChatAudioSession(
 		minChunkPeak:         cfg.ChatAudio.MinChunkPeak,
 		minChunkRMS:          cfg.ChatAudio.MinChunkRMS,
 		extraSystemPrompt:    opts.ExtraSystemPrompt,
+		systemPromptOverride: opts.SystemPromptOverride,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		events:               make(chan DictationEvent, 16),
@@ -697,7 +699,18 @@ func (s *chatAudioSession) buildMessages(currentWAVs [][]byte) []map[string]any 
 		history = history[len(history)-s.historyTurns:]
 	}
 
-	systemPrompt := s.renderPrompt()
+	var systemPrompt string
+	if override := strings.TrimSpace(s.systemPromptOverride); override != "" {
+		// Caller fully owns the system message. Multi-clip / inline-
+		// clips framings are still prepended when applicable so the
+		// shape conventions stay consistent.
+		systemPrompt = override
+	} else {
+		systemPrompt = s.renderPrompt()
+		if extra := strings.TrimSpace(s.extraSystemPrompt); extra != "" {
+			systemPrompt = systemPrompt + "\n\n" + extra
+		}
+	}
 	switch {
 	case multiClip:
 		systemPrompt = "You will receive several short audio clips that together form ONE continuous utterance " +
@@ -709,9 +722,6 @@ func (s *chatAudioSession) buildMessages(currentWAVs [][]byte) []map[string]any 
 			"Transcribe ONLY the FINAL clip; the earlier clips are provided " +
 			"as continuous context so you can keep proper-noun spelling, " +
 			"language, and turn boundaries consistent.\n\n" + systemPrompt
-	}
-	if extra := strings.TrimSpace(s.extraSystemPrompt); extra != "" {
-		systemPrompt = systemPrompt + "\n\n" + extra
 	}
 
 	msgs := make([]map[string]any, 0, 2+2*len(history)+1)

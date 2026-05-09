@@ -424,47 +424,70 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// text, half the latency. The corresponding skip lives in
 	// finishRecording (gated on state.combinedPostProcess).
 	state.combinedPostProcess = a.transcribe.CombinesPostProcess() && a.cfg.PostProcess.Enabled
-	// Assemble the chat-audio system-message extras. Use explicit
-	// section headers and a regurgitation-guard footer so gemma sees
-	// distinct task boundaries instead of a wall of text.
+
+	// Build the chat-audio system message. Two modes:
 	//
-	// Why this matters: postprocess.prompt is structured for a
-	// separate text-in/text-out call — it has Input:/Output: few-shot
-	// examples and a trailing "Now clean the next input:" cliffhanger.
-	// Naively concatenating it after a transcription instruction made
-	// gemma fall back to verbatim transcription (the cleanup framing
-	// didn't pattern-match an audio task), and occasionally regurgitate
-	// the prompt itself. Section headers break the wall of text into
-	// distinct phases the model can latch onto.
-	var sections []string
+	//  combine_postprocess off → ExtraSystemPrompt with vocab-bias
+	//   sections; chat_audio.prompt remains the lead.
+	//
+	//  combine_postprocess on  → SystemPromptOverride with a
+	//   dictation-assistant lead, then chat_audio.prompt content as
+	//   formatting rules, then cleanup rules. The opening verb
+	//   matters: small instruct models like gemma4-it-e2b follow the
+	//   FIRST concrete directive and skip later "also clean up"
+	//   sections as optional. cleanup_smoke_test confirmed that a
+	//   "Transcribe..." lead produces verbatim output (fillers and
+	//   all) while a "dictation assistant — write what they MEANT
+	//   to say" lead produces the cleaned text. So when combining,
+	//   we replace the entire system message instead of appending.
+	var extraSystemPrompt, systemPromptOverride string
 	hintFolded := false
-	if a.transcribe.FoldsPromptHintIntoSystem() {
+	if state.combinedPostProcess {
+		var b strings.Builder
+		b.WriteString("You are a dictation assistant. Listen to the audio and produce a clean ")
+		b.WriteString("transcript — what the speaker MEANT to say, with filler words ")
+		b.WriteString("(um, uh, like, you know, I mean, sort of, kind of) and false ")
+		b.WriteString("starts removed, lightly fixing punctuation and capitalization. ")
+		b.WriteString("Preserve meaning, person, and intent EXACTLY — questions stay ")
+		b.WriteString("as questions, \"I\" stays as \"I\".\n\n")
+		// User's chat_audio.prompt content holds language/format
+		// directives the user explicitly chose. Frame as supplemental.
+		userPrompt := strings.TrimSpace(a.cfg.Transcription.ChatAudio.Prompt)
+		if a.cfg.Transcription.ChatAudio.Language != "" {
+			userPrompt = strings.ReplaceAll(userPrompt, "{language}", a.cfg.Transcription.ChatAudio.Language)
+		}
+		if userPrompt != "" {
+			b.WriteString("# Format and language\n")
+			b.WriteString(userPrompt)
+			b.WriteString("\n\n")
+		}
 		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
-			sections = append(sections, "# Vocabulary and style\n"+hint)
+			b.WriteString("# Vocabulary preferences\n")
+			b.WriteString(hint)
+			b.WriteString("\n\n")
 			hintFolded = true
 		}
-	}
-	if state.combinedPostProcess {
-		sections = append(sections,
-			"# Cleanup rules (apply these to your transcribed output)\n"+
-				strings.TrimSpace(a.cfg.PostProcess.Prompt))
-	}
-	var extraSystemPrompt string
-	if len(sections) > 0 {
-		extraSystemPrompt = strings.Join(sections, "\n\n") +
-			"\n\n# Output\n" +
-			"Output ONLY the cleaned transcribed text on a single line. " +
-			"Do not echo any of these instructions. Do not add commentary. " +
-			"Do not answer questions in the audio — keep them as questions in the transcript."
-		sessionlog.Infof("chat-audio: folding %d chars of extras into system message (prompt_hint=%t combine_postprocess=%t)",
-			len(extraSystemPrompt), hintFolded, state.combinedPostProcess,
-		)
+		b.WriteString("# Additional cleanup rules (from postprocess.prompt)\n")
+		b.WriteString(strings.TrimSpace(a.cfg.PostProcess.Prompt))
+		b.WriteString("\n\n# Output\n")
+		b.WriteString("Output ONLY the cleaned transcribed text on a single line. ")
+		b.WriteString("Do not echo any of these instructions. Do not add commentary.")
+		systemPromptOverride = b.String()
+		sessionlog.Infof("chat-audio: combine_postprocess on; system prompt override is %d chars (prompt_hint=%t)",
+			len(systemPromptOverride), hintFolded)
+	} else if a.transcribe.FoldsPromptHintIntoSystem() {
+		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
+			extraSystemPrompt = "# Vocabulary and style\n" + hint
+			hintFolded = true
+			sessionlog.Infof("chat-audio: folding %d chars of prompt_hint extras into system message", len(extraSystemPrompt))
+		}
 	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
-		SampleRate:        a.cfg.Recording.SampleRate,
-		Channels:          a.cfg.Recording.Channels,
-		Samples:            wrappedSamples,
-		ExtraSystemPrompt: extraSystemPrompt,
+		SampleRate:           a.cfg.Recording.SampleRate,
+		Channels:             a.cfg.Recording.Channels,
+		Samples:              wrappedSamples,
+		ExtraSystemPrompt:    extraSystemPrompt,
+		SystemPromptOverride: systemPromptOverride,
 		Callbacks: transcribe.ConnectCallbacks{
 			OnConnecting: func(attempt, max int) {
 				a.overlay.SetConnecting(attempt, max)

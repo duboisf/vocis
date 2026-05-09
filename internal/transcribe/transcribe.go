@@ -835,6 +835,16 @@ type DictationOpts struct {
 	// /chat/completions round-trip does both transcription and
 	// cleanup. Ignored on backends other than lemonade-chat.
 	ExtraSystemPrompt string
+	// SystemPromptOverride, when non-empty, replaces the entire
+	// chat-audio system message — including the chat_audio.prompt
+	// content — with the caller-supplied text. ExtraSystemPrompt is
+	// ignored when this is set. Used by app.go in combine-postprocess
+	// mode where the lead verb of the system message has to be
+	// "dictation assistant" rather than "transcribe" (small models
+	// follow the first concrete directive and skip later cleanup
+	// instructions when they sit in second position). Ignored on
+	// backends other than lemonade-chat.
+	SystemPromptOverride string
 }
 
 type DictationSession struct {
