@@ -106,6 +106,13 @@ transcription:
     # arm of the check.
     min_chunk_peak: 0.02
     min_chunk_rms: 0.005
+    # combine_postprocess: fold postprocess.prompt into the chat-audio
+    # system message and skip the separate /chat/completions postprocess
+    # call. With Gemma audio, the same model is doing transcription and
+    # is fully capable of cleanup in one shot — the second round-trip
+    # just adds latency. Only honored when postprocess.enabled is true;
+    # no-op otherwise.
+    combine_postprocess: false
 
 recording:
   backend: auto

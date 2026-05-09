@@ -839,6 +839,13 @@ type DictationOpts struct {
 	// serve path), waitForCompletion falls back to wall-clock
 	// trailingDuration scaling.
 	ExpectedAudioMS int
+	// ExtraSystemPrompt, when non-empty, is appended to the chat-audio
+	// session's system message with a blank-line separator. The serve
+	// path uses this to fold postprocess.prompt into the instruction
+	// when chat_audio.combine_postprocess is on, so a single
+	// /chat/completions round-trip does both transcription and
+	// cleanup. Ignored on backends other than lemonade-chat.
+	ExtraSystemPrompt string
 }
 
 type DictationSession struct {

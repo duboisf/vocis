@@ -61,6 +61,11 @@ type recordingState struct {
 	span           trace.Span
 	spanCtx        context.Context
 	activeSpan     trace.Span
+	// combinedPostProcess is true when chat_audio.combine_postprocess
+	// is enabled and postprocess is otherwise on. The chat-audio system
+	// prompt has folded the cleanup rules in already, so the trailing
+	// PostProcess call is skipped to avoid a redundant round-trip.
+	combinedPostProcess bool
 }
 
 type OverlayUI interface {
@@ -427,10 +432,24 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		spanCtx:    spanCtx,
 		submitMode: a.cfg.Insertion.AutoSubmit,
 	}
+	// When chat-audio + combine_postprocess + postprocess.enabled, fold
+	// postprocess.prompt into the chat-audio system message so a single
+	// /chat/completions round-trip covers transcription AND cleanup.
+	// The corresponding skip lives in finishRecording (gated on
+	// state.combinedPostProcess) so we don't make a second call.
+	state.combinedPostProcess = a.cfg.Transcription.Backend == config.BackendLemonadeChat &&
+		a.cfg.Transcription.ChatAudio.CombinePostProcess &&
+		a.cfg.PostProcess.Enabled
+	var extraSystemPrompt string
+	if state.combinedPostProcess {
+		extraSystemPrompt = a.cfg.PostProcess.Prompt
+		sessionlog.Infof("chat-audio: combine_postprocess on; folding postprocess.prompt (%d chars) into system message", len(extraSystemPrompt))
+	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
-		SampleRate: a.cfg.Recording.SampleRate,
-		Channels:   a.cfg.Recording.Channels,
-		Samples:    wrappedSamples,
+		SampleRate:        a.cfg.Recording.SampleRate,
+		Channels:          a.cfg.Recording.Channels,
+		Samples:            wrappedSamples,
+		ExtraSystemPrompt: extraSystemPrompt,
 		Callbacks: transcribe.ConnectCallbacks{
 			OnConnecting: func(attempt, max int) {
 				a.overlay.SetConnecting(attempt, max)
@@ -668,7 +687,14 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	a.overlay.SetFinishingText(displayText)
 
 	postProcessSkipped := false
-	if a.cfg.PostProcess.Enabled {
+	if state.combinedPostProcess {
+		// chat-audio already folded the cleanup rules into its system
+		// prompt and produced a cleaned transcript in the same call.
+		// Running the separate /chat/completions postprocess pass on
+		// top would just add latency and may double-clean.
+		state.span.AddEvent("postprocess.combined_into_chat_audio")
+		sessionlog.Infof("postprocess: combined into chat-audio call; skipping separate pass")
+	} else if a.cfg.PostProcess.Enabled {
 		a.overlay.SetFinishingPhase(a.cfg.Overlay.Finishing.PPWait)
 		state.span.AddEvent("overlay.phase.wait")
 		ppSpanCtx, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",

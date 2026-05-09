@@ -46,15 +46,16 @@ type chatAudioSession struct {
 	endpoint   string
 	model      string
 
-	chunkMaxSamples int
-	historyTurns    int
-	promptTemplate  string
-	language        string
-	streamSSE       bool
-	tailSilenceMS   int
-	contextMode     string
-	minChunkPeak    float64
-	minChunkRMS     float64
+	chunkMaxSamples   int
+	historyTurns      int
+	promptTemplate    string
+	language          string
+	streamSSE         bool
+	tailSilenceMS     int
+	contextMode       string
+	minChunkPeak      float64
+	minChunkRMS       float64
+	extraSystemPrompt string
 
 	// Audio assumptions: PCM16 mono at this sample rate. Lemonade's
 	// gemma audio path expects 16 kHz; the recorder already produces
@@ -141,6 +142,7 @@ func startChatAudioSession(
 		contextMode:          contextMode,
 		minChunkPeak:         cfg.ChatAudio.MinChunkPeak,
 		minChunkRMS:          cfg.ChatAudio.MinChunkRMS,
+		extraSystemPrompt:    opts.ExtraSystemPrompt,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		events:               make(chan DictationEvent, 16),
@@ -607,19 +609,33 @@ func parseSSEDelta(payload string) (string, string, error) {
 	return "", c.FinishReason, nil
 }
 
-// buildMessages assembles the message list for one chunk. Two shapes
-// are supported, picked by ContextMode:
+// buildMessages assembles the message list for one chunk.
 //
+// All instruction text lives in a single role:system message — keeping
+// the prompt out of role:user content is the regurgitation fix: small
+// instruct models like gemma4-it-e2b-FLM tend to echo prompt text
+// back when it sits next to the audio in user content (observed in
+// session 20260508-195858 — "transcribe the following segments which
+// contains possibly english french or a mix of both" came out
+// verbatim at the tail of a transcript whose last spoken word was
+// "transcribe"). The system role frames the same content as
+// meta-instruction the model treats as out-of-band.
+//
+// User content carries only audio (plus audio-ordering text labels in
+// inline_clips mode). Two shapes are supported, picked by ContextMode:
+//
+//	system:    instruction prompt (+ optional postprocess prompt)
 //	few_shot:
-//	  user:      [text instruction, input_audio: prior chunk 1]
+//	  user:      [input_audio: prior chunk 1]
 //	  assistant: prior transcript 1
-//	  user:      [text instruction, input_audio: prior chunk 2]
+//	  user:      [input_audio: prior chunk 2]
 //	  assistant: prior transcript 2
-//	  user:      [text instruction, input_audio: current chunk]
+//	  user:      [input_audio: current chunk]
 //
+//	system:    instruction prompt (+ optional postprocess prompt) +
+//	             "transcribe ONLY the FINAL clip" addendum
 //	inline_clips:
 //	  user: [
-//	    text instruction (with explicit "transcribe only the LAST clip"),
 //	    text "[prior clip 1]:",  input_audio: prior chunk 1,
 //	    text "[prior clip 2]:",  input_audio: prior chunk 2,
 //	    text "[current clip]:",  input_audio: current chunk,
@@ -628,24 +644,38 @@ func parseSSEDelta(payload string) (string, string, error) {
 // historyTurns caps the history fed back to the model. When 0 (or no
 // history yet) the request reduces to the single user message form.
 func (s *chatAudioSession) buildMessages(currentWAV []byte) []map[string]any {
-	prompt := s.renderPrompt()
 	history := s.historySnapshot()
 	if s.historyTurns < len(history) {
 		history = history[len(history)-s.historyTurns:]
 	}
-	if s.contextMode == config.ChatAudioContextInlineClips {
-		return []map[string]any{
-			{
-				"role":    "user",
-				"content": inlineClipsContent(prompt, history, currentWAV),
-			},
-		}
+	systemPrompt := s.renderPrompt()
+	if s.contextMode == config.ChatAudioContextInlineClips && len(history) > 0 {
+		systemPrompt = "You will receive several short audio clips, in order. " +
+			"Transcribe ONLY the FINAL clip; the earlier clips are provided " +
+			"as continuous context so you can keep proper-noun spelling, " +
+			"language, and turn boundaries consistent.\n\n" + systemPrompt
 	}
-	msgs := make([]map[string]any, 0, 2*len(history)+1)
+	if extra := strings.TrimSpace(s.extraSystemPrompt); extra != "" {
+		systemPrompt = systemPrompt + "\n\n" + extra
+	}
+
+	msgs := make([]map[string]any, 0, 2+2*len(history)+1)
+	msgs = append(msgs, map[string]any{
+		"role":    "system",
+		"content": systemPrompt,
+	})
+
+	if s.contextMode == config.ChatAudioContextInlineClips {
+		msgs = append(msgs, map[string]any{
+			"role":    "user",
+			"content": inlineClipsContent(history, currentWAV),
+		})
+		return msgs
+	}
 	for _, turn := range history {
 		msgs = append(msgs, map[string]any{
 			"role":    "user",
-			"content": userContent(prompt, turn.wav),
+			"content": []map[string]any{audioPart(turn.wav)},
 		})
 		msgs = append(msgs, map[string]any{
 			"role":    "assistant",
@@ -654,49 +684,17 @@ func (s *chatAudioSession) buildMessages(currentWAV []byte) []map[string]any {
 	}
 	msgs = append(msgs, map[string]any{
 		"role":    "user",
-		"content": userContent(prompt, currentWAV),
+		"content": []map[string]any{audioPart(currentWAV)},
 	})
 	return msgs
 }
 
-// userContent builds the few-shot multimodal content array: a text
-// instruction followed by an input_audio part with base64-encoded WAV
-// bytes. Used when ContextMode is "few_shot" (and for the leaf user
-// turn there).
-func userContent(prompt string, wav []byte) []map[string]any {
-	return []map[string]any{
-		{"type": "text", "text": prompt},
-		{
-			"type": "input_audio",
-			"input_audio": map[string]any{
-				"data":   base64.StdEncoding.EncodeToString(wav),
-				"format": "wav",
-			},
-		},
-	}
-}
-
-// inlineClipsContent builds the inline-clips multimodal content array:
-// the transcription instruction (rewritten to mark the LAST clip as
-// the target), then alternating text label + input_audio for each
-// prior clip, and finally the label + input_audio for the current
-// clip. Matches the multi-audio shape Google's Gemma 4 docs show, but
-// uses Lemonade's OpenAI-compat input_audio part shape (base64 WAV).
-func inlineClipsContent(prompt string, history []chatTurn, currentWAV []byte) []map[string]any {
-	// When there's no prior context, the instruction is the same as
-	// few-shot's. When there is, prepend a sentence that scopes the
-	// answer to the LAST clip only — the model otherwise tends to
-	// transcribe every clip and join them, doubling up audio that
-	// was already delivered to the user on prior chunks.
-	leadingText := prompt
-	if len(history) > 0 {
-		leadingText = "You will receive several short audio clips, in order. " +
-			"Transcribe ONLY the FINAL clip; the earlier clips are provided " +
-			"as continuous context so you can keep proper-noun spelling, " +
-			"language, and turn boundaries consistent. " + prompt
-	}
-	parts := make([]map[string]any, 0, 2+2*(len(history)+1))
-	parts = append(parts, map[string]any{"type": "text", "text": leadingText})
+// inlineClipsContent builds the inline-clips multimodal content array
+// used by the user message. The leading "transcribe ONLY the FINAL
+// clip" framing now lives in the system message; this function just
+// produces the audio sequence labelled by clip index.
+func inlineClipsContent(history []chatTurn, currentWAV []byte) []map[string]any {
+	parts := make([]map[string]any, 0, 2*(len(history)+1))
 	for i, turn := range history {
 		parts = append(parts,
 			map[string]any{"type": "text", "text": fmt.Sprintf("[prior clip %d]:", i+1)},
@@ -727,7 +725,9 @@ func audioPart(wav []byte) map[string]any {
 // "<wav N bytes>" placeholder so the session log can show the exact
 // prompt and message structure without spilling the raw audio.
 // The original body is not mutated; a deep-redacted copy is built
-// in place.
+// in place. HTML escaping is disabled so '<' / '>' in the
+// placeholder render as themselves rather than < / > —
+// this is a log line, not a browser response.
 func redactedRequestJSON(body map[string]any) (string, error) {
 	// Round-trip through JSON to get a generic map[string]any tree
 	// we can walk safely without aliasing the live request body.
@@ -740,11 +740,14 @@ func redactedRequestJSON(body map[string]any) (string, error) {
 		return "", err
 	}
 	redactAudioInPlace(clone)
-	pretty, err := json.MarshalIndent(clone, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(clone); err != nil {
 		return "", err
 	}
-	return string(pretty), nil
+	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
 func (s *chatAudioSession) renderPrompt() string {

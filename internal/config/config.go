@@ -298,6 +298,14 @@ type ChatAudioConfig struct {
 	// either to 0 to disable that arm of the check.
 	MinChunkPeak float64 `yaml:"min_chunk_peak"`
 	MinChunkRMS  float64 `yaml:"min_chunk_rms"`
+	// CombinePostProcess folds postprocess.prompt into the
+	// chat-audio system prompt and skips the separate postprocess
+	// call. With Gemma audio, the same model is doing transcription
+	// and is fully capable of cleanup in one shot — the second
+	// /chat/completions round-trip just adds latency. Only honored
+	// when the lemonade-chat backend is selected and
+	// postprocess.enabled is true; otherwise it's a no-op.
+	CombinePostProcess bool `yaml:"combine_postprocess"`
 }
 
 const (

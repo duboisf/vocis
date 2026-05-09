@@ -101,41 +101,42 @@ func TestBuildMessagesIncludesHistoryThenCurrent(t *testing.T) {
 	}
 	current := []byte("wavCurrent")
 	msgs := s.buildMessages(current)
-	if len(msgs) != 5 {
-		t.Fatalf("len=%d want 5 (2 user/assistant pairs + 1 user)", len(msgs))
+	// system + 2*(user/assistant) + final user = 6
+	if len(msgs) != 6 {
+		t.Fatalf("len=%d want 6 (system + 2 user/assistant pairs + 1 user)", len(msgs))
 	}
-	if msgs[0]["role"] != "user" {
-		t.Fatalf("msg[0].role=%v want user", msgs[0]["role"])
+	if msgs[0]["role"] != "system" || msgs[0]["content"] != "Transcribe in en." {
+		t.Fatalf("msg[0]=%v want system with rendered prompt", msgs[0])
 	}
-	if msgs[1]["role"] != "assistant" || msgs[1]["content"] != "first" {
-		t.Fatalf("msg[1]=%v", msgs[1])
+	if msgs[1]["role"] != "user" {
+		t.Fatalf("msg[1].role=%v want user", msgs[1]["role"])
 	}
-	if msgs[2]["role"] != "user" {
-		t.Fatalf("msg[2].role=%v want user", msgs[2]["role"])
+	if msgs[2]["role"] != "assistant" || msgs[2]["content"] != "first" {
+		t.Fatalf("msg[2]=%v", msgs[2])
 	}
-	if msgs[3]["role"] != "assistant" || msgs[3]["content"] != "second" {
-		t.Fatalf("msg[3]=%v", msgs[3])
+	if msgs[3]["role"] != "user" {
+		t.Fatalf("msg[3].role=%v want user", msgs[3]["role"])
 	}
-	if msgs[4]["role"] != "user" {
-		t.Fatalf("msg[4].role=%v want user", msgs[4]["role"])
+	if msgs[4]["role"] != "assistant" || msgs[4]["content"] != "second" {
+		t.Fatalf("msg[4]=%v", msgs[4])
+	}
+	if msgs[5]["role"] != "user" {
+		t.Fatalf("msg[5].role=%v want user", msgs[5]["role"])
 	}
 
-	// User content must be the [text, input_audio] pair with the
-	// language-substituted prompt.
-	parts, ok := msgs[4]["content"].([]map[string]any)
+	// Final user content is just an audio part — no text prompt
+	// (the prompt now lives in the system message).
+	parts, ok := msgs[5]["content"].([]map[string]any)
 	if !ok {
-		t.Fatalf("user content type=%T", msgs[4]["content"])
+		t.Fatalf("user content type=%T", msgs[5]["content"])
 	}
-	if len(parts) != 2 {
-		t.Fatalf("user content parts=%d", len(parts))
+	if len(parts) != 1 {
+		t.Fatalf("user content parts=%d want 1 (audio only)", len(parts))
 	}
-	if parts[0]["type"] != "text" || parts[0]["text"] != "Transcribe in en." {
-		t.Fatalf("text part=%v", parts[0])
+	if parts[0]["type"] != "input_audio" {
+		t.Fatalf("audio part type=%v", parts[0]["type"])
 	}
-	if parts[1]["type"] != "input_audio" {
-		t.Fatalf("audio part type=%v", parts[1]["type"])
-	}
-	audio := parts[1]["input_audio"].(map[string]any)
+	audio := parts[0]["input_audio"].(map[string]any)
 	if audio["format"] != "wav" {
 		t.Fatalf("format=%v", audio["format"])
 	}
@@ -145,6 +146,27 @@ func TestBuildMessagesIncludesHistoryThenCurrent(t *testing.T) {
 	}
 	if string(decoded) != "wavCurrent" {
 		t.Fatalf("audio bytes=%q", decoded)
+	}
+}
+
+func TestBuildMessagesAppendsExtraSystemPrompt(t *testing.T) {
+	t.Parallel()
+	s := &chatAudioSession{
+		promptTemplate:    "Transcribe in {language}.",
+		language:          "en",
+		historyTurns:      0,
+		extraSystemPrompt: "Also clean up filler words.",
+	}
+	msgs := s.buildMessages([]byte("wav"))
+	if msgs[0]["role"] != "system" {
+		t.Fatalf("msg[0].role=%v", msgs[0]["role"])
+	}
+	got := msgs[0]["content"].(string)
+	if !strings.Contains(got, "Transcribe in en.") {
+		t.Fatalf("system prompt missing transcribe text: %q", got)
+	}
+	if !strings.Contains(got, "Also clean up filler words.") {
+		t.Fatalf("system prompt missing extra prompt: %q", got)
 	}
 }
 
@@ -161,15 +183,16 @@ func TestBuildMessagesRespectsHistoryTurnsCap(t *testing.T) {
 		{wav: []byte("c"), transcript: "charlie"},
 	}
 	msgs := s.buildMessages([]byte("now"))
-	if len(msgs) != 3 {
-		t.Fatalf("len=%d want 3", len(msgs))
+	// system + user (charlie audio) + assistant "charlie" + user (now audio) = 4
+	if len(msgs) != 4 {
+		t.Fatalf("len=%d want 4", len(msgs))
 	}
-	if msgs[1]["content"] != "charlie" {
-		t.Fatalf("kept turn=%v want charlie", msgs[1]["content"])
+	if msgs[2]["content"] != "charlie" {
+		t.Fatalf("kept turn=%v want charlie", msgs[2]["content"])
 	}
 }
 
-func TestBuildMessagesInlineClipsSingleUserTurn(t *testing.T) {
+func TestBuildMessagesInlineClipsSplitsSystemAndUser(t *testing.T) {
 	t.Parallel()
 	s := &chatAudioSession{
 		promptTemplate: "Transcribe in {language}.",
@@ -182,55 +205,38 @@ func TestBuildMessagesInlineClipsSingleUserTurn(t *testing.T) {
 		{wav: []byte("wavB"), transcript: "bravo"},
 	}
 	msgs := s.buildMessages([]byte("wavCurrent"))
-	if len(msgs) != 1 {
-		t.Fatalf("len=%d want 1 (single user message)", len(msgs))
+	if len(msgs) != 2 {
+		t.Fatalf("len=%d want 2 (system + user)", len(msgs))
 	}
-	if msgs[0]["role"] != "user" {
-		t.Fatalf("role=%v want user", msgs[0]["role"])
+	if msgs[0]["role"] != "system" {
+		t.Fatalf("role=%v want system", msgs[0]["role"])
 	}
-	parts, ok := msgs[0]["content"].([]map[string]any)
-	if !ok {
-		t.Fatalf("content type=%T", msgs[0]["content"])
+	sys := msgs[0]["content"].(string)
+	if !strings.Contains(sys, "FINAL clip") {
+		t.Fatalf("system missing FINAL-clip directive: %q", sys)
 	}
-	// 1 leading text + 2*(prior count) + 2 (current label + audio) =
-	// 1 + 4 + 2 = 7 parts
-	if len(parts) != 7 {
-		t.Fatalf("parts=%d want 7", len(parts))
+	if !strings.Contains(sys, "Transcribe in en.") {
+		t.Fatalf("system missing transcribe prompt: %q", sys)
 	}
-	// Leading instruction must scope to the FINAL clip when context
-	// is non-empty.
-	leading := parts[0]
-	if leading["type"] != "text" {
-		t.Fatalf("leading type=%v", leading["type"])
+	parts := msgs[1]["content"].([]map[string]any)
+	// 2 prior (label+audio) + 1 current (label+audio) = 6 parts
+	if len(parts) != 6 {
+		t.Fatalf("parts=%d want 6", len(parts))
 	}
-	if !strings.Contains(leading["text"].(string), "FINAL clip") {
-		t.Fatalf("leading instruction missing FINAL-clip directive: %q", leading["text"])
+	if parts[0]["text"] != "[prior clip 1]:" || parts[2]["text"] != "[prior clip 2]:" || parts[4]["text"] != "[current clip]:" {
+		t.Fatalf("clip labels wrong: %v %v %v", parts[0], parts[2], parts[4])
 	}
-	// Parts 1,3 are prior labels; parts 2,4 are prior audio.
-	if parts[1]["text"] != "[prior clip 1]:" {
-		t.Fatalf("parts[1]=%v", parts[1])
+	if parts[1]["type"] != "input_audio" || parts[3]["type"] != "input_audio" || parts[5]["type"] != "input_audio" {
+		t.Fatalf("audio part types wrong: %v %v %v", parts[1]["type"], parts[3]["type"], parts[5]["type"])
 	}
-	if parts[3]["text"] != "[prior clip 2]:" {
-		t.Fatalf("parts[3]=%v", parts[3])
-	}
-	if parts[2]["type"] != "input_audio" || parts[4]["type"] != "input_audio" {
-		t.Fatalf("prior audio parts wrong types: %v %v", parts[2]["type"], parts[4]["type"])
-	}
-	// Last two parts: current label + current audio.
-	if parts[5]["text"] != "[current clip]:" {
-		t.Fatalf("parts[5]=%v", parts[5])
-	}
-	if parts[6]["type"] != "input_audio" {
-		t.Fatalf("parts[6]=%v", parts[6])
-	}
-	audio := parts[6]["input_audio"].(map[string]any)
+	audio := parts[5]["input_audio"].(map[string]any)
 	decoded, err := base64.StdEncoding.DecodeString(audio["data"].(string))
 	if err != nil || string(decoded) != "wavCurrent" {
 		t.Fatalf("current audio decode mismatch err=%v got=%q", err, decoded)
 	}
 }
 
-func TestBuildMessagesInlineClipsNoHistoryUsesPlainPrompt(t *testing.T) {
+func TestBuildMessagesInlineClipsNoHistoryOmitsLastClipFraming(t *testing.T) {
 	t.Parallel()
 	s := &chatAudioSession{
 		promptTemplate: "Transcribe in {language}.",
@@ -239,13 +245,12 @@ func TestBuildMessagesInlineClipsNoHistoryUsesPlainPrompt(t *testing.T) {
 		contextMode:    config.ChatAudioContextInlineClips,
 	}
 	msgs := s.buildMessages([]byte("wavCurrent"))
-	parts := msgs[0]["content"].([]map[string]any)
-	leading := parts[0]["text"].(string)
-	if strings.Contains(leading, "FINAL clip") {
-		t.Fatalf("expected plain prompt without FINAL-clip directive when no history; got %q", leading)
+	sys := msgs[0]["content"].(string)
+	if strings.Contains(sys, "FINAL clip") {
+		t.Fatalf("expected plain system prompt without FINAL-clip directive when no history; got %q", sys)
 	}
-	if leading != "Transcribe in en." {
-		t.Fatalf("plain prompt mismatch: %q", leading)
+	if sys != "Transcribe in en." {
+		t.Fatalf("plain prompt mismatch: %q", sys)
 	}
 }
 
@@ -260,7 +265,8 @@ func TestBuildMessagesNoHistoryWhenZeroTurns(t *testing.T) {
 		{wav: []byte("a"), transcript: "alpha"},
 	}
 	msgs := s.buildMessages([]byte("now"))
-	if len(msgs) != 1 || msgs[0]["role"] != "user" {
+	// system + user(audio) = 2
+	if len(msgs) != 2 || msgs[0]["role"] != "system" || msgs[1]["role"] != "user" {
 		t.Fatalf("msgs=%v", msgs)
 	}
 }
@@ -326,7 +332,8 @@ func TestRedactedRequestJSONStripsAudio(t *testing.T) {
 	if strings.Contains(out, base64.StdEncoding.EncodeToString([]byte("fake-wav-bytes"))) {
 		t.Fatalf("redacted output still contains base64 data: %s", out)
 	}
-	if !strings.Contains(out, "<wav") || !strings.Contains(out, "base64=") {
+	// JSON encodes < as <, so check for the JSON-escaped form.
+	if !strings.Contains(out, `<wav`) || !strings.Contains(out, "base64=") {
 		t.Fatalf("redacted output missing placeholder: %s", out)
 	}
 	if !strings.Contains(out, "Transcribe the speech.") {
