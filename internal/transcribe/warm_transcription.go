@@ -3,10 +3,9 @@ package transcribe
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -15,91 +14,79 @@ import (
 	"vocis/internal/sessionlog"
 )
 
-// WarmTranscription forces the audio model into memory by posting a
-// tiny silent WAV to /api/v1/audio/transcriptions. Mirrors
-// WarmPostProcess for the audio slot: on Lemonade the WS realtime
-// path can sit with no audio model resident (the LLM stole the slot
-// attention), and the first real dictation then pays a 5-10 s load
-// stall which shows up as "no transcript ever arrives" from the
-// user's POV. Firing a REST transcription on startup moves that
-// stall off the dictation critical path.
+// LoadLemonadeModel POSTs to Lemonade's /load endpoint to force a
+// model into its resident slot. Type-agnostic — works for both
+// audio (whisper-FLM) and llm (gemma-FLM) models. Returns when
+// Lemonade reports the load succeeded; propagates HTTP errors with
+// body excerpts.
 //
-// Only meaningful for the Lemonade backend — OpenAI's cloud always
-// has the model warm. Returns nil for non-Lemonade backends and for
-// empty model/base_url (nothing to warm). When the caller has not
-// set a deadline on ctx, a 30 s default bound is applied internally.
-func WarmTranscription(ctx context.Context, cfg config.TranscriptionConfig) error {
-	if cfg.Backend != config.BackendLemonade {
-		return nil
-	}
-	model := strings.TrimSpace(cfg.Model)
-	if model == "" {
-		return nil
-	}
-	baseURL := strings.TrimRight(cfg.BaseURL, "/")
+// Default 60 s deadline applied internally if ctx has none — a cold
+// model load on NPU can run several seconds, plus possible queueing
+// behind a current-loaded model swap.
+func LoadLemonadeModel(ctx context.Context, baseURL, model string) error {
+	baseURL = strings.TrimRight(baseURL, "/")
 	if baseURL == "" {
-		return fmt.Errorf("transcription.base_url is empty")
+		return fmt.Errorf("base url is empty")
 	}
-
+	if strings.TrimSpace(model) == "" {
+		return fmt.Errorf("model name is empty")
+	}
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 	}
-
-	wav := silentWAV(100) // 100 ms is enough to trigger load
-	body, contentType, err := multipartAudioForm(wav, model)
+	raw, err := json.Marshal(map[string]string{"model_name": model})
 	if err != nil {
-		return fmt.Errorf("build form: %w", err)
+		return fmt.Errorf("marshal /load body: %w", err)
 	}
-
-	url := baseURL + "/audio/transcriptions"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	url := baseURL + "/load"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return fmt.Errorf("build /load request: %w", err)
 	}
-	req.Header.Set("Content-Type", contentType)
-
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		// Read up to 256 bytes of body for diagnostic context. Silent
-		// audio sometimes yields a 4xx ("no speech detected") which is
-		// fine — the model loaded anyway, but keep that classification
-		// at the call site rather than hiding it here.
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+	if resp.StatusCode/100 != 2 {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("POST %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
-	sessionlog.Debugf("transcription warm %s ok", model)
+	sessionlog.Debugf("lemonade /load %s ok", model)
 	return nil
 }
 
-// warmTranscriptionLogging wraps WarmTranscription for fire-and-forget
-// callers that want the old behavior of logging and swallowing errors.
-func warmTranscriptionLogging(ctx context.Context, cfg config.TranscriptionConfig) {
-	if err := WarmTranscription(ctx, cfg); err != nil {
-		sessionlog.Warnf("transcription warm %s: %v", cfg.Model, err)
+// loadLemonadeModelLogging is the fire-and-forget wrapper for
+// callers that want errors logged and swallowed (the async warm
+// path from EnsureLemonadeModelsLoaded).
+func loadLemonadeModelLogging(ctx context.Context, cfg config.TranscriptionConfig) {
+	if !config.IsLocalBackend(cfg.Backend) || strings.TrimSpace(cfg.Model) == "" {
+		return
+	}
+	if err := LoadLemonadeModel(ctx, cfg.BaseURL, cfg.Model); err != nil {
+		sessionlog.Warnf("lemonade load %s: %v", cfg.Model, err)
 	}
 }
 
 // EnsureTranscribeModelLoaded is the synchronous preflight called at
 // transcribe time. For Lemonade, it fetches /api/v1/health and — if
-// the configured transcription model isn't resident — fires the warm
-// POST inline. Returns when the model is loaded or when an error
-// occurs; propagates ctx cancellation and the warm request's error.
+// the configured transcription model isn't resident — POSTs to
+// /api/v1/load inline. Returns when the model is loaded or when an
+// error occurs; propagates ctx cancellation and the load request's
+// error.
 //
 // onLoading, if non-nil, is invoked once with the model name just
-// before the warm POST is issued. Callers use it to surface a
+// before the /load POST is issued. Callers use it to surface a
 // "Loading <model>..." overlay state so the user knows why the
 // session hasn't started yet.
 //
 // No-op (returns nil) for non-Lemonade backends, empty base_url, or
-// empty model — matching WarmTranscription's shape.
+// empty model.
 func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionConfig, onLoading func(model string)) error {
-	if cfg.Backend != config.BackendLemonade {
+	if !config.IsLocalBackend(cfg.Backend) {
 		return nil
 	}
 	model := strings.TrimSpace(cfg.Model)
@@ -111,27 +98,29 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 		return fmt.Errorf("transcription.base_url is empty")
 	}
 
-	// Label guard: catch the Lemonade 10.3 trap where
-	// `gemma4-it-e2b-FLM` (and possibly other reclassified models) is
-	// configured as transcription.model but Lemonade's audio router
-	// rejects audio for it. The realtime WS would still accept the
-	// session.update silently and return empty deltas, so the user
-	// experiences "vocis just doesn't produce text" with no clear
-	// reason. Fail loud at preflight instead.
-	if entry, err := FetchLemonadeModel(ctx, baseURL, model); err != nil {
-		// Catalog fetch failed — don't block on it. The user's model
-		// might be a user-pulled custom that doesn't show up in the
-		// catalog, or the /models endpoint hiccupped. Log and move on.
-		sessionlog.Warnf("lemonade preflight: could not verify labels for %s (%v) — proceeding", model, err)
-	} else if entry == nil {
-		sessionlog.Debugf("lemonade preflight: %s not in catalog (custom user model?) — skipping label check", model)
-	} else if !entry.HasLabel("transcription") {
-		return fmt.Errorf(
-			"transcription.model %q is not a transcription model on this Lemonade instance "+
-				"(labels: %v) — pick a model carrying the `transcription` label "+
-				"(e.g. whisper-v3-turbo-FLM) via `vocis config models`",
-			model, entry.Labels,
-		)
+	// Label guard only applies to the realtime-WS Lemonade backend,
+	// where the configured model must carry the `transcription` label
+	// or the WS silently returns empty deltas. The chat-audio backend
+	// drives /chat/completions instead, where the only requirement is
+	// the model accepts the input_audio content part — gemma-FLM-llm
+	// models satisfy that even though they don't carry the
+	// `transcription` label, so skip the guard here.
+	if cfg.Backend == config.BackendLemonade {
+		if entry, err := FetchLemonadeModel(ctx, baseURL, model); err != nil {
+			// Catalog fetch failed — don't block on it. The user's model
+			// might be a user-pulled custom that doesn't show up in the
+			// catalog, or the /models endpoint hiccupped. Log and move on.
+			sessionlog.Warnf("lemonade preflight: could not verify labels for %s (%v) — proceeding", model, err)
+		} else if entry == nil {
+			sessionlog.Debugf("lemonade preflight: %s not in catalog (custom user model?) — skipping label check", model)
+		} else if !entry.HasLabel("transcription") {
+			return fmt.Errorf(
+				"transcription.model %q is not a transcription model on this Lemonade instance "+
+					"(labels: %v) — pick a model carrying the `transcription` label "+
+					"(e.g. whisper-v3-turbo-FLM) via `vocis config models`",
+				model, entry.Labels,
+			)
+		}
 	}
 
 	health, err := FetchLemonadeHealth(ctx, baseURL)
@@ -146,7 +135,7 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 	if onLoading != nil {
 		onLoading(model)
 	}
-	if err := WarmTranscription(ctx, cfg); err != nil {
+	if err := LoadLemonadeModel(ctx, baseURL, model); err != nil {
 		return fmt.Errorf("load %s: %w", model, err)
 	}
 	return nil
@@ -154,17 +143,16 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 
 // EnsureLemonadeModelsLoaded checks that the configured transcribe and
 // postprocess models are resident on the Lemonade instance. If either
-// is missing it fires a warm request (async) to force-load without
-// blocking the caller. Logs a concise warning per missing model.
-// Safe to call from main; no-op on non-Lemonade backends.
+// is missing it fires a /load request (async) without blocking the
+// caller. Logs a concise warning per missing model.
 //
 // Returns an error when the Lemonade server is unreachable so callers
 // can fail startup loudly instead of letting the user discover the
 // problem on their first dictation, when transcription silently fails.
-// The model-warm requests themselves remain fire-and-forget — they
-// take 5-10s and would otherwise stall startup for no good reason.
+// The model-load requests themselves remain fire-and-forget — they
+// take 5-10 s and would otherwise stall startup for no good reason.
 func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcribeClient *Client) error {
-	if cfg.Transcription.Backend != config.BackendLemonade {
+	if !config.IsLocalBackend(cfg.Transcription.Backend) {
 		return nil
 	}
 	baseURL := cfg.Transcription.BaseURL
@@ -175,13 +163,19 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 
 	txModel := strings.TrimSpace(cfg.Transcription.Model)
 	if txModel != "" && !health.IsLoaded(txModel) {
-		sessionlog.Infof("lemonade: %s not loaded (resident: %v) — warming in background", txModel, health.LoadedNames())
-		go warmTranscriptionLogging(context.Background(), cfg.Transcription)
+		sessionlog.Infof("lemonade: %s not loaded (resident: %v) — loading in background", txModel, health.LoadedNames())
+		go loadLemonadeModelLogging(context.Background(), cfg.Transcription)
 	} else if txModel != "" {
 		sessionlog.Debugf("lemonade: transcription model %s already loaded", txModel)
 	}
 
-	if cfg.PostProcess.Enabled && transcribeClient != nil {
+	// Skip warming the postprocess model on the chat-audio backend:
+	// app.go folds postprocess.prompt into the chat-audio system
+	// message and never makes a separate /chat/completions postprocess
+	// call, so loading that model would just waste a slot (and on
+	// Lemonade max_models.llm=1, would evict the gemma-audio model).
+	skipPostProcessWarm := cfg.Transcription.Backend == config.BackendLemonadeChat
+	if cfg.PostProcess.Enabled && transcribeClient != nil && !skipPostProcessWarm {
 		ppModel := strings.TrimSpace(cfg.PostProcess.Model)
 		if ppModel != "" && !health.IsLoaded(ppModel) {
 			sessionlog.Infof("lemonade: %s not loaded (resident: %v) — warming in background", ppModel, health.LoadedNames())
@@ -191,67 +185,4 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 		}
 	}
 	return nil
-}
-
-// silentWAV returns a canonical 16-bit mono 16 kHz WAV buffer filled
-// with `durationMs` of silence. Minimal on purpose — just enough to
-// be a valid multipart audio payload that triggers the server-side
-// model load.
-func silentWAV(durationMs int) []byte {
-	const (
-		sampleRate    = 16000
-		bitsPerSample = 16
-		channels      = 1
-	)
-	numSamples := sampleRate * durationMs / 1000
-	dataSize := numSamples * channels * bitsPerSample / 8
-
-	var buf bytes.Buffer
-	write := func(v any) { binary.Write(&buf, binary.LittleEndian, v) }
-
-	// RIFF chunk descriptor
-	buf.WriteString("RIFF")
-	write(uint32(36 + dataSize)) // chunk size
-	buf.WriteString("WAVE")
-
-	// fmt sub-chunk
-	buf.WriteString("fmt ")
-	write(uint32(16))                                  // sub-chunk size (PCM)
-	write(uint16(1))                                   // audio format = 1 (PCM)
-	write(uint16(channels))                            // channels
-	write(uint32(sampleRate))                          // sample rate
-	write(uint32(sampleRate * channels * bitsPerSample / 8)) // byte rate
-	write(uint16(channels * bitsPerSample / 8))        // block align
-	write(uint16(bitsPerSample))                       // bits per sample
-
-	// data sub-chunk
-	buf.WriteString("data")
-	write(uint32(dataSize))
-	buf.Write(make([]byte, dataSize)) // silence
-
-	return buf.Bytes()
-}
-
-// multipartAudioForm builds the body for POST /audio/transcriptions
-// with the given WAV bytes and model name. Returns the body reader,
-// the Content-Type header value (which includes the multipart
-// boundary), and any build error.
-func multipartAudioForm(wav []byte, model string) (io.Reader, string, error) {
-	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
-
-	if err := w.WriteField("model", model); err != nil {
-		return nil, "", fmt.Errorf("write model field: %w", err)
-	}
-	filePart, err := w.CreateFormFile("file", "warm.wav")
-	if err != nil {
-		return nil, "", fmt.Errorf("create file part: %w", err)
-	}
-	if _, err := filePart.Write(wav); err != nil {
-		return nil, "", fmt.Errorf("write wav bytes: %w", err)
-	}
-	if err := w.Close(); err != nil {
-		return nil, "", fmt.Errorf("close multipart: %w", err)
-	}
-	return &buf, w.FormDataContentType(), nil
 }
