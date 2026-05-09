@@ -748,6 +748,7 @@ func Load() (Config, string, error) {
 	if err := rejectDeprecatedKeys(path, data); err != nil {
 		return Config{}, "", err
 	}
+	data = stripRetiredKeys(data)
 
 	cfg := Default()
 	if err := decodeStrict(data, &cfg); err != nil {
@@ -772,6 +773,74 @@ func decodeStrict(data []byte, cfg *Config) error {
 		return err
 	}
 	return nil
+}
+
+// retiredKeys lists nested config keys that vocis used to support and
+// has since removed. The strict KnownFields decoder would otherwise
+// reject a user's existing config when these keys are still present —
+// stripRetiredKeys silently drops them with a deprecation log so old
+// configs keep loading after a release that removes a knob.
+//
+// Format: "section.key" or "section.subsection.key". Top-level
+// renames (whole sections) live in rejectDeprecatedKeys instead so we
+// can give a clear "rename X to Y" error.
+var retiredKeys = []struct{ path, since, reason string }{
+	{"transcription.organization", "post-OpenAI-removal", "OpenAI realtime backend was removed; org/project headers no longer apply"},
+	{"transcription.project", "post-OpenAI-removal", "OpenAI realtime backend was removed; org/project headers no longer apply"},
+}
+
+// stripRetiredKeys parses the YAML, walks the retiredKeys list, and
+// returns a copy with any matches removed. Logs a one-time
+// deprecation notice per removed key so users notice their config is
+// drifting from current shape.
+func stripRetiredKeys(data []byte) []byte {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return data
+	}
+	changed := false
+	for _, k := range retiredKeys {
+		if removeNestedKey(&doc, strings.Split(k.path, ".")) {
+			changed = true
+			sessionlog.Warnf("config: dropping retired key %q (removed %s — %s)", k.path, k.since, k.reason)
+		}
+	}
+	if !changed {
+		return data
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return data
+	}
+	return out
+}
+
+// removeNestedKey walks a yaml document tree and removes the leaf at
+// the given key path. Returns true if a removal happened.
+func removeNestedKey(node *yaml.Node, path []string) bool {
+	if node == nil || len(path) == 0 {
+		return false
+	}
+	target := node
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		target = node.Content[0]
+	}
+	if target.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i < len(target.Content); i += 2 {
+		key := target.Content[i]
+		val := target.Content[i+1]
+		if key.Value != path[0] {
+			continue
+		}
+		if len(path) == 1 {
+			target.Content = append(target.Content[:i], target.Content[i+2:]...)
+			return true
+		}
+		return removeNestedKey(val, path[1:])
+	}
+	return false
 }
 
 // rejectDeprecatedKeys fails loudly on config files that still use
