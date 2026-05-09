@@ -483,14 +483,15 @@ func Default() Config {
 		Hotkey:     "ctrl+shift+space",
 		HotkeyMode: "hold",
 		Transcription: TranscriptionConfig{
-			// Local Lemonade is the default stack — no API key, no
-			// network. Users who want OpenAI Cloud flip backend to
-			// "openai" (vocis config backend) which also rewrites
-			// base_url / model to the cloud equivalents.
-			Backend:      BackendLemonade,
+			// Default to chat-audio with Gemma 4 audio: gemma4-it-e2b-FLM
+			// is more reliable in practice than whisper-v3-turbo-FLM over
+			// the realtime WS and handles language-mixing transparently.
+			// Flip to BackendLemonade + whisper-v3-turbo-FLM via
+			// `vocis config backend` if you prefer the realtime path.
+			Backend:      BackendLemonadeChat,
 			BaseURL:      "http://localhost:13305/api/v1",
 			RealtimeURL:  "ws://localhost:9000",
-			Model:        "whisper-v3-turbo-FLM",
+			Model:        "gemma4-it-e2b-FLM",
 			PromptHint:   DefaultPromptHint,
 			RequestLimit: 45,
 			HallucinationFilters: []string{
@@ -627,8 +628,15 @@ func Default() Config {
 			},
 		},
 		PostProcess: PostProcessConfig{
-			Enabled:              true,
-			Model:                "gpt-4o-mini",
+			Enabled: true,
+			// Same model as transcription. On the chat-audio backend the
+			// postprocess prompt is folded into the chat-audio system
+			// message and the separate /chat/completions call is skipped
+			// (see app.startRecordingLocked). On the realtime-WS backend
+			// they're separate calls but both go to gemma — Lemonade's
+			// llm slot only fits one model, so reusing the transcription
+			// model avoids a 5-10 s slot swap on every dictation.
+			Model:                "gemma4-it-e2b-FLM",
 			Prompt:               DefaultPostProcessPrompt,
 			MinWordCount:         10,
 			FirstTokenTimeoutSec: 10,

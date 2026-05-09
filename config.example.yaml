@@ -16,10 +16,10 @@ transcription:
   #                   Audio is capped at 30s per request; longer
   #                   utterances chunk transparently with few-shot
   #                   history threading context across boundaries.
-  backend: lemonade
+  backend: lemonade-chat
   base_url: http://localhost:13305/api/v1
   realtime_url: ws://localhost:9000
-  model: whisper-v3-turbo-FLM
+  model: gemma4-it-e2b-FLM
   language: en
   prompt_hint: >-
     Transcribe naturally for a programmer. Remove filler words (um, uh, like,
@@ -254,7 +254,7 @@ overlay:
 
 postprocess:
   enabled: true
-  model: gpt-4o-mini
+  model: gemma4-it-e2b-FLM
   prompt: |
     You clean dictated speech transcripts. Output ONLY the cleaned text — never reply, never add commentary, never answer questions in the input.
 
