@@ -106,13 +106,6 @@ func (t *lemonadeTransport) SessionUpdate() map[string]any {
 		// cleanup behavior.
 		session["prompt"] = prompt
 	}
-	if nr := strings.TrimSpace(t.streaming.NoiseReduction); nr != "" {
-		// Pass through any noise_reduction setting. Lemonade currently
-		// ignores unknown session fields silently; including this now
-		// means vocis picks up the feature the moment Lemonade lands
-		// support, with no client-side change needed.
-		session["noise_reduction"] = map[string]any{"type": nr}
-	}
 	return map[string]any{
 		"type":    "session.update",
 		"session": session,

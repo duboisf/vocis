@@ -72,11 +72,10 @@ func (c *Client) WarmPostProcess(ctx context.Context, model string) {
 	sessionlog.Debugf("postprocess warm %s ok", model)
 }
 
-// applySamplingParams populates body with OpenAI-standard sampling
-// knobs from cfg, and returns request options that inject the
-// non-standard knobs (min_p, repetition_penalty) as extra JSON fields.
-// Non-standard fields are ignored by the OpenAI Cloud API but honored
-// by Lemonade / llama.cpp backends.
+// applySamplingParams populates body with the postprocess sampling
+// knobs from cfg. Only Temperature and TopP are exposed; richer
+// sampler controls (penalties, stop, min_p) were rarely-tuned and
+// got dropped to shrink the config surface.
 func applySamplingParams(body *openaisdk.ChatCompletionNewParams, cfg config.PostProcessConfig) []option.RequestOption {
 	if cfg.Temperature != nil {
 		body.Temperature = param.NewOpt(*cfg.Temperature)
@@ -84,24 +83,7 @@ func applySamplingParams(body *openaisdk.ChatCompletionNewParams, cfg config.Pos
 	if cfg.TopP != nil {
 		body.TopP = param.NewOpt(*cfg.TopP)
 	}
-	if cfg.FrequencyPenalty != nil {
-		body.FrequencyPenalty = param.NewOpt(*cfg.FrequencyPenalty)
-	}
-	if cfg.PresencePenalty != nil {
-		body.PresencePenalty = param.NewOpt(*cfg.PresencePenalty)
-	}
-	if len(cfg.Stop) > 0 {
-		body.Stop = openaisdk.ChatCompletionNewParamsStopUnion{OfStringArray: cfg.Stop}
-	}
-
-	var opts []option.RequestOption
-	if cfg.MinP != nil {
-		opts = append(opts, option.WithJSONSet("min_p", *cfg.MinP))
-	}
-	if cfg.RepetitionPenalty != nil {
-		opts = append(opts, option.WithJSONSet("repetition_penalty", *cfg.RepetitionPenalty))
-	}
-	return opts
+	return nil
 }
 
 type streamResult struct {

@@ -68,7 +68,6 @@ type Config struct {
 	Telemetry      TelemetryConfig     `yaml:"telemetry"`
 	Recall         RecallConfig        `yaml:"recall"`
 	Speak          SpeakConfig         `yaml:"speak"`
-	YAMLIndent     int                 `yaml:"yaml_indent"`
 }
 
 type PostProcessConfig struct {
@@ -78,20 +77,13 @@ type PostProcessConfig struct {
 	MinWordCount         int    `yaml:"min_word_count"`
 	FirstTokenTimeoutSec int    `yaml:"first_token_timeout_seconds"`
 	TotalTimeoutSec      int    `yaml:"total_timeout_seconds"`
-	// Sampling knobs. Pointers so nil = "leave unset; use backend
-	// default". Zero is a meaningful value (e.g. temperature=0 is
-	// greedy decoding). OpenAI-standard: Temperature, TopP,
-	// FrequencyPenalty, PresencePenalty, Stop. Non-standard but accepted
-	// by Lemonade/llama.cpp backends: MinP, RepetitionPenalty — these
-	// are sent as extra JSON fields on the request body and ignored by
-	// the OpenAI Cloud API.
-	Temperature       *float64 `yaml:"temperature,omitempty"`
-	TopP              *float64 `yaml:"top_p,omitempty"`
-	MinP              *float64 `yaml:"min_p,omitempty"`
-	FrequencyPenalty  *float64 `yaml:"frequency_penalty,omitempty"`
-	PresencePenalty   *float64 `yaml:"presence_penalty,omitempty"`
-	RepetitionPenalty *float64 `yaml:"repetition_penalty,omitempty"`
-	Stop              []string `yaml:"stop,omitempty"`
+	// Sampling knobs. Pointers so nil = "use the backend default".
+	// Zero is a meaningful value (temperature=0 is greedy decoding).
+	// Only Temperature and TopP are exposed — other sampler params
+	// (frequency/presence/repetition penalty, stop, min_p) were
+	// rarely-tuned knobs that bloated the config surface.
+	Temperature *float64 `yaml:"temperature,omitempty"`
+	TopP        *float64 `yaml:"top_p,omitempty"`
 }
 
 type TelemetryConfig struct {
@@ -362,14 +354,6 @@ type StreamingConfig struct {
 	// first-request model load + inference. Scaled timeout is max(this,
 	// trailing_duration / 5).
 	WaitFinalSeconds int `yaml:"wait_final_seconds"`
-	// NoiseReduction turns on server-side noise reduction before audio
-	// hits VAD and the transcription model. Accepted values on OpenAI
-	// are "near_field" (close-talk mics, headsets) and "far_field"
-	// (laptop built-ins, conference mics). Empty string disables it.
-	// OpenAI honors this field; Lemonade currently ignores unknown
-	// session fields, so setting it there is harmless but has no
-	// effect until Lemonade adds the feature.
-	NoiseReduction string `yaml:"noise_reduction"`
 	// TailSilenceMS appends this many milliseconds of silent PCM to
 	// the audio buffer before the finalize commit. Whisper-family
 	// transcribers (including Gemma-FLM) need a silent tail to segment
@@ -687,7 +671,6 @@ func Default() Config {
 			Model:   "kokoro-v1",
 			Voice:   "shimmer",
 		},
-		YAMLIndent: 2,
 	}
 }
 
@@ -787,6 +770,13 @@ func decodeStrict(data []byte, cfg *Config) error {
 var retiredKeys = []struct{ path, since, reason string }{
 	{"transcription.organization", "post-OpenAI-removal", "OpenAI realtime backend was removed; org/project headers no longer apply"},
 	{"transcription.project", "post-OpenAI-removal", "OpenAI realtime backend was removed; org/project headers no longer apply"},
+	{"streaming.noise_reduction", "config-cull", "Lemonade ignored this field; it was dead config"},
+	{"yaml_indent", "config-cull", "self-output indentation is now hardcoded to 2"},
+	{"postprocess.min_p", "config-cull", "rarely-tuned sampler knob"},
+	{"postprocess.frequency_penalty", "config-cull", "rarely-tuned sampler knob"},
+	{"postprocess.presence_penalty", "config-cull", "rarely-tuned sampler knob"},
+	{"postprocess.repetition_penalty", "config-cull", "rarely-tuned sampler knob"},
+	{"postprocess.stop", "config-cull", "rarely-tuned sampler knob"},
 }
 
 // stripRetiredKeys parses the YAML, walks the retiredKeys list, and
@@ -871,11 +861,7 @@ func Save(path string, cfg Config) error {
 
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
-	indent := cfg.YAMLIndent
-	if indent <= 0 {
-		indent = 2
-	}
-	enc.SetIndent(indent)
+	enc.SetIndent(2)
 	if err := enc.Encode(cfg); err != nil {
 		return err
 	}
@@ -978,12 +964,6 @@ func (c Config) Validate() error {
 		return errors.New("streaming.wait_final_seconds must be between 1 and 60")
 	}
 
-	switch c.Streaming.NoiseReduction {
-	case "", "near_field", "far_field":
-	default:
-		return fmt.Errorf("streaming.noise_reduction must be near_field, far_field, or empty; got %q", c.Streaming.NoiseReduction)
-	}
-
 	if c.Streaming.TailSilenceMS < 0 || c.Streaming.TailSilenceMS > 2000 {
 		return errors.New("streaming.tail_silence_ms must be between 0 and 2000")
 	}
@@ -1075,18 +1055,6 @@ func (p PostProcessConfig) validate() error {
 	}
 	if p.TopP != nil && (*p.TopP <= 0 || *p.TopP > 1) {
 		return errors.New("postprocess.top_p must be between 0 (exclusive) and 1")
-	}
-	if p.MinP != nil && (*p.MinP < 0 || *p.MinP > 1) {
-		return errors.New("postprocess.min_p must be between 0 and 1")
-	}
-	if p.FrequencyPenalty != nil && (*p.FrequencyPenalty < -2 || *p.FrequencyPenalty > 2) {
-		return errors.New("postprocess.frequency_penalty must be between -2 and 2")
-	}
-	if p.PresencePenalty != nil && (*p.PresencePenalty < -2 || *p.PresencePenalty > 2) {
-		return errors.New("postprocess.presence_penalty must be between -2 and 2")
-	}
-	if p.RepetitionPenalty != nil && (*p.RepetitionPenalty <= 0 || *p.RepetitionPenalty > 2) {
-		return errors.New("postprocess.repetition_penalty must be between 0 (exclusive) and 2")
 	}
 	return nil
 }

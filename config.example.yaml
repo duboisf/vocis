@@ -164,14 +164,6 @@ streaming:
   # the trailing word from the transcript. 300ms is a solid default;
   # set 0 to disable, cap is 2000.
   tail_silence_ms: 800
-  # noise_reduction: server-side noise reduction applied before VAD and
-  # the transcription model. Accepted values:
-  #   ""           - off (default)
-  #   "near_field" - close-talk mics, headsets, handsets
-  #   "far_field"  - laptop built-ins, conference/room mics
-  # Lemonade currently ignores unknown session fields — setting it now
-  # is a no-op until Lemonade adds support, but harmless.
-  noise_reduction: ""
 
 insertion:
   mode: auto
@@ -289,19 +281,9 @@ postprocess:
   # full response hasn't arrived by then we give up and paste the raw
   # transcript with a `postprocess_skipped` warning overlay.
   total_timeout_seconds: 15
-  # Sampling knobs. Omit any field to let the backend use its default.
-  # OpenAI-compatible (honored on Lemonade): temperature, top_p,
-  # frequency_penalty, presence_penalty, stop.
-  # Lemonade / llama.cpp extras: min_p, repetition_penalty. `seed` is
-  # NOT supported — Lemonade's onnxruntime-genai backend accepts the
-  # field but does not thread it to the sampler.
+  # Sampling knobs. Omit either to use the backend default.
   temperature: 0.2
   # top_p: 0.9
-  # min_p: 0.05
-  # frequency_penalty: 0.4
-  # presence_penalty: 0.0
-  # repetition_penalty: 1.1
-  # stop: ["\nInput:", "Here is", "Here's", "Sure,", "I understand", "Output:"]
 
 telemetry:
   enabled: false
@@ -349,5 +331,3 @@ speak:
   # instead of producing a zero-second WAV. Browse the Kokoro model
   # card for the full voice list.
   voice: shimmer
-
-yaml_indent: 2

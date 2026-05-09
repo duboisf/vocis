@@ -276,13 +276,10 @@ func TestPostProcessCallsOnFirstToken(t *testing.T) {
 func TestPostProcessAppliesSamplingParams(t *testing.T) {
 	t.Parallel()
 
-	temp, topP, freq, pres := 0.25, 0.9, 0.4, 0.1
+	temp, topP := 0.25, 0.9
 	cfg := enabledCfg()
 	cfg.Temperature = &temp
 	cfg.TopP = &topP
-	cfg.FrequencyPenalty = &freq
-	cfg.PresencePenalty = &pres
-	cfg.Stop = []string{"\nInput:", "Here's"}
 
 	streamer := &fakeStreamer{stream: &fakeChatStream{
 		ctx:    context.Background(),
@@ -297,15 +294,6 @@ func TestPostProcessAppliesSamplingParams(t *testing.T) {
 	}
 	if got.TopP.Value != topP {
 		t.Errorf("top_p = %v, want %v", got.TopP.Value, topP)
-	}
-	if got.FrequencyPenalty.Value != freq {
-		t.Errorf("frequency_penalty = %v, want %v", got.FrequencyPenalty.Value, freq)
-	}
-	if got.PresencePenalty.Value != pres {
-		t.Errorf("presence_penalty = %v, want %v", got.PresencePenalty.Value, pres)
-	}
-	if len(got.Stop.OfStringArray) != 2 || got.Stop.OfStringArray[0] != "\nInput:" {
-		t.Errorf("stop = %v, want [\\nInput: Here's]", got.Stop.OfStringArray)
 	}
 }
 

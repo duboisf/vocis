@@ -219,20 +219,13 @@ func TestLemonadeTransportSessionUpdateCarriesPromptAndNoiseReduction(t *testing
 			Model:      "m",
 			PromptHint: "Use technical spelling.",
 		},
-		config.StreamingConfig{NoiseReduction: "near_field"},
+		config.StreamingConfig{},
 		time.Second,
 	)
 	session := transport.SessionUpdate()["session"].(map[string]any)
 
 	if got := session["prompt"]; got != "Use technical spelling." {
 		t.Fatalf("prompt = %v, want \"Use technical spelling.\"", got)
-	}
-	nr, ok := session["noise_reduction"].(map[string]any)
-	if !ok {
-		t.Fatalf("noise_reduction = %T, want map[string]any", session["noise_reduction"])
-	}
-	if nr["type"] != "near_field" {
-		t.Fatalf("noise_reduction.type = %v, want near_field", nr["type"])
 	}
 }
 
