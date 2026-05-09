@@ -51,7 +51,6 @@ type chatAudioSession struct {
 	promptTemplate    string
 	language          string
 	streamSSE         bool
-	tailSilenceMS     int
 	contextMode       string
 	minChunkPeak      float64
 	minChunkRMS       float64
@@ -138,7 +137,6 @@ func startChatAudioSession(
 		promptTemplate:       cfg.ChatAudio.Prompt,
 		language:             cfg.ChatAudio.Language,
 		streamSSE:            cfg.ChatAudio.Stream,
-		tailSilenceMS:        streaming.TailSilenceMS,
 		contextMode:          contextMode,
 		minChunkPeak:         cfg.ChatAudio.MinChunkPeak,
 		minChunkRMS:          cfg.ChatAudio.MinChunkRMS,
@@ -282,21 +280,14 @@ func (s *chatAudioSession) run(
 			return
 		}
 		// Copy the slice so the worker owns its own memory. The
-		// pump reuses buf across chunks. For trailing chunks (hotkey
-		// release), append tail_silence_ms of silent PCM to give the
-		// model a confident silence tail to segment on — without it,
-		// releasing mid-word can drop the trailing word, same Whisper
-		// behavior the realtime backends pad against.
-		extra := 0
-		if trailing && s.tailSilenceMS > 0 {
-			extra = s.tailSilenceMS * s.sampleRate / 1000
-		}
-		chunk := make([]int16, len(buf)+extra)
+		// pump reuses buf across chunks. No tail-silence pad here —
+		// Gemma audio handles trailing words cleanly without one,
+		// unlike Whisper which needs the pad to segment the last word.
+		chunk := make([]int16, len(buf))
 		copy(chunk, buf)
-		// Remaining slots stay zero-valued — that's the silence pad.
 		buf = buf[:0]
-		sessionlog.Debugf("chat-audio: flush chunk reason=%s samples=%d (~%dms) trailing=%t tail_silence=%dms",
-			reason, len(chunk), len(chunk)*1000/s.sampleRate, trailing, extra*1000/s.sampleRate)
+		sessionlog.Debugf("chat-audio: flush chunk reason=%s samples=%d (~%dms) trailing=%t",
+			reason, len(chunk), len(chunk)*1000/s.sampleRate, trailing)
 		s.chunksCh <- chatChunk{pcm: chunk, trailing: trailing}
 	}
 	// flushAtCap emits exactly chunkMaxSamples and keeps the remainder
