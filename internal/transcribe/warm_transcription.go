@@ -165,7 +165,12 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 	// never makes a separate postprocess request there, so loading a
 	// separate llm model would just evict gemma from the single llm
 	// slot Lemonade allows.
-	if cfg.PostProcess.Enabled && transcribeClient != nil && !cfg.Transcription.SkipPostProcessModelWarm() {
+	if cfg.PostProcess.Enabled && cfg.Transcription.SkipPostProcessModelWarm() {
+		ppModel := strings.TrimSpace(cfg.PostProcess.Model)
+		if ppModel != "" && ppModel != txModel {
+			sessionlog.Infof("postprocess.model=%s ignored — combine mode reuses transcription.model=%s for cleanup", ppModel, txModel)
+		}
+	} else if cfg.PostProcess.Enabled && transcribeClient != nil {
 		ppModel := strings.TrimSpace(cfg.PostProcess.Model)
 		if ppModel != "" && !health.IsLoaded(ppModel) {
 			sessionlog.Infof("lemonade: %s not loaded (resident: %v) — warming in background", ppModel, health.LoadedNames())

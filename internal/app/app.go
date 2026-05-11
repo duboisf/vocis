@@ -491,8 +491,10 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// Pre-warm the post-processing model in the background while the user
 	// is still talking. On Lemonade with max_models.llm=1, this triggers
 	// the model swap eagerly so the real PP request after Finalize doesn't
-	// pay the 5s+ load cost. No-op if PP is disabled.
-	if a.cfg.PostProcess.Enabled && a.cfg.PostProcess.Model != "" {
+	// pay the 5s+ load cost. Skipped in combine mode — the chat-audio
+	// session does cleanup itself, and warming a different llm here would
+	// evict the transcription model from the single llm slot mid-session.
+	if !state.combinedPostProcess && a.cfg.PostProcess.Enabled && a.cfg.PostProcess.Model != "" {
 		go a.transcribe.WarmPostProcess(ctx, a.cfg.PostProcess.Model)
 	}
 
