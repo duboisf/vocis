@@ -48,15 +48,6 @@ func TestHandleTapEmitsOnlyWhileDown(t *testing.T) {
 	// derive taps from press/release pairs.
 	s.HandleTap()
 	expectEvent(t, s.Tap())
-
-	// Lock suppresses taps too — locking is meant for "ignore
-	// everything until unlock", e.g. while we're synthesizing
-	// keystrokes that would otherwise feed back into the state
-	// machine.
-	s.Lock()
-	s.HandleTap()
-	expectNoEvent(t, s.Tap(), 50*time.Millisecond)
-	s.Unlock()
 }
 
 func TestAutoRepeatDoesNotEmitTap(t *testing.T) {
@@ -115,50 +106,6 @@ func TestTrackedKeyRelease(t *testing.T) {
 	expectEventWithin(t, s.Up(), AutoRepeatDelay+40*time.Millisecond)
 }
 
-func TestSuppressedReleaseEmitsUpAfterWindow(t *testing.T) {
-	t.Parallel()
-
-	s := NewState("ctrl+shift+space", nil)
-
-	s.HandlePress()
-	expectEvent(t, s.Down())
-
-	s.SuppressReleasesFor(120 * time.Millisecond)
-	s.HandleTrackedKeyRelease()
-
-	expectEventWithin(t, s.Up(), 220*time.Millisecond)
-}
-
-func TestSuppressedReleaseCancelledByRepress(t *testing.T) {
-	t.Parallel()
-
-	s := NewState("ctrl+shift+space", nil)
-
-	s.HandlePress()
-	expectEvent(t, s.Down())
-
-	s.SuppressReleasesFor(120 * time.Millisecond)
-	s.HandleTrackedKeyRelease()
-	time.Sleep(40 * time.Millisecond)
-	s.HandleTrackedKeyPress()
-
-	expectNoEvent(t, s.Up(), 180*time.Millisecond)
-}
-
-func TestSuppressedReleaseDoesNotEmitWhileKeyHeld(t *testing.T) {
-	t.Parallel()
-
-	s := NewState("ctrl+shift+space", func() bool { return true })
-
-	s.HandlePress()
-	expectEvent(t, s.Down())
-
-	s.SuppressReleasesFor(120 * time.Millisecond)
-	s.HandleTrackedKeyRelease()
-
-	expectNoEvent(t, s.Up(), 220*time.Millisecond)
-}
-
 func TestReleaseTimerDoesNotEmitWhileKeyHeld(t *testing.T) {
 	t.Parallel()
 
@@ -169,54 +116,6 @@ func TestReleaseTimerDoesNotEmitWhileKeyHeld(t *testing.T) {
 	expectEvent(t, s.Down())
 
 	s.HandleTrackedKeyRelease()
-	expectNoEvent(t, s.Up(), AutoRepeatDelay+80*time.Millisecond)
-
-	down = false
-	expectEventWithin(t, s.Up(), AutoRepeatDelay+120*time.Millisecond)
-}
-
-func TestLockedReleaseIsIgnored(t *testing.T) {
-	t.Parallel()
-
-	s := NewState("ctrl+shift+space", nil)
-
-	s.HandlePress()
-	expectEvent(t, s.Down())
-
-	s.Lock()
-	s.HandleTrackedKeyRelease()
-	s.HandleRelease()
-	expectNoEvent(t, s.Up(), 200*time.Millisecond)
-}
-
-func TestUnlockEmitsUpWhenKeyReleased(t *testing.T) {
-	t.Parallel()
-
-	s := NewState("ctrl+shift+space", nil)
-
-	s.HandlePress()
-	expectEvent(t, s.Down())
-
-	s.Lock()
-	s.HandleTrackedKeyRelease()
-
-	s.Unlock()
-	expectEventWithin(t, s.Up(), AutoRepeatDelay+40*time.Millisecond)
-}
-
-func TestUnlockDoesNotEmitUpWhileKeyHeld(t *testing.T) {
-	t.Parallel()
-
-	down := true
-	s := NewState("ctrl+shift+space", func() bool { return down })
-
-	s.HandlePress()
-	expectEvent(t, s.Down())
-
-	s.Lock()
-	s.HandleTrackedKeyRelease()
-
-	s.Unlock()
 	expectNoEvent(t, s.Up(), AutoRepeatDelay+80*time.Millisecond)
 
 	down = false

@@ -91,7 +91,6 @@ type OverlayUI interface {
 type InjectorClient interface {
 	CaptureTarget(ctx context.Context) (platform.Target, error)
 	Insert(ctx context.Context, target platform.Target, text string) error
-	InsertLive(ctx context.Context, target platform.Target, text string) error
 	PressEnter(ctx context.Context, target platform.Target) error
 }
 
@@ -141,7 +140,6 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	sessionlog.Infof("starting vocis session")
-	recorder.CleanupStale()
 
 	a.recorder = recorder.New()
 	a.transcribe = transcribe.New(a.cfg.Transcription, a.cfg.Streaming)
@@ -354,7 +352,6 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	}); err != nil {
 		_ = stopDrain()
 		_ = session.Stop(ctx)
-		session.Cleanup()
 		a.ducker.Restore()
 		telemetry.EndSpan(recordingSpan, err)
 		sessionlog.Errorf("transcription model preflight: %v", err)

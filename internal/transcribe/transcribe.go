@@ -826,7 +826,6 @@ type DictationOpts struct {
 }
 
 type DictationSession struct {
-	writeTimeout          time.Duration
 	waitFinalFloorSeconds int
 	expectedAudioMS       int
 	tailSilenceMS         int
@@ -870,7 +869,6 @@ func (c *Client) StartDictation(ctx context.Context, opts DictationOpts) (Dictat
 
 	pumpCtx, cancel := context.WithCancel(ctx)
 	session := &DictationSession{
-		writeTimeout:          c.writeTimeout,
 		waitFinalFloorSeconds: c.streaming.WaitFinalSeconds,
 		expectedAudioMS:       opts.ExpectedAudioMS,
 		tailSilenceMS:         c.streaming.TailSilenceMS,

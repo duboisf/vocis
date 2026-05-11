@@ -76,12 +76,6 @@ func NewOverlayRenderer(cfg config.OverlayConfig) *OverlayRenderer {
 	}
 }
 
-func (r *OverlayRenderer) Config() config.OverlayConfig { return r.cfg }
-func (r *OverlayRenderer) Face() font.Face              { return r.face }
-func (r *OverlayRenderer) SmallFace() font.Face         { return r.smallFace }
-func (r *OverlayRenderer) GlyphWidth() int              { return r.glyphWidth }
-func (r *OverlayRenderer) SmallGlyphWidth() int         { return r.smallGlyphWidth }
-
 // BodyTextLimit returns the maximum characters per line of body text
 // that fit within the overlay width given the current font.
 func (r *OverlayRenderer) BodyTextLimit() int {

@@ -76,14 +76,13 @@ func (c *Client) WarmPostProcess(ctx context.Context, model string) {
 // knobs from cfg. Only Temperature and TopP are exposed; richer
 // sampler controls (penalties, stop, min_p) were rarely-tuned and
 // got dropped to shrink the config surface.
-func applySamplingParams(body *openaisdk.ChatCompletionNewParams, cfg config.PostProcessConfig) []option.RequestOption {
+func applySamplingParams(body *openaisdk.ChatCompletionNewParams, cfg config.PostProcessConfig) {
 	if cfg.Temperature != nil {
 		body.Temperature = param.NewOpt(*cfg.Temperature)
 	}
 	if cfg.TopP != nil {
 		body.TopP = param.NewOpt(*cfg.TopP)
 	}
-	return nil
 }
 
 type streamResult struct {
@@ -145,8 +144,8 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 				openaisdk.UserMessage(text),
 			},
 		}
-		opts := applySamplingParams(&body, cfg)
-		stream := c.chatStreamer.NewStreaming(ctx, body, opts...)
+		applySamplingParams(&body, cfg)
+		stream := c.chatStreamer.NewStreaming(ctx, body)
 
 		var result strings.Builder
 		gotFirst := false

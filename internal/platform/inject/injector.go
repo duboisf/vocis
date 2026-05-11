@@ -361,24 +361,6 @@ func (i *Injector) verifyKittyPaste(ctx context.Context, id, text string) {
 	}
 }
 
-// InsertLive types a partial segment without doing any clipboard work.
-// Currently dead in production but kept on the interface for backward
-// compatibility — falls back gracefully if the compositor doesn't
-// support typing.
-func (i *Injector) InsertLive(ctx context.Context, target platform.Target, text string) error {
-	if !hasVisibleText(text) {
-		return nil
-	}
-	if err := i.focusAndReleaseModifiers(ctx, target); err != nil {
-		return err
-	}
-	sessionlog.Infof("typing live segment into window=%s class=%q", target.WindowID, target.WindowClass)
-	if err := i.compositor.Type(ctx, target, text, false); err != nil {
-		return fmt.Errorf("type live segment: %w", err)
-	}
-	return nil
-}
-
 func (i *Injector) PressEnter(ctx context.Context, target platform.Target) error {
 	// Kitty path: route the submit Enter through the same focus-free
 	// remote-control channel as the text payload. Otherwise sending

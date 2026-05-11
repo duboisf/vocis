@@ -156,7 +156,6 @@ func (d *Daemon) runCapture(ctx context.Context) error {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		_ = recSession.Stop(stopCtx)
 		cancel()
-		recSession.Cleanup()
 	}()
 
 	vad, err := transcribe.NewSileroVAD(

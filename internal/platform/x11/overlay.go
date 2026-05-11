@@ -61,7 +61,6 @@ type Overlay struct {
 	escapeGrabbed bool
 	escapeKeycode xproto.Keycode
 	escapeConn    *xgb.Conn
-	escapeDone    chan struct{}
 }
 
 type countdownPhase struct {
@@ -480,7 +479,6 @@ func (o *Overlay) GrabEscape() <-chan struct{} {
 	}
 
 	o.escapeCh = make(chan struct{}, 1)
-	o.escapeDone = make(chan struct{})
 	o.escapeKeycode = escapeKeycode
 	o.escapeConn = conn
 	o.escapeGrabbed = true
@@ -489,7 +487,6 @@ func (o *Overlay) GrabEscape() <-chan struct{} {
 }
 
 func (o *Overlay) escapeEventLoop(conn *xgb.Conn) {
-	defer close(o.escapeDone)
 	for {
 		ev, err := conn.WaitForEvent()
 		if ev == nil {

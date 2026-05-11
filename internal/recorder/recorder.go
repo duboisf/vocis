@@ -74,10 +74,6 @@ func Check() error {
 	return err
 }
 
-// CleanupStale is kept for call-site compatibility. Streaming capture no longer
-// creates temp audio files on disk.
-func CleanupStale() {}
-
 func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Session, error) {
 	ctx, span := telemetry.StartSpan(ctx, "vocis.recorder.start",
 		attribute.Int("audio.sample_rate", cfg.SampleRate),
@@ -195,8 +191,6 @@ func (s *Session) Level() float64 {
 	}
 	return s.meter.Level()
 }
-
-func (s *Session) Cleanup() {}
 
 func (s *Session) stop(ctx context.Context) error {
 	if s.stream != nil {
