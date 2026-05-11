@@ -221,20 +221,15 @@ func (s *Session) stop(ctx context.Context) error {
 	if s.stream != nil {
 		streamErr = s.stream.Error()
 	}
-	closeErr := s.closeResources()
+	s.closeResources()
 	if streamErr != nil {
 		return fmt.Errorf("record audio: %w", streamErr)
-	}
-	if closeErr != nil {
-		return closeErr
 	}
 
 	return validRecordingDuration(s.Duration())
 }
 
-func (s *Session) closeResources() error {
-	var errs []error
-
+func (s *Session) closeResources() {
 	if s.stream != nil {
 		s.stream.Close()
 		s.stream = nil
@@ -246,8 +241,6 @@ func (s *Session) closeResources() error {
 	if s.pipe != nil {
 		s.pipe.Close()
 	}
-
-	return errors.Join(errs...)
 }
 
 func recordOptions(client *pulse.Client, cfg config.RecordingConfig) ([]pulse.RecordOption, error) {

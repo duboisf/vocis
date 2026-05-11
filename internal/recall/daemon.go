@@ -268,25 +268,54 @@ func (d *Daemon) runCapture(ctx context.Context) error {
 // near-silence with one keyboard clack). Both are logged so users can
 // see why a segment didn't land in the ring.
 func (d *Daemon) finalizeActive(seg *Segment, peak int16, sumSq int64, sampleRate int, forceFlushed bool) {
-	seg.Duration = time.Duration(len(seg.PCM)) * time.Second / time.Duration(sampleRate)
-	seg.PeakLevel = float64(peak) / 32768.0
-	if len(seg.PCM) > 0 {
-		seg.AvgLevel = math.Sqrt(float64(sumSq)/float64(len(seg.PCM))) / 32768.0
-	}
-
-	var dropReason string
-	switch {
-	case seg.PeakLevel < d.cfg.Recall.MinSegmentPeak:
-		dropReason = fmt.Sprintf("peak=%.4f < min_peak=%.4f", seg.PeakLevel, d.cfg.Recall.MinSegmentPeak)
-	case seg.AvgLevel < d.cfg.Recall.MinSegmentRMS:
-		dropReason = fmt.Sprintf("rms=%.4f < min_rms=%.4f", seg.AvgLevel, d.cfg.Recall.MinSegmentRMS)
-	}
+	stampSegmentLevels(seg, peak, sumSq, sampleRate)
+	dropReason := d.dropReasonFor(seg)
 
 	var id int64
 	if dropReason == "" {
 		id = d.ring.Add(seg)
 	}
 
+	d.emitCaptureSpan(seg, id, sampleRate, forceFlushed, dropReason)
+
+	if dropReason != "" {
+		sessionlog.Infof("recall: dropped silence segment (%.2fs, peak=%.4f, rms=%.4f, force_flushed=%t, reason=%s)",
+			seg.Duration.Seconds(), seg.PeakLevel, seg.AvgLevel, forceFlushed, dropReason)
+		return
+	}
+	sessionlog.Infof("recall: captured segment #%d (%.2fs, peak=%.4f, rms=%.4f, force_flushed=%t)",
+		id, seg.Duration.Seconds(), seg.PeakLevel, seg.AvgLevel, forceFlushed)
+}
+
+// stampSegmentLevels writes the final duration / peak / RMS onto the
+// segment from the running totals the capture loop has been keeping.
+func stampSegmentLevels(seg *Segment, peak int16, sumSq int64, sampleRate int) {
+	seg.Duration = time.Duration(len(seg.PCM)) * time.Second / time.Duration(sampleRate)
+	seg.PeakLevel = float64(peak) / 32768.0
+	if len(seg.PCM) > 0 {
+		seg.AvgLevel = math.Sqrt(float64(sumSq)/float64(len(seg.PCM))) / 32768.0
+	}
+}
+
+// dropReasonFor returns a non-empty human-readable reason when the
+// segment should be dropped as silence/noise, or "" to keep it. Peak
+// catches below-noise-floor segments outright; RMS catches mostly-
+// silent segments with the occasional click pop that peak alone would
+// miss (the classic 24 s near-silence with one keyboard clack).
+func (d *Daemon) dropReasonFor(seg *Segment) string {
+	switch {
+	case seg.PeakLevel < d.cfg.Recall.MinSegmentPeak:
+		return fmt.Sprintf("peak=%.4f < min_peak=%.4f", seg.PeakLevel, d.cfg.Recall.MinSegmentPeak)
+	case seg.AvgLevel < d.cfg.Recall.MinSegmentRMS:
+		return fmt.Sprintf("rms=%.4f < min_rms=%.4f", seg.AvgLevel, d.cfg.Recall.MinSegmentRMS)
+	}
+	return ""
+}
+
+// emitCaptureSpan creates a fresh root OTel span for the captured
+// utterance — not attached to the daemon context so each shows up as
+// its own trace in Jaeger.
+func (d *Daemon) emitCaptureSpan(seg *Segment, id int64, sampleRate int, forceFlushed bool, dropReason string) {
 	_, span := telemetry.StartSpan(context.Background(), "vocis.recall.capture",
 		attribute.Int64("segment.id", id),
 		attribute.Int("segment.duration_ms", int(seg.Duration/time.Millisecond)),
@@ -301,14 +330,6 @@ func (d *Daemon) finalizeActive(seg *Segment, peak int16, sumSq int64, sampleRat
 		attribute.String("segment.drop_reason", dropReason),
 	)
 	telemetry.EndSpan(span, nil)
-
-	if dropReason != "" {
-		sessionlog.Infof("recall: dropped silence segment (%.2fs, peak=%.4f, rms=%.4f, force_flushed=%t, reason=%s)",
-			seg.Duration.Seconds(), seg.PeakLevel, seg.AvgLevel, forceFlushed, dropReason)
-		return
-	}
-	sessionlog.Infof("recall: captured segment #%d (%.2fs, peak=%.4f, rms=%.4f, force_flushed=%t)",
-		id, seg.Duration.Seconds(), seg.PeakLevel, seg.AvgLevel, forceFlushed)
 }
 
 // sumSquares16 returns the sum of x*x over all samples as int64. Used
