@@ -211,35 +211,53 @@ func runRecallStart() error {
 	return d.Run(ctx)
 }
 
-func runRecallPick() error {
+// newRecallClient loads the config, resolves the daemon socket path,
+// and returns a connected client + the resolved path. Every
+// `vocis recall` subcommand opens with this preamble.
+func newRecallClient() (*recall.Client, string, error) {
 	cfg, _, err := config.Load()
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	socket, err := recall.ResolveSocketPath(cfg.Recall.SocketPath)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
-	client := recall.NewClient(socket)
+	return recall.NewClient(socket), socket, nil
+}
 
-	// List runs on a short deadline; the transcribe calls each get their
-	// own deadline below. A single long deadline around everything would
-	// have to cover N transcriptions plus user thinking time at the
-	// prompt, which is awkward to bound.
-	listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	segs, err := client.List(listCtx)
-	listCancel()
+// listRecallSegments dials the daemon, lists the ring buffer under a
+// short 5 s deadline (list is cheap; the long deadlines belong on the
+// per-segment transcribe calls each caller makes after this), and
+// returns the client (still usable), the segments, and their IDs in
+// order. Subcommands that operate on a user-selected subset of the
+// ring buffer all share this preamble.
+func listRecallSegments() (*recall.Client, []recall.SegmentInfo, []int64, error) {
+	client, _, err := newRecallClient()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	segs, err := client.List(ctx)
+	cancel()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	availableIDs := make([]int64, len(segs))
+	for i, s := range segs {
+		availableIDs[i] = s.ID
+	}
+	return client, segs, availableIDs, nil
+}
+
+func runRecallPick() error {
+	client, segs, availableIDs, err := listRecallSegments()
 	if err != nil {
 		return err
 	}
 	if len(segs) == 0 {
 		fmt.Fprintln(os.Stderr, "no segments in buffer yet — speak into the mic first")
 		return nil
-	}
-
-	availableIDs := make([]int64, len(segs))
-	for i, s := range segs {
-		availableIDs[i] = s.ID
 	}
 
 	var ids []int64
@@ -309,19 +327,7 @@ func runRecallLast(rawDuration string) error {
 	}
 	defer session.Close()
 
-	cfg, _, err := config.Load()
-	if err != nil {
-		return err
-	}
-	socket, err := recall.ResolveSocketPath(cfg.Recall.SocketPath)
-	if err != nil {
-		return err
-	}
-	client := recall.NewClient(socket)
-
-	listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	segs, err := client.List(listCtx)
-	listCancel()
+	client, segs, _, err := listRecallSegments()
 	if err != nil {
 		return err
 	}
@@ -384,18 +390,13 @@ func runRecallLast(rawDuration string) error {
 }
 
 func runRecallStatus() error {
-	cfg, _, err := config.Load()
-	if err != nil {
-		return err
-	}
-	socket, err := recall.ResolveSocketPath(cfg.Recall.SocketPath)
+	client, socket, err := newRecallClient()
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	client := recall.NewClient(socket)
 	stats, err := client.Status(ctx)
 	if err != nil {
 		return err
@@ -419,29 +420,13 @@ func runRecallReplay() error {
 		return fmt.Errorf("paplay not found on PATH (install pulseaudio-utils): %w", err)
 	}
 
-	cfg, _, err := config.Load()
-	if err != nil {
-		return err
-	}
-	socket, err := recall.ResolveSocketPath(cfg.Recall.SocketPath)
-	if err != nil {
-		return err
-	}
-	client := recall.NewClient(socket)
-
-	listCtx, listCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	segs, err := client.List(listCtx)
-	listCancel()
+	client, segs, availableIDs, err := listRecallSegments()
 	if err != nil {
 		return err
 	}
 	if len(segs) == 0 {
 		fmt.Fprintln(os.Stderr, "no segments to replay")
 		return nil
-	}
-	availableIDs := make([]int64, len(segs))
-	for i, s := range segs {
-		availableIDs[i] = s.ID
 	}
 	ids, err := recall.ParseSelection(recallReplayIDs, availableIDs)
 	if err != nil {
@@ -517,20 +502,7 @@ func writePCM16LE(w io.Writer, pcm []int16) error {
 }
 
 func runRecallDrop() error {
-	cfg, _, err := config.Load()
-	if err != nil {
-		return err
-	}
-	socket, err := recall.ResolveSocketPath(cfg.Recall.SocketPath)
-	if err != nil {
-		return err
-	}
-	client := recall.NewClient(socket)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	segs, err := client.List(ctx)
+	client, segs, availableIDs, err := listRecallSegments()
 	if err != nil {
 		return err
 	}
@@ -538,14 +510,13 @@ func runRecallDrop() error {
 		fmt.Fprintln(os.Stderr, "no segments to drop")
 		return nil
 	}
-	availableIDs := make([]int64, len(segs))
-	for i, s := range segs {
-		availableIDs[i] = s.ID
-	}
 	ids, err := recall.ParseSelection(recallDropIDs, availableIDs)
 	if err != nil {
 		return err
 	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	for _, id := range ids {
 		if err := client.Drop(ctx, id); err != nil {
 			return fmt.Errorf("drop segment %d: %w", id, err)
@@ -556,18 +527,13 @@ func runRecallDrop() error {
 }
 
 func runRecallStop() error {
-	cfg, _, err := config.Load()
-	if err != nil {
-		return err
-	}
-	socket, err := recall.ResolveSocketPath(cfg.Recall.SocketPath)
+	client, _, err := newRecallClient()
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	client := recall.NewClient(socket)
 	if err := client.Shutdown(ctx); err != nil {
 		return err
 	}

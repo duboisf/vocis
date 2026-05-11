@@ -156,7 +156,12 @@ func runTranscribe() error {
 		return fmt.Errorf("aborted by signal")
 	}
 
-	finalizeCtx, finalizeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Outer cap: 2x the streaming wait-final floor. The inner Finalize
+	// has its own scaled deadline (max of WaitFinalSeconds and audio
+	// duration / 5); the outer just guarantees the CLI eventually
+	// returns even if the inner deadline math is off.
+	finalizeTimeout := time.Duration(cfg.Streaming.WaitFinalSeconds*2) * time.Second
+	finalizeCtx, finalizeCancel := context.WithTimeout(context.Background(), finalizeTimeout)
 	defer finalizeCancel()
 
 	result, err := dictation.Finalize(finalizeCtx)

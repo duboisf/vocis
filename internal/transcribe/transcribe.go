@@ -313,18 +313,6 @@ func (c *Client) backendName() string {
 	return c.cfg.Backend
 }
 
-// CombinesPostProcess wraps config.TranscriptionConfig.CombinesPostProcess
-// for app code that holds a Client.
-func (c *Client) CombinesPostProcess() bool { return c.cfg.CombinesPostProcess() }
-
-// AlwaysStreamsPartials wraps the same-named method on
-// config.TranscriptionConfig.
-func (c *Client) AlwaysStreamsPartials() bool { return c.cfg.AlwaysStreamsPartials() }
-
-// FoldsPromptHintIntoSystem wraps the same-named method on
-// config.TranscriptionConfig.
-func (c *Client) FoldsPromptHintIntoSystem() bool { return c.cfg.FoldsPromptHintIntoSystem() }
-
 func (s *Stream) Append(ctx context.Context, samples []int16) error {
 	payload := s.encoder.Encode(samples)
 	if len(payload) == 0 {

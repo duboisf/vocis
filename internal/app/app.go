@@ -410,7 +410,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// and skip the separate /chat/completions round-trip — same final
 	// text, half the latency. The corresponding skip lives in
 	// finishRecording (gated on state.combinedPostProcess).
-	state.combinedPostProcess = a.transcribe.CombinesPostProcess() && a.cfg.PostProcess.Enabled
+	state.combinedPostProcess = a.cfg.Transcription.CombinesPostProcess() && a.cfg.PostProcess.Enabled
 
 	// Build the chat-audio extra system content from user config only.
 	// chat_audio.prompt is the lead (set inside the chat-audio session
@@ -418,7 +418,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// are appended verbatim with blank-line separators. No hardcoded
 	// leads, headers, or footers — the user owns the wording.
 	var extraParts []string
-	if a.transcribe.FoldsPromptHintIntoSystem() {
+	if a.cfg.Transcription.FoldsPromptHintIntoSystem() {
 		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
 			extraParts = append(extraParts, hint)
 		}
@@ -937,7 +937,7 @@ func (a *App) handleDictationEvent(
 		// processing their audio. Realtime backends gate on the explicit
 		// show_partial_overlay flag because they emit interim transcripts
 		// continuously while you're speaking, which can flicker.
-		if !a.cfg.Streaming.ShowPartialOverlay && !a.transcribe.AlwaysStreamsPartials() {
+		if !a.cfg.Streaming.ShowPartialOverlay && !a.cfg.Transcription.AlwaysStreamsPartials() {
 			return nil
 		}
 		// Live-subtitle mode: the partial replaces the previous in-flight
