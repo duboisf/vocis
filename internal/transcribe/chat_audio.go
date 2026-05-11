@@ -426,6 +426,9 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 				continue
 			}
 			text = strings.TrimSpace(text)
+			if text != "" {
+				sessionlog.Infof("chat-audio: chunk response %q", text)
+			}
 			if text != "" && s.isHallucination(text) {
 				sessionlog.Infof("chat-audio: dropped hallucinated final: %q", text)
 				text = ""
