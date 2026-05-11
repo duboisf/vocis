@@ -496,116 +496,15 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 	}
 	span.SetAttributes(attribute.Bool("cache_hit", false))
 
-	sampleRate := seg.SampleRate
-
-	dictCtx, cancel := context.WithTimeout(spanCtx, 60*time.Second)
-	defer cancel()
-
-	// Buffered so the feed goroutine doesn't block on the first send
-	// before StartDictation's pump is ready to read.
-	samples := make(chan []int16, 8)
-
-	session, err := d.transcribeClient.StartDictation(dictCtx, transcribe.DictationOpts{
-		SampleRate: sampleRate,
-		Channels:   d.cfg.Recording.Channels,
-		Samples:    samples,
-		// Segment duration is known upfront — feed it to
-		// waitForCompletion so the post-commit budget scales with
-		// the audio being transcribed instead of falling back to the
-		// 15 s floor.
-		ExpectedAudioMS: int(seg.Duration / time.Millisecond),
-	})
-	if err != nil {
-		return "", fmt.Errorf("start dictation: %w", err)
-	}
-
-	// Drain events so the dictation pump doesn't stall on a full
-	// channel. DictationSession doesn't close its events channel on
-	// Finalize — a naive `for range session.Events()` would block
-	// forever, leaking one goroutine per pick. Bind to dictCtx so the
-	// drain exits as soon as the transcribe call returns.
-	drainDone := make(chan struct{})
-	go func() {
-		defer close(drainDone)
-		for {
-			select {
-			case <-dictCtx.Done():
-				return
-			case _, ok := <-session.Events():
-				if !ok {
-					return
-				}
-			}
-		}
-	}()
-
-	// Feed the segment PCM as a pretend live stream. 2048 samples per
-	// chunk (~128 ms at 16 kHz) matches the rough granularity the
-	// recorder emits and keeps the transport's write bursts modest.
-	// feedCtx must be parented under dictCtx so a dictation timeout or
-	// consumer failure releases the send on `samples` — spanCtx is the
-	// root OTel context and never cancels, which would deadlock the
-	// feed goroutine holding transcribeMu.
-	feedCtx, feedSpan := telemetry.StartSpan(dictCtx, "vocis.recall.transcribe.feed",
-		attribute.Int("feed.chunk_samples", 2048),
-	)
-	const feedChunk = 2048
-	feedDone := make(chan struct{})
-	go func() {
-		defer close(feedDone)
-		defer close(samples)
-		for i := 0; i < len(seg.PCM); i += feedChunk {
-			end := i + feedChunk
-			if end > len(seg.PCM) {
-				end = len(seg.PCM)
-			}
-			chunk := make([]int16, end-i)
-			copy(chunk, seg.PCM[i:end])
-			select {
-			case <-feedCtx.Done():
-				return
-			case samples <- chunk:
-			}
-		}
-	}()
-
-	_, finalizeSpan := telemetry.StartSpan(spanCtx, "vocis.recall.transcribe.finalize")
-	result, finalizeErr := session.Finalize(dictCtx)
-	telemetry.EndSpan(finalizeSpan, finalizeErr)
-	<-feedDone
-	telemetry.EndSpan(feedSpan, nil)
-
-	if finalizeErr != nil {
-		err = fmt.Errorf("finalize: %w", finalizeErr)
+	text, runErr := d.runDictation(spanCtx, 60*time.Second, seg.PCM, seg.SampleRate,
+		int(seg.Duration/time.Millisecond), "vocis.recall.transcribe", postprocess)
+	if runErr != nil {
+		err = runErr
 		return "", err
 	}
-
-	text := result.Text
 	span.SetAttributes(attribute.Int("transcript.length", len(text)))
 
-	if postprocess && d.cfg.PostProcess.Enabled {
-		_, ppSpan := telemetry.StartSpan(spanCtx, "vocis.recall.transcribe.postprocess")
-		ppCtx, ppCancel := context.WithTimeout(context.Background(),
-			time.Duration(d.cfg.PostProcess.TotalTimeoutSec)*time.Second)
-		pp := d.transcribeClient.PostProcess(ppCtx, d.cfg.PostProcess, text, nil)
-		ppCancel()
-		if !pp.Skipped {
-			text = pp.Text
-		}
-		ppSpan.SetAttributes(
-			attribute.Bool("postprocess.skipped", pp.Skipped),
-			attribute.Int("postprocess.text_length", len(text)),
-		)
-		telemetry.EndSpan(ppSpan, nil)
-	}
-
 	d.ring.SetTranscript(id, text)
-
-	// Wait for the drain to exit so a tight pick loop doesn't leave
-	// stragglers behind. dictCtx will already be cancelled by the
-	// deferred cancel above.
-	cancel()
-	<-drainDone
 
 	goroutinesAfter := runtime.NumGoroutine()
 	sessionlog.Infof("recall: transcribe id=%d goroutines %d→%d (Δ=%+d)",

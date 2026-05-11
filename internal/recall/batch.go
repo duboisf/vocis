@@ -81,6 +81,141 @@ func concatSegmentPCM(segs []*Segment, gapMS int, maxTotalSeconds int) ([]int16,
 	return out, sampleRate, nil
 }
 
+// runDictation feeds a prepared PCM buffer through the realtime
+// transcription pipeline as a single dictation session. Shared by
+// transcribeSegment (single pick) and transcribeBatch (recall last).
+// Everything from "open session" through "drain final transcript and
+// optionally postprocess" is identical and lives here.
+//
+// `timeout` controls the dictation context: 0 means "no internal
+// timeout, lifetime driven by spanCtx" (batches can legitimately take
+// tens of minutes on a local model); positive means "cap at this".
+// spanPrefix names the child spans (.feed / .finalize / .postprocess)
+// under whatever root span the caller already opened.
+func (d *Daemon) runDictation(
+	spanCtx context.Context,
+	timeout time.Duration,
+	pcm []int16,
+	sampleRate int,
+	totalMS int,
+	spanPrefix string,
+	postprocess bool,
+) (string, error) {
+	var dictCtx context.Context
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		dictCtx, cancel = context.WithTimeout(spanCtx, timeout)
+	} else {
+		dictCtx, cancel = context.WithCancel(spanCtx)
+	}
+	defer cancel()
+
+	samples := make(chan []int16, 8)
+	session, err := d.transcribeClient.StartDictation(dictCtx, transcribe.DictationOpts{
+		SampleRate: sampleRate,
+		Channels:   d.cfg.Recording.Channels,
+		Samples:    samples,
+		// Let waitForCompletion scale its post-commit budget to the
+		// audio we're about to feed — otherwise the 15 s wait_final
+		// floor fires before a local model has time to transcribe
+		// anything meaningful on a multi-minute batch.
+		ExpectedAudioMS: totalMS,
+	})
+	if err != nil {
+		return "", fmt.Errorf("start dictation: %w", err)
+	}
+
+	// Drain events so the dictation pump doesn't stall on a full
+	// channel. DictationSession doesn't close its events channel on
+	// Finalize — a naive `for range session.Events()` would block
+	// forever, leaking one goroutine per pick. Bind to dictCtx so the
+	// drain exits as soon as the transcribe call returns.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for {
+			select {
+			case <-dictCtx.Done():
+				return
+			case _, ok := <-session.Events():
+				if !ok {
+					return
+				}
+			}
+		}
+	}()
+
+	// Feed the segment PCM as a pretend live stream. 2048 samples per
+	// chunk (~128 ms at 16 kHz) matches the rough granularity the
+	// recorder emits and keeps the transport's write bursts modest.
+	// feedCtx is parented under dictCtx, not spanCtx: if the dictation
+	// session times out or its consumer dies mid-feed, nothing drains
+	// `samples` and `samples <- chunk` blocks forever. dictCtx
+	// cancellation is our release valve — spanCtx is the root OTel
+	// context and never cancels, which would leak this goroutine and
+	// deadlock the transcribeMu-holding call.
+	feedCtx, feedSpan := telemetry.StartSpan(dictCtx, spanPrefix+".feed",
+		attribute.Int("feed.chunk_samples", 2048),
+		attribute.Int("feed.total_samples", len(pcm)),
+	)
+	const feedChunk = 2048
+	feedDone := make(chan struct{})
+	go func() {
+		defer close(feedDone)
+		defer close(samples)
+		for i := 0; i < len(pcm); i += feedChunk {
+			end := i + feedChunk
+			if end > len(pcm) {
+				end = len(pcm)
+			}
+			chunk := make([]int16, end-i)
+			copy(chunk, pcm[i:end])
+			select {
+			case <-feedCtx.Done():
+				return
+			case samples <- chunk:
+			}
+		}
+	}()
+
+	_, finalizeSpan := telemetry.StartSpan(spanCtx, spanPrefix+".finalize")
+	result, finalizeErr := session.Finalize(dictCtx)
+	telemetry.EndSpan(finalizeSpan, finalizeErr)
+	<-feedDone
+	telemetry.EndSpan(feedSpan, nil)
+
+	if finalizeErr != nil {
+		return "", fmt.Errorf("finalize: %w", finalizeErr)
+	}
+
+	text := result.Text
+
+	if postprocess && d.cfg.PostProcess.Enabled {
+		_, ppSpan := telemetry.StartSpan(spanCtx, spanPrefix+".postprocess")
+		ppCtx, ppCancel := context.WithTimeout(context.Background(),
+			time.Duration(d.cfg.PostProcess.TotalTimeoutSec)*time.Second)
+		pp := d.transcribeClient.PostProcess(ppCtx, d.cfg.PostProcess, text, nil)
+		ppCancel()
+		if !pp.Skipped {
+			text = pp.Text
+		}
+		ppSpan.SetAttributes(
+			attribute.Bool("postprocess.skipped", pp.Skipped),
+			attribute.Int("postprocess.text_length", len(text)),
+		)
+		telemetry.EndSpan(ppSpan, nil)
+	}
+
+	// Wait for the drain to exit so a tight pick loop doesn't leave
+	// stragglers behind. Cancel explicitly first — session.Events()
+	// doesn't close on Finalize, so the drain is blocked on
+	// dictCtx.Done() and we'd deadlock if we just waited.
+	cancel()
+	<-drainDone
+
+	return text, nil
+}
+
 // transcribeBatch fetches each segment by ID, concatenates their PCM
 // with a configured silence gap, and feeds the result through the
 // realtime transcription pipeline as a single dictation session. The
@@ -106,7 +241,6 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 	defer d.transcribeMu.Unlock()
 
 	goroutinesBefore := runtime.NumGoroutine()
-
 	idsCopy := append([]int64(nil), ids...)
 
 	spanCtx, span := telemetry.StartSpan(ctx, "vocis.recall.transcribe_batch",
@@ -148,109 +282,20 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 	sessionlog.Infof("recall: batch transcribe ids=%v segments=%d total=%.2fs gap=%dms postprocess=%t",
 		idsCopy, len(ids), float64(totalMS)/1000.0, d.cfg.Recall.BatchGapMS, postprocess)
 
-	// No internal wall-clock timeout: batches of 20+ minutes on a local
-	// 2B model can legitimately take tens of minutes, and a fixed cap
-	// was worse than useless (it cut off valid work without actually
-	// stopping Lemonade, because the cap fired from Background while
-	// the WS stayed open). Lifetime is driven by the caller's ctx —
-	// client Ctrl-C or daemon shutdown both cancel cleanly and
+	// No internal wall-clock timeout for batches: 20+ minutes on a
+	// local 2B model can legitimately take tens of minutes, and a
+	// fixed cap was worse than useless (it cut off valid work without
+	// actually stopping Lemonade, because the cap fired from Background
+	// while the WS stayed open). Lifetime is driven by the caller's
+	// ctx — client Ctrl-C or daemon shutdown both cancel cleanly and
 	// Finalize then closes the WS.
-	dictCtx, cancel := context.WithCancel(spanCtx)
-	defer cancel()
-
-	samples := make(chan []int16, 8)
-	session, startErr := d.transcribeClient.StartDictation(dictCtx, transcribe.DictationOpts{
-		SampleRate: sampleRate,
-		Channels:   d.cfg.Recording.Channels,
-		Samples:    samples,
-		// Let waitForCompletion scale its post-commit budget to the
-		// audio we're about to feed — otherwise the 15 s wait_final
-		// floor fires before a local model has time to transcribe
-		// anything meaningful on a multi-minute batch.
-		ExpectedAudioMS: totalMS,
-	})
-	if startErr != nil {
-		err = fmt.Errorf("start dictation: %w", startErr)
+	text, runErr := d.runDictation(spanCtx, 0, pcm, sampleRate, totalMS,
+		"vocis.recall.transcribe_batch", postprocess)
+	if runErr != nil {
+		err = runErr
 		return "", err
 	}
-
-	drainDone := make(chan struct{})
-	go func() {
-		defer close(drainDone)
-		for {
-			select {
-			case <-dictCtx.Done():
-				return
-			case _, ok := <-session.Events():
-				if !ok {
-					return
-				}
-			}
-		}
-	}()
-
-	// Parent under dictCtx, not spanCtx: if the dictation session times
-	// out or its consumer dies mid-feed, nothing drains `samples` and
-	// `samples <- chunk` blocks forever. dictCtx cancellation is our
-	// release valve — spanCtx is the root OTel context and never
-	// cancels, which would leak this goroutine and deadlock the
-	// transcribeMu-holding call.
-	feedCtx, feedSpan := telemetry.StartSpan(dictCtx, "vocis.recall.transcribe_batch.feed",
-		attribute.Int("feed.chunk_samples", 2048),
-		attribute.Int("feed.total_samples", len(pcm)),
-	)
-	const feedChunk = 2048
-	feedDone := make(chan struct{})
-	go func() {
-		defer close(feedDone)
-		defer close(samples)
-		for i := 0; i < len(pcm); i += feedChunk {
-			end := i + feedChunk
-			if end > len(pcm) {
-				end = len(pcm)
-			}
-			chunk := make([]int16, end-i)
-			copy(chunk, pcm[i:end])
-			select {
-			case <-feedCtx.Done():
-				return
-			case samples <- chunk:
-			}
-		}
-	}()
-
-	_, finalizeSpan := telemetry.StartSpan(spanCtx, "vocis.recall.transcribe_batch.finalize")
-	result, finalizeErr := session.Finalize(dictCtx)
-	telemetry.EndSpan(finalizeSpan, finalizeErr)
-	<-feedDone
-	telemetry.EndSpan(feedSpan, nil)
-
-	if finalizeErr != nil {
-		err = fmt.Errorf("finalize: %w", finalizeErr)
-		return "", err
-	}
-
-	text := result.Text
 	span.SetAttributes(attribute.Int("transcript.length", len(text)))
-
-	if postprocess && d.cfg.PostProcess.Enabled {
-		_, ppSpan := telemetry.StartSpan(spanCtx, "vocis.recall.transcribe_batch.postprocess")
-		ppCtx, ppCancel := context.WithTimeout(context.Background(),
-			time.Duration(d.cfg.PostProcess.TotalTimeoutSec)*time.Second)
-		pp := d.transcribeClient.PostProcess(ppCtx, d.cfg.PostProcess, text, nil)
-		ppCancel()
-		if !pp.Skipped {
-			text = pp.Text
-		}
-		ppSpan.SetAttributes(
-			attribute.Bool("postprocess.skipped", pp.Skipped),
-			attribute.Int("postprocess.text_length", len(text)),
-		)
-		telemetry.EndSpan(ppSpan, nil)
-	}
-
-	cancel()
-	<-drainDone
 
 	goroutinesAfter := runtime.NumGoroutine()
 	sessionlog.Infof("recall: batch transcribe done ids=%v text_len=%d goroutines %d→%d (Δ=%+d)",
