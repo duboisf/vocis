@@ -29,58 +29,6 @@ func SegmentIDsWithinWindow(segs []SegmentInfo, now time.Time, window time.Durat
 	return ids
 }
 
-// concatSegmentPCM joins a sequence of segments into a single PCM
-// stream with `gapMS` of silence (zero-valued int16 samples) inserted
-// between each pair. Returns the concatenated PCM, the common sample
-// rate, or an error.
-//
-// Fails if segments have different sample rates (a batch must be a
-// single realtime session, which is locked to one rate), if the input
-// is empty, or if the total audio duration would exceed maxTotalSeconds
-// (when > 0). The duration cap is the safety net for `recall last`:
-// without it, a ring buffer with days of retention could be silently
-// concatenated into a multi-hour blob.
-func concatSegmentPCM(segs []*Segment, gapMS int, maxTotalSeconds int) ([]int16, int, error) {
-	if len(segs) == 0 {
-		return nil, 0, fmt.Errorf("no segments to concatenate")
-	}
-	sampleRate := segs[0].SampleRate
-	if sampleRate <= 0 {
-		return nil, 0, fmt.Errorf("segment %d has invalid sample_rate=%d", segs[0].ID, sampleRate)
-	}
-	for _, s := range segs[1:] {
-		if s.SampleRate != sampleRate {
-			return nil, 0, fmt.Errorf("segments have mixed sample rates (%d vs %d at id=%d) — batch requires one rate",
-				sampleRate, s.SampleRate, s.ID)
-		}
-	}
-
-	gapSamples := gapMS * sampleRate / 1000
-	total := 0
-	for _, s := range segs {
-		total += len(s.PCM)
-	}
-	total += gapSamples * (len(segs) - 1)
-
-	if maxTotalSeconds > 0 {
-		maxSamples := maxTotalSeconds * sampleRate
-		if total > maxSamples {
-			return nil, 0, fmt.Errorf("concatenated audio %.1fs exceeds batch_max_seconds=%d — drop --last duration or raise the cap",
-				float64(total)/float64(sampleRate), maxTotalSeconds)
-		}
-	}
-
-	out := make([]int16, 0, total)
-	for i, s := range segs {
-		if i > 0 && gapSamples > 0 {
-			// Append gapSamples zeros — literal silence between segments.
-			out = append(out, make([]int16, gapSamples)...)
-		}
-		out = append(out, s.PCM...)
-	}
-	return out, sampleRate, nil
-}
-
 // runDictation feeds a prepared PCM buffer through the realtime
 // transcription pipeline as a single dictation session. Shared by
 // transcribeSegment (single pick) and transcribeBatch (recall last).
@@ -215,23 +163,26 @@ func (d *Daemon) runDictation(
 	return text, nil
 }
 
-// transcribeBatch fetches each segment by ID, concatenates their PCM
-// with a configured silence gap, and feeds the result through the
-// realtime transcription pipeline as a single dictation session. The
-// joint transcript is returned; individual segments' caches are NOT
+// transcribeBatch fetches each segment by ID and sends them as ONE
+// /chat/completions request with each segment as a labelled
+// input_audio part. The model returns one line per segment in the
+// form `HH:MM:SS\t<transcript>` per `chat_audio.batch_prompt`. The
+// joint response is returned; individual segments' caches are NOT
 // updated — a batch result is a different artifact from per-segment
 // transcriptions, so clobbering per-segment caches would be wrong.
 //
-// Concurrent calls (including with transcribeSegment) are fine: each
-// builds its own chatAudioSession with no shared state, and Lemonade
-// schedules requests server-side.
+// The `postprocess` flag is ignored: the batch prompt itself produces
+// cleaned text, and post-processing would mangle the timestamped line
+// format the user is relying on. A warn-log fires when the caller
+// passes true so the surprising no-op is visible.
+//
+// Concurrent calls with transcribeSegment are fine: http.Client is
+// concurrency-safe and Lemonade schedules requests server-side.
 //
 // ctx is the request-scoped context from handleConn — client
-// disconnection (Ctrl-C on the CLI) propagates through and tears down
-// the chat-audio transport so the model stops being fed audio no one
-// is going to receive. A batch can legitimately take tens of minutes
-// on a local model, so there is no internal wall-clock timeout — the
-// user controls lifetime via Ctrl-C, and daemon shutdown also cancels.
+// disconnection (Ctrl-C on the CLI) propagates through and aborts the
+// HTTP POST. A batch can legitimately take a while on a local model,
+// so there is no internal wall-clock timeout.
 func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess bool) (string, error) {
 	if len(ids) == 0 {
 		return "", fmt.Errorf("no segment ids provided")
@@ -243,9 +194,6 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 	spanCtx, span := telemetry.StartSpan(ctx, "vocis.recall.transcribe_batch",
 		attribute.Int("segments.count", len(ids)),
 		attribute.Int64Slice("segments.ids", idsCopy),
-		attribute.Bool("postprocess", postprocess),
-		attribute.Int("audio.gap_ms", d.cfg.Recall.BatchGapMS),
-		attribute.Int("audio.max_seconds", d.cfg.Recall.BatchMaxSeconds),
 	)
 	var err error
 	defer func() {
@@ -254,40 +202,30 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 		telemetry.EndSpan(span, err)
 	}()
 
-	segs := make([]*Segment, 0, len(ids))
+	if postprocess {
+		sessionlog.Warnf("recall: batch transcribe ignoring postprocess=true — batch prompt already produces cleaned text")
+	}
+
+	batch := make([]transcribe.BatchSegment, 0, len(ids))
+	var totalMS int
 	for _, id := range ids {
 		seg, getErr := d.ring.Get(id)
 		if getErr != nil {
 			err = fmt.Errorf("segment %d: %w", id, getErr)
 			return "", err
 		}
-		segs = append(segs, seg)
+		batch = append(batch, transcribe.BatchSegment{
+			PCM:        seg.PCM,
+			SampleRate: seg.SampleRate,
+			CapturedAt: seg.StartedAt,
+		})
+		totalMS += int(seg.Duration / time.Millisecond)
 	}
+	span.SetAttributes(attribute.Int("audio.total_ms", totalMS))
+	sessionlog.Infof("recall: batch transcribe ids=%v segments=%d total=%.2fs (one-shot multi-clip POST)",
+		idsCopy, len(ids), float64(totalMS)/1000.0)
 
-	pcm, sampleRate, catErr := concatSegmentPCM(segs,
-		d.cfg.Recall.BatchGapMS, d.cfg.Recall.BatchMaxSeconds)
-	if catErr != nil {
-		err = catErr
-		return "", err
-	}
-	totalMS := len(pcm) * 1000 / sampleRate
-	span.SetAttributes(
-		attribute.Int("audio.total_ms", totalMS),
-		attribute.Int("audio.sample_count", len(pcm)),
-		attribute.Int("audio.sample_rate", sampleRate),
-	)
-	sessionlog.Infof("recall: batch transcribe ids=%v segments=%d total=%.2fs gap=%dms postprocess=%t",
-		idsCopy, len(ids), float64(totalMS)/1000.0, d.cfg.Recall.BatchGapMS, postprocess)
-
-	// No internal wall-clock timeout for batches: 20+ minutes on a
-	// local 2B model can legitimately take tens of minutes, and a
-	// fixed cap was worse than useless (it cut off valid work without
-	// actually stopping Lemonade, because the cap fired from Background
-	// while the WS stayed open). Lifetime is driven by the caller's
-	// ctx — client Ctrl-C or daemon shutdown both cancel cleanly and
-	// Finalize then closes the WS.
-	text, runErr := d.runDictation(spanCtx, 0, pcm, sampleRate, totalMS,
-		"vocis.recall.transcribe_batch", postprocess)
+	text, runErr := d.transcribeClient.TranscribeBatchAudios(spanCtx, batch)
 	if runErr != nil {
 		err = runErr
 		return "", err

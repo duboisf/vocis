@@ -157,16 +157,6 @@ type RecallConfig struct {
 	// Default is memory-only — always-on mic audio does not land on
 	// disk unless the user explicitly opts in by setting mode=disk.
 	Persist RecallPersistConfig `yaml:"persist"`
-	// BatchGapMS is silent PCM (zeros) inserted between segments when
-	// `vocis recall last <duration>` concatenates the ring buffer for a
-	// single joint transcription. Prevents the ASR from welding the last
-	// word of one segment to the first word of the next.
-	BatchGapMS int `yaml:"batch_gap_ms"`
-	// BatchMaxSeconds caps the total concatenated audio duration for a
-	// single `recall last` call. Safety net — a stuck daemon with days
-	// of retention shouldn't accidentally feed hours of PCM into one
-	// realtime session. 0 disables the cap.
-	BatchMaxSeconds int `yaml:"batch_max_seconds"`
 }
 
 // RecallPersistConfig is the nested `recall.persist` block. Mode is
@@ -288,6 +278,13 @@ type ChatAudioConfig struct {
 	// either to 0 to disable that arm of the check.
 	MinChunkPeak float64 `yaml:"min_chunk_peak"`
 	MinChunkRMS  float64 `yaml:"min_chunk_rms"`
+	// BatchPrompt is the system prompt for the one-shot multi-segment
+	// transcription used by `vocis recall last`. The model receives
+	// every segment as a labelled input_audio part and emits one line
+	// per segment prefixed with the capture timestamp. Override to
+	// tweak formatting or per-language rules. {language} expands to
+	// Language at send time.
+	BatchPrompt string `yaml:"batch_prompt"`
 }
 
 const (
@@ -354,6 +351,20 @@ const DefaultChatAudioPrompt = "Transcribe the following speech segment in {lang
 	"Follow these specific instructions for formatting the answer:\n" +
 	"* Only output the transcription, with no newlines.\n" +
 	"* When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three."
+
+// DefaultBatchPrompt drives the one-shot multi-segment batch path used
+// by `vocis recall last`. Each segment arrives as a labelled
+// input_audio part of the form "[clip N captured at HH:MM:SS]:" and
+// the model is asked to emit exactly one line per segment, prefixed
+// with that timestamp. {language} expands to ChatAudioConfig.Language.
+const DefaultBatchPrompt = "Transcribe each of the following speech segments in {language}. " +
+	"Each segment is preceded by a label of the form \"[clip N captured at HH:MM:SS]:\". " +
+	"Output one line per input segment, in input order, formatted exactly as:\n" +
+	"  HH:MM:SS\\t<transcript>\n" +
+	"where HH:MM:SS is copied verbatim from the segment's label and <transcript> is the cleaned speech.\n" +
+	"Cleanup: remove fillers (um, uh), fix punctuation, write digits for numbers (1.7 not one point seven). " +
+	"If a segment has no intelligible speech, output its timestamp followed by a tab and nothing else. " +
+	"Never output preamble, commentary, bullet points, or anything beyond the requested lines."
 
 type RecordingConfig struct {
 	Backend            string  `yaml:"backend"`
@@ -551,6 +562,7 @@ func Default() Config {
 				// hum / room tone but keeps quiet speech.
 				MinChunkPeak: 0.02,
 				MinChunkRMS:  0.005,
+				BatchPrompt:  DefaultBatchPrompt,
 			},
 		},
 		Recording: RecordingConfig{
@@ -699,13 +711,6 @@ func Default() Config {
 				Mode: RecallPersistMemory,
 				Dir:  defaultRecallStateDir(),
 			},
-			// 300ms silence between concatenated segments — same default
-			// as `recall replay --gap`, which is already a spot the ear
-			// finds natural.
-			BatchGapMS: 300,
-			// 3600s = 1 hour. At 16 kHz mono int16 that's ~115 MB of PCM
-			// worst-case — large but still fits in one realtime session.
-			BatchMaxSeconds: 3600,
 		},
 		Speak: SpeakConfig{
 			// Empty BaseURL means "inherit transcription.base_url" at
@@ -811,6 +816,8 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"postprocess.presence_penalty", "config-cull", "rarely-tuned sampler knob"},
 	{"postprocess.repetition_penalty", "config-cull", "rarely-tuned sampler knob"},
 	{"postprocess.stop", "config-cull", "rarely-tuned sampler knob"},
+	{"recall.batch_gap_ms", "one-shot-batch", "`recall last` no longer concatenates PCM; each segment is sent as its own input_audio part"},
+	{"recall.batch_max_seconds", "one-shot-batch", "`recall last` no longer concatenates PCM; total audio is now bounded by Gemma's context window"},
 }
 
 // stripRetiredKeys parses the YAML, walks the retiredKeys list, and
@@ -1051,12 +1058,6 @@ func (c Config) Validate() error {
 	}
 	if c.Recall.MinSegmentRMS < 0 || c.Recall.MinSegmentRMS > 1 {
 		return errors.New("recall.min_segment_rms must be between 0 and 1")
-	}
-	if c.Recall.BatchGapMS < 0 || c.Recall.BatchGapMS > 5000 {
-		return errors.New("recall.batch_gap_ms must be between 0 and 5000")
-	}
-	if c.Recall.BatchMaxSeconds < 0 || c.Recall.BatchMaxSeconds > 14400 {
-		return errors.New("recall.batch_max_seconds must be between 0 and 14400 (4 hours)")
 	}
 	switch c.Recall.Persist.Mode {
 	case "", RecallPersistMemory, RecallPersistDisk:

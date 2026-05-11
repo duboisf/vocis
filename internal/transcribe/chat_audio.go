@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -1004,4 +1005,98 @@ func buildChatCompletionsURL(base string) (string, error) {
 		return trimmed, nil
 	}
 	return trimmed + "/chat/completions", nil
+}
+
+// BatchSegment is one audio clip plus the wall-clock time it was
+// captured. TranscribeBatchAudios consumes a slice of these to produce
+// a single timestamp-prefixed transcript over all clips in one POST.
+type BatchSegment struct {
+	PCM        []int16
+	SampleRate int
+	CapturedAt time.Time
+}
+
+// TranscribeBatchAudios sends every segment to /chat/completions as a
+// single request with one input_audio part per segment, labelled with
+// its capture timestamp. The model is asked (via BatchPrompt) to
+// produce one line per segment in the form `HH:MM:SS\t<transcript>`.
+//
+// Unlike StartDictation, there is no streaming pump, no VAD, no
+// chunk_max splitting, and no few-shot history — the segments
+// themselves are the input, the response is the output. Postprocess
+// is not run; the batch prompt already produces cleaned text.
+func (c *Client) TranscribeBatchAudios(ctx context.Context, segments []BatchSegment) (string, error) {
+	if len(segments) == 0 {
+		return "", errors.New("transcribe batch: no segments")
+	}
+	endpoint, err := buildChatCompletionsURL(c.cfg.BaseURL)
+	if err != nil {
+		return "", err
+	}
+
+	ctx, span := telemetry.StartSpan(ctx, "vocis.transcribe.chat_audio.batch",
+		attribute.Int("batch.segment_count", len(segments)),
+	)
+	defer telemetry.EndSpan(span, nil)
+
+	systemPrompt := strings.ReplaceAll(c.cfg.ChatAudio.BatchPrompt, "{language}", c.cfg.ChatAudio.Language)
+	parts := make([]map[string]any, 0, 2*len(segments))
+	var totalWAVBytes int
+	for i, seg := range segments {
+		if seg.SampleRate <= 0 {
+			return "", fmt.Errorf("batch segment %d: invalid sample_rate=%d", i, seg.SampleRate)
+		}
+		wav := encodePCM16WAV(seg.PCM, seg.SampleRate)
+		label := fmt.Sprintf("[clip %d captured at %s]:", i+1, seg.CapturedAt.Format("15:04:05"))
+		parts = append(parts,
+			map[string]any{"type": "text", "text": label},
+			audioPart(wav),
+		)
+		totalWAVBytes += len(wav)
+	}
+	body := map[string]any{
+		"model": c.cfg.Model,
+		"messages": []map[string]any{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": parts},
+		},
+		// No SSE for batch: we want the full response in one shot, no
+		// per-token overlay updates make sense here.
+		"stream": false,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("marshal batch request: %w", err)
+	}
+	span.SetAttributes(
+		attribute.Int("batch.wav_bytes", totalWAVBytes),
+		attribute.Int("batch.request_bytes", len(raw)),
+	)
+	sessionlog.Infof("chat-audio: batch POST segments=%d wav=%dB req=%dB",
+		len(segments), totalWAVBytes, len(raw))
+	if redacted, err := redactedRequestJSON(body); err == nil {
+		sessionlog.Debugf("chat-audio: batch request body (audio redacted) → %s", redacted)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("build batch request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("post batch: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("batch HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(excerpt)))
+	}
+	text, err := readChatCompletion(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	span.SetAttributes(attribute.Int("batch.response_length", len(text)))
+	return text, nil
 }

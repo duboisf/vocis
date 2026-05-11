@@ -135,7 +135,7 @@ When `vocis serve` runs:
 - `telemetry.*` — exporter is initialized once.
 - `speak.*` — only consulted by the separate `vocis speak` command, not by `serve`.
 
-**Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*`, `streaming.*`, and `postprocess.*` blocks the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands do load fresh config on each invocation, so cli-side knobs like `recall.batch_gap_ms` are picked up immediately.
+**Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*`, `streaming.*`, and `postprocess.*` blocks the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands load fresh config on each invocation.
 
 ## Record Start
 

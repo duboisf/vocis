@@ -58,11 +58,12 @@ run as separate subcommands:
   with Silero VAD, and keeps a bounded ring buffer of recent utterances.
   `vocis recall pick` shows the recent segments in a terminal picker and
   transcribes the chosen one on demand. `vocis recall last <duration>`
-  concatenates every segment whose start falls within the window
-  (`10m`, `2h`, `1h30m`) and sends the combined audio through a single
-  transcription request — one realtime session instead of N, with the
-  ASR keeping context across segment boundaries. No live transcription
-  happens until you pick or run `last` — cheap when idle, slight latency
+  takes every segment whose start falls within the window
+  (`10m`, `2h`, `1h30m`) and sends them as a single multi-clip
+  `/chat/completions` POST, with each clip labelled by its capture
+  timestamp. The model returns one line per segment in the form
+  `HH:MM:SS  <transcript>`. No live transcription happens until you
+  pick or run `last` — cheap when idle, slight latency
   on pick.
 
   The ring buffer is memory-only by default — kill the daemon and the
