@@ -748,17 +748,6 @@ func numericField(m jsonMessage, key string) (int64, bool) {
 	return 0, false
 }
 
-func (s *Stream) waitReady(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-s.readyCh:
-		return err
-	case <-s.readDone:
-		return errors.New("openai realtime stream closed before session became ready")
-	}
-}
-
 func (s *Stream) sendJSON(ctx context.Context, payload any) error {
 	deadline := time.Now().Add(s.writeTimeout)
 	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
@@ -1868,14 +1857,6 @@ func normalizeText(text string) string {
 // OpenAI protocol helpers
 // ---------------------------------------------------------------------------
 
-type realtimeEvent struct {
-	Type string `json:"type"`
-}
-
-type realtimeReadyEvent struct {
-	Type string `json:"type"`
-}
-
 type transcriptionDeltaEvent struct {
 	Type   string `json:"type"`
 	ItemID string `json:"item_id"`
@@ -2023,13 +2004,6 @@ func requestIDSuffix(requestID string) string {
 		return ""
 	}
 	return fmt.Sprintf(" (request id %s)", requestID)
-}
-
-func requestID(err *openaisdk.Error) string {
-	if err == nil || err.Response == nil {
-		return ""
-	}
-	return strings.TrimSpace(err.Response.Header.Get("x-request-id"))
 }
 
 func minDuration(a, b time.Duration) time.Duration {

@@ -385,13 +385,6 @@ func inboundExtra(kind string, msg map[string]any) string {
 	return ""
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max] + "…"
-}
-
 // liveLine fits a delta into the current terminal width, keeping the
 // tail (newest words) since deltas grow over time. Falls back to the
 // untouched string when stderr isn't a tty (size detection fails).

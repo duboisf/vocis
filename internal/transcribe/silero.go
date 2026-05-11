@@ -415,14 +415,6 @@ func (v *SileroVAD) applyHysteresis(prob float64) VADEvent {
 	}
 }
 
-func (v *SileroVAD) InSpeech() bool { return v.inSpeech }
-
-// SpeechMs returns the duration of the current speech run the VAD is
-// accumulating. It's non-zero while probabilities are above threshold —
-// including short bursts that never crossed minSpeechMs. Used by the
-// streaming pump to mark audio as "trailing" on sub-threshold blips.
-func (v *SileroVAD) SpeechMs() int { return v.speechMs }
-
 func (v *SileroVAD) Reset() {
 	v.inSpeech = false
 	v.silenceMs = 0

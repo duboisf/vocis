@@ -745,19 +745,6 @@ func Path() (string, error) {
 	return filepath.Join(base, "vocis", fileName), nil
 }
 
-func InitDefault() (string, error) {
-	path, err := Path()
-	if err != nil {
-		return "", err
-	}
-
-	if _, err := os.Stat(path); err == nil {
-		return path, nil
-	}
-
-	return path, Save(path, Default())
-}
-
 func Load() (Config, string, error) {
 	path, err := Path()
 	if err != nil {

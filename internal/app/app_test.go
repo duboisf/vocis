@@ -337,34 +337,6 @@ func (o *overlayStub) SetListeningText(windowClass, text string) {
 	o.listeningText = text
 }
 
-type injectorStub struct {
-	inserted     []string
-	liveInserted []string
-	err          error
-}
-
-func (i *injectorStub) CaptureTarget(context.Context) (platform.Target, error) {
-	return platform.Target{}, nil
-}
-
-func (i *injectorStub) Insert(_ context.Context, _ platform.Target, text string) error {
-	if i.err != nil {
-		return i.err
-	}
-	i.inserted = append(i.inserted, text)
-	return nil
-}
-
-func (i *injectorStub) PressEnter(_ context.Context, _ platform.Target) error { return nil }
-
-func (i *injectorStub) InsertLive(_ context.Context, _ platform.Target, text string) error {
-	if i.err != nil {
-		return i.err
-	}
-	i.liveInserted = append(i.liveInserted, text)
-	return nil
-}
-
 func TestDrainPrerollCapturesUntilStop(t *testing.T) {
 	src := make(chan []int16, 4)
 	stop := drainPreroll(src)

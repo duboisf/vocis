@@ -22,11 +22,6 @@ func init() {
 	tracer = otel.Tracer(tracerName)
 }
 
-// Tracer returns the package-level tracer.
-func Tracer() trace.Tracer {
-	return tracer
-}
-
 // Init sets up the OpenTelemetry TracerProvider with an OTLP/gRPC exporter.
 // Returns a shutdown function that flushes pending spans.
 func Init(ctx context.Context, cfg config.TelemetryConfig, version string) (func(context.Context) error, error) {

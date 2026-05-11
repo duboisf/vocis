@@ -875,19 +875,6 @@ func (a *App) showCompletionError(err error) {
 	a.overlay.ShowError(userFacingError(err))
 }
 
-// addOverlayEvent is a convenience for adding overlay state events to a span
-// that may be nil (e.g. before the dictation span is created).
-func addOverlayEvent(span trace.Span, name string, attrs ...attribute.KeyValue) {
-	if span == nil {
-		return
-	}
-	if len(attrs) > 0 {
-		span.AddEvent(name, trace.WithAttributes(attrs...))
-	} else {
-		span.AddEvent(name)
-	}
-}
-
 func isNoSpeechError(err error) bool {
 	return errors.Is(err, transcribe.ErrInputAudioBufferCommitEmpty) ||
 		strings.Contains(err.Error(), "transcription came back empty")

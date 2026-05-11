@@ -614,10 +614,6 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 	return text, nil
 }
 
-// SocketPath returns the path the daemon is (or was) listening on.
-// Useful for tests and status output.
-func (d *Daemon) SocketPath() string { return d.socketPath }
-
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
