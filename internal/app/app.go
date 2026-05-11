@@ -676,77 +676,43 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	}
 	a.overlay.SetFinishingText(displayText)
 
-	postProcessSkipped := false
-	if state.combinedPostProcess {
-		// chat-audio already folded the cleanup rules into its system
-		// prompt and produced a cleaned transcript in the same call.
-		// Running the separate /chat/completions postprocess pass on
-		// top would just add latency and may double-clean.
-		state.span.AddEvent("postprocess.combined_into_chat_audio")
-		sessionlog.Infof("postprocess: combined into chat-audio call; skipping separate pass")
-	} else if a.cfg.PostProcess.Enabled {
-		a.overlay.SetFinishingPhase(a.cfg.Overlay.Finishing.PPWait)
-		state.span.AddEvent("overlay.phase.wait")
-		ppSpanCtx, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
-			attribute.Int("input.length", len(text)),
-			attribute.String("model", a.cfg.PostProcess.Model),
-		)
+	text, postProcessSkipped := a.runPostProcess(spanCtx, escapeCh, state, text)
 
-		ppCtx, ppCancel := context.WithCancel(ppSpanCtx)
-		resultCh := make(chan transcribe.PostProcessResult, 1)
-		go func() {
-			resultCh <- a.transcribe.PostProcess(ppCtx, a.cfg.PostProcess, text, func() {
-				a.overlay.ExtendFinishingPhase(a.cfg.Overlay.Finishing.PPStream)
-			})
-		}()
-
-		var result transcribe.PostProcessResult
-		select {
-		case result = <-resultCh:
-		case <-escapeCh:
-			ppCancel()
-			ppSpan.AddEvent("postprocess.cancelled_by_user")
-			sessionlog.Infof("post-processing skipped by user (Escape)")
-			result = transcribe.PostProcessResult{Text: text, Skipped: true}
-		}
-		ppCancel()
-
-		ppSpan.SetAttributes(
-			attribute.Int("output.length", len(result.Text)),
-			attribute.Bool("skipped", result.Skipped),
-		)
-		telemetry.EndSpan(ppSpan, nil)
-		text = result.Text
-		postProcessSkipped = result.Skipped
+	if err := a.deliverTranscript(spanCtx, state, text, postProcessSkipped); err != nil {
+		dictationErr = err
 	}
+}
 
+// deliverTranscript inserts the assembled transcript into the captured
+// target, presses Enter on submit-mode, and surfaces the final overlay
+// state (success, warning, or error). Returns a non-nil error only on
+// hard insert failures — ErrTargetGone is soft because the transcript
+// is on the clipboard, the transcription itself succeeded, and tainting
+// the dictation span as failed would be misleading.
+func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, text string, postProcessSkipped bool) error {
 	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vocis.inject",
 		attribute.String("target.window_id", state.target.WindowID),
 		attribute.String("target.window_class", state.target.WindowClass),
 		attribute.String("target.kitty_window_id", state.target.KittyWindowID),
 		attribute.Int("text.length", len(text)),
 	)
-	err = a.injector.Insert(insertCtx, state.target, text)
+	err := a.injector.Insert(insertCtx, state.target, text)
 	telemetry.EndSpan(insertSpan, err)
 	if err != nil {
 		if errors.Is(err, platform.ErrTargetGone) {
-			// Soft path: the original kitty tab/pane is gone but the
-			// transcript is safely on the clipboard. Don't taint the
-			// dictation span as failed — the transcription itself
-			// succeeded; only delivery degraded.
 			state.span.AddEvent("overlay.warning",
 				trace.WithAttributes(attribute.String("reason", "target_gone")),
 			)
 			sessionlog.Warnf("target window gone — transcript on clipboard (%d chars)", len(text))
 			a.markDelivered()
 			a.overlay.ShowWarning(a.cfg.Overlay.Warning.TargetGone)
-			return
+			return nil
 		}
-		dictationErr = err
 		sessionlog.Errorf("insert transcript: %v", err)
 		a.showCompletionError(err)
-		return
+		return err
 	}
+
 	if state.target.KittyWindowID != "" {
 		sessionlog.Infof("transcript inserted into kitty window id=%s (OS window=%s) submit=%v",
 			state.target.KittyWindowID, state.target.WindowID, state.submitMode)
@@ -777,6 +743,59 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		state.span.AddEvent("overlay.success")
 		a.overlay.Hide()
 	}
+	return nil
+}
+
+// runPostProcess runs the LLM cleanup pass on the assembled transcript
+// if enabled, with Escape-to-skip support and a span around the whole
+// thing. Returns the cleaned text (or the input verbatim if skipped or
+// the backend already combined cleanup into transcription).
+func (a *App) runPostProcess(spanCtx context.Context, escapeCh <-chan struct{}, state *recordingState, text string) (string, bool) {
+	if state.combinedPostProcess {
+		// chat-audio already folded the cleanup rules into its system
+		// prompt and produced a cleaned transcript in the same call.
+		// Running the separate /chat/completions postprocess pass on
+		// top would just add latency and may double-clean.
+		state.span.AddEvent("postprocess.combined_into_chat_audio")
+		sessionlog.Infof("postprocess: combined into chat-audio call; skipping separate pass")
+		return text, false
+	}
+	if !a.cfg.PostProcess.Enabled {
+		return text, false
+	}
+
+	a.overlay.SetFinishingPhase(a.cfg.Overlay.Finishing.PPWait)
+	state.span.AddEvent("overlay.phase.wait")
+	ppSpanCtx, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
+		attribute.Int("input.length", len(text)),
+		attribute.String("model", a.cfg.PostProcess.Model),
+	)
+
+	ppCtx, ppCancel := context.WithCancel(ppSpanCtx)
+	resultCh := make(chan transcribe.PostProcessResult, 1)
+	go func() {
+		resultCh <- a.transcribe.PostProcess(ppCtx, a.cfg.PostProcess, text, func() {
+			a.overlay.ExtendFinishingPhase(a.cfg.Overlay.Finishing.PPStream)
+		})
+	}()
+
+	var result transcribe.PostProcessResult
+	select {
+	case result = <-resultCh:
+	case <-escapeCh:
+		ppCancel()
+		ppSpan.AddEvent("postprocess.cancelled_by_user")
+		sessionlog.Infof("post-processing skipped by user (Escape)")
+		result = transcribe.PostProcessResult{Text: text, Skipped: true}
+	}
+	ppCancel()
+
+	ppSpan.SetAttributes(
+		attribute.Int("output.length", len(result.Text)),
+		attribute.Bool("skipped", result.Skipped),
+	)
+	telemetry.EndSpan(ppSpan, nil)
+	return result.Text, result.Skipped
 }
 
 // markDelivered ends the dismissable phase of a dictation. The
