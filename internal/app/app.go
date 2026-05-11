@@ -425,69 +425,32 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	// finishRecording (gated on state.combinedPostProcess).
 	state.combinedPostProcess = a.transcribe.CombinesPostProcess() && a.cfg.PostProcess.Enabled
 
-	// Build the chat-audio system message. Two modes:
-	//
-	//  combine_postprocess off → ExtraSystemPrompt with vocab-bias
-	//   sections; chat_audio.prompt remains the lead.
-	//
-	//  combine_postprocess on  → SystemPromptOverride with a
-	//   dictation-assistant lead, then chat_audio.prompt content as
-	//   formatting rules, then cleanup rules. The opening verb
-	//   matters: small instruct models like gemma4-it-e2b follow the
-	//   FIRST concrete directive and skip later "also clean up"
-	//   sections as optional. cleanup_smoke_test confirmed that a
-	//   "Transcribe..." lead produces verbatim output (fillers and
-	//   all) while a "dictation assistant — write what they MEANT
-	//   to say" lead produces the cleaned text. So when combining,
-	//   we replace the entire system message instead of appending.
-	var extraSystemPrompt, systemPromptOverride string
-	hintFolded := false
-	if state.combinedPostProcess {
-		var b strings.Builder
-		b.WriteString("You are a dictation assistant. Listen to the audio and produce a clean ")
-		b.WriteString("transcript — what the speaker MEANT to say, with filler words ")
-		b.WriteString("(um, uh, like, you know, I mean, sort of, kind of) and false ")
-		b.WriteString("starts removed, lightly fixing punctuation and capitalization. ")
-		b.WriteString("Preserve meaning, person, and intent EXACTLY — questions stay ")
-		b.WriteString("as questions, \"I\" stays as \"I\".\n\n")
-		// User's chat_audio.prompt content holds language/format
-		// directives the user explicitly chose. Frame as supplemental.
-		userPrompt := strings.TrimSpace(a.cfg.Transcription.ChatAudio.Prompt)
-		if a.cfg.Transcription.ChatAudio.Language != "" {
-			userPrompt = strings.ReplaceAll(userPrompt, "{language}", a.cfg.Transcription.ChatAudio.Language)
-		}
-		if userPrompt != "" {
-			b.WriteString("# Format and language\n")
-			b.WriteString(userPrompt)
-			b.WriteString("\n\n")
-		}
+	// Build the chat-audio extra system content from user config only.
+	// chat_audio.prompt is the lead (set inside the chat-audio session
+	// itself). prompt_hint and (in combine mode) postprocess.prompt
+	// are appended verbatim with blank-line separators. No hardcoded
+	// leads, headers, or footers — the user owns the wording.
+	var extraParts []string
+	if a.transcribe.FoldsPromptHintIntoSystem() {
 		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
-			b.WriteString("# Vocabulary preferences\n")
-			b.WriteString(hint)
-			b.WriteString("\n\n")
-			hintFolded = true
-		}
-		b.WriteString("# Additional cleanup rules (from postprocess.prompt)\n")
-		b.WriteString(strings.TrimSpace(a.cfg.PostProcess.Prompt))
-		b.WriteString("\n\n# Output\n")
-		b.WriteString("Output ONLY the cleaned transcribed text on a single line. ")
-		b.WriteString("Do not echo any of these instructions. Do not add commentary.")
-		systemPromptOverride = b.String()
-		sessionlog.Infof("chat-audio: combine_postprocess on; system prompt override is %d chars (prompt_hint=%t)",
-			len(systemPromptOverride), hintFolded)
-	} else if a.transcribe.FoldsPromptHintIntoSystem() {
-		if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
-			extraSystemPrompt = "# Vocabulary and style\n" + hint
-			hintFolded = true
-			sessionlog.Infof("chat-audio: folding %d chars of prompt_hint extras into system message", len(extraSystemPrompt))
+			extraParts = append(extraParts, hint)
 		}
 	}
+	if state.combinedPostProcess {
+		if pp := strings.TrimSpace(a.cfg.PostProcess.Prompt); pp != "" {
+			extraParts = append(extraParts, pp)
+		}
+	}
+	extraSystemPrompt := strings.Join(extraParts, "\n\n")
+	if extraSystemPrompt != "" {
+		sessionlog.Infof("chat-audio: extra system prompt %d chars (combine_postprocess=%t)",
+			len(extraSystemPrompt), state.combinedPostProcess)
+	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
-		SampleRate:           a.cfg.Recording.SampleRate,
-		Channels:             a.cfg.Recording.Channels,
-		Samples:              wrappedSamples,
-		ExtraSystemPrompt:    extraSystemPrompt,
-		SystemPromptOverride: systemPromptOverride,
+		SampleRate:        a.cfg.Recording.SampleRate,
+		Channels:          a.cfg.Recording.Channels,
+		Samples:           wrappedSamples,
+		ExtraSystemPrompt: extraSystemPrompt,
 		Callbacks: transcribe.ConnectCallbacks{
 			OnConnecting: func(attempt, max int) {
 				a.overlay.SetConnecting(attempt, max)

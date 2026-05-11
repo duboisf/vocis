@@ -829,22 +829,11 @@ type DictationOpts struct {
 	// trailingDuration scaling.
 	ExpectedAudioMS int
 	// ExtraSystemPrompt, when non-empty, is appended to the chat-audio
-	// session's system message with a blank-line separator. The serve
-	// path uses this to fold postprocess.prompt into the instruction
-	// when chat_audio.combine_postprocess is on, so a single
-	// /chat/completions round-trip does both transcription and
-	// cleanup. Ignored on backends other than lemonade-chat.
+	// session's system message with a blank-line separator. Used by
+	// the serve path to append prompt_hint and (in combine-postprocess
+	// mode) postprocess.prompt to the user's chat_audio.prompt lead.
+	// Ignored on backends other than lemonade-chat.
 	ExtraSystemPrompt string
-	// SystemPromptOverride, when non-empty, replaces the entire
-	// chat-audio system message — including the chat_audio.prompt
-	// content — with the caller-supplied text. ExtraSystemPrompt is
-	// ignored when this is set. Used by app.go in combine-postprocess
-	// mode where the lead verb of the system message has to be
-	// "dictation assistant" rather than "transcribe" (small models
-	// follow the first concrete directive and skip later cleanup
-	// instructions when they sit in second position). Ignored on
-	// backends other than lemonade-chat.
-	SystemPromptOverride string
 }
 
 type DictationSession struct {

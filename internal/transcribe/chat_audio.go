@@ -55,7 +55,6 @@ type chatAudioSession struct {
 	minChunkPeak         float64
 	minChunkRMS          float64
 	extraSystemPrompt    string
-	systemPromptOverride string
 
 	// Audio assumptions: PCM16 mono at this sample rate. Lemonade's
 	// gemma audio path expects 16 kHz; the recorder already produces
@@ -152,7 +151,6 @@ func startChatAudioSession(
 		minChunkPeak:         cfg.ChatAudio.MinChunkPeak,
 		minChunkRMS:          cfg.ChatAudio.MinChunkRMS,
 		extraSystemPrompt:    opts.ExtraSystemPrompt,
-		systemPromptOverride: opts.SystemPromptOverride,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		events:               make(chan DictationEvent, 16),
@@ -699,17 +697,9 @@ func (s *chatAudioSession) buildMessages(currentWAVs [][]byte) []map[string]any 
 		history = history[len(history)-s.historyTurns:]
 	}
 
-	var systemPrompt string
-	if override := strings.TrimSpace(s.systemPromptOverride); override != "" {
-		// Caller fully owns the system message. Multi-clip / inline-
-		// clips framings are still prepended when applicable so the
-		// shape conventions stay consistent.
-		systemPrompt = override
-	} else {
-		systemPrompt = s.renderPrompt()
-		if extra := strings.TrimSpace(s.extraSystemPrompt); extra != "" {
-			systemPrompt = systemPrompt + "\n\n" + extra
-		}
+	systemPrompt := s.renderPrompt()
+	if extra := strings.TrimSpace(s.extraSystemPrompt); extra != "" {
+		systemPrompt = systemPrompt + "\n\n" + extra
 	}
 	switch {
 	case multiClip:
