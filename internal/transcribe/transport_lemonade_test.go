@@ -319,8 +319,8 @@ func TestClientLemonadeBackendDialsWithoutClientSecret(t *testing.T) {
 		raw, _ := json.Marshal(gotSessionUp)
 		t.Fatalf("lemonade session.update should be flat, got %s", string(raw))
 	}
-	if !strings.HasPrefix(client.transport.(*lemonadeTransport).rawURL, "http") {
+	if !strings.HasPrefix(client.transport.rawURL, "http") {
 		// sanity check on the test wiring
-		t.Fatalf("rawURL = %q", client.transport.(*lemonadeTransport).rawURL)
+		t.Fatalf("rawURL = %q", client.transport.rawURL)
 	}
 }

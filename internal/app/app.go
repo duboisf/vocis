@@ -210,14 +210,26 @@ func (a *App) handleDown(ctx context.Context) {
 		a.handleToggle(ctx)
 		return
 	}
-	a.handleStart(ctx)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.transcribing || a.recording != nil {
+		return
+	}
+	a.startRecordingLocked(ctx)
 }
 
 func (a *App) handleUp(ctx context.Context) {
 	if a.cfg.HotkeyMode != "hold" {
 		return
 	}
-	a.handleStop(ctx)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.transcribing || a.recording == nil {
+		return
+	}
+	a.stopRecordingLocked(ctx)
 }
 
 func (a *App) handleToggle(ctx context.Context) {
@@ -239,17 +251,6 @@ func (a *App) handleToggle(ctx context.Context) {
 	}
 
 	a.stopRecordingLocked(ctx)
-}
-
-func (a *App) handleStart(ctx context.Context) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.transcribing || a.recording != nil {
-		return
-	}
-
-	a.startRecordingLocked(ctx)
 }
 
 func (a *App) handleTap() {
@@ -278,17 +279,6 @@ func (a *App) toggleSubmitMode() {
 	state.span.AddEvent("overlay.submit_mode",
 		trace.WithAttributes(attribute.Bool("enabled", state.submitMode)),
 	)
-}
-
-func (a *App) handleStop(ctx context.Context) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.transcribing || a.recording == nil {
-		return
-	}
-
-	a.stopRecordingLocked(ctx)
 }
 
 func (a *App) reloadConfig() {
@@ -785,7 +775,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		a.overlay.ShowWarning(a.cfg.Overlay.Warning.PostprocessSkipped)
 	} else {
 		state.span.AddEvent("overlay.success")
-		a.showCompletionSuccess(text)
+		a.overlay.Hide()
 	}
 }
 
@@ -854,10 +844,6 @@ func (a *App) dismissInFlightOverlay() bool {
 	sessionlog.Infof("transcription cancelled by user")
 	// Note: span is ended by the finishRecording defer, which will see the cancelled context.
 	return true
-}
-
-func (a *App) showCompletionSuccess(text string) {
-	a.overlay.Hide()
 }
 
 func (a *App) showCompletionError(err error) {

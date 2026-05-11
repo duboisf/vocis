@@ -42,7 +42,7 @@ type Client struct {
 	streaming    config.StreamingConfig
 	client       openaisdk.Client
 	chatStreamer chatCompletionStreamer
-	transport    Transport
+	transport    *lemonadeTransport
 	httpClient   *http.Client
 	writeTimeout time.Duration
 }
@@ -68,7 +68,7 @@ func New(cfg config.TranscriptionConfig, streaming config.StreamingConfig) *Clie
 
 	sdkClient := openaisdk.NewClient(opts...)
 
-	var transport Transport
+	var transport *lemonadeTransport
 	switch cfg.Backend {
 	case config.BackendLemonade:
 		if streaming.Threshold > 0.1 {

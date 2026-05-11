@@ -242,25 +242,6 @@ func TestHandleDownDismissesOldOverlayWhileTranscribing(t *testing.T) {
 	}
 }
 
-func TestShowCompletionSuccessStaysHiddenAfterDismiss(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{
-		overlay: fakeOverlay,
-	}
-	app.dismissCompletionOverlay = true
-
-	app.showCompletionSuccess("hello")
-
-	if fakeOverlay.successText != "" {
-		t.Fatalf("successText = %q, want empty", fakeOverlay.successText)
-	}
-	if fakeOverlay.hideCalls != 1 {
-		t.Fatalf("hideCalls = %d, want 1", fakeOverlay.hideCalls)
-	}
-}
-
 // TestHandleDownAfterDeliveryStartsNewSessionInsteadOfCancelling
 // reproduces the kitty fade-out race: once the transcript has been
 // pasted into kitty and (if applicable) submit Enter has fired, the

@@ -285,7 +285,7 @@ func runConfigModels() error {
 		return err
 	}
 
-	txModels, ppModels, err := fetchModels(cfg)
+	txModels, ppModels, err := fetchLemonadeModels(cfg)
 	if err != nil {
 		return err
 	}
@@ -319,10 +319,6 @@ func runConfigModels() error {
 	fmt.Printf("\nWrote %s\n  transcription.model=%s\n  postprocess.model=%s\n",
 		path, cfg.Transcription.Model, cfg.PostProcess.Model)
 	return nil
-}
-
-func fetchModels(cfg config.Config) (tx, pp []modelChoice, err error) {
-	return fetchLemonadeModels(cfg)
 }
 
 func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {
