@@ -444,7 +444,7 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 					wav:        encodePCM16WAV(concatClips(liveClips), s.sampleRate),
 					transcript: text,
 				})
-				formatted := s.formatSegmentText(text)
+				formatted := formatSegmentText(&s.segmentCount, text)
 				if s.liveSegments.Load() {
 					select {
 					case s.events <- DictationEvent{Type: DictationEventSegment, Text: formatted}:
@@ -943,25 +943,6 @@ func (s *chatAudioSession) isHallucination(text string) bool {
 		return false
 	}
 	return s.hallucinationFilters[strings.ToLower(text)]
-}
-
-// formatSegmentText mirrors DictationSession's formatter so output
-// concatenation is identical between backends.
-func (s *chatAudioSession) formatSegmentText(text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	if s.segmentCount.Add(1) == 1 {
-		return text
-	}
-	if strings.HasPrefix(text, " ") || strings.HasPrefix(text, "\n") {
-		return text
-	}
-	if startsWithPunctuation(text) {
-		return text
-	}
-	return " " + text
 }
 
 // encodePCM16WAV mirrors internal/tts.WriteWAV — duplicated here to

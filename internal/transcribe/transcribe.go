@@ -103,6 +103,22 @@ func New(cfg config.TranscriptionConfig, streaming config.StreamingConfig) *Clie
 // Stream — low-level WebSocket wrapper
 // ---------------------------------------------------------------------------
 
+// Realtime WS message-type strings used by both the Lemonade and
+// (historically) OpenAI realtime APIs. Promoted to consts because each
+// appears at 3+ sites — a typo in any one of them silently breaks
+// transcription with no compiler help.
+const (
+	msgAudioAppend      = "input_audio_buffer.append"
+	msgAudioCommit      = "input_audio_buffer.commit"
+	msgAudioCommitted   = "input_audio_buffer.committed"
+	msgAudioCleared     = "input_audio_buffer.cleared"
+	msgSpeechStarted    = "input_audio_buffer.speech_started"
+	msgSpeechStopped    = "input_audio_buffer.speech_stopped"
+	msgTranscriptDelta  = "conversation.item.input_audio_transcription.delta"
+	msgTranscriptDone   = "conversation.item.input_audio_transcription.completed"
+	msgTranscriptFailed = "conversation.item.input_audio_transcription.failed"
+)
+
 type StreamEventType string
 
 const (
@@ -319,14 +335,14 @@ func (s *Stream) Append(ctx context.Context, samples []int16) error {
 		return nil
 	}
 	if err := s.sendJSON(ctx, map[string]any{
-		"type":  "input_audio_buffer.append",
+		"type":  msgAudioAppend,
 		"audio": base64.StdEncoding.EncodeToString(payload),
 	}); err != nil {
 		return err
 	}
 	s.statsMu.Lock()
 	s.stats.AppendBytes += int64(len(payload))
-	s.stats.OutboundCounts["input_audio_buffer.append"]++
+	s.stats.OutboundCounts[msgAudioAppend]++
 	s.statsMu.Unlock()
 	return nil
 }
@@ -349,25 +365,25 @@ func (s *Stream) AppendSilence(ctx context.Context, durationMS int) error {
 	// as digital silence at any bit depth we care about.
 	payload := make([]byte, sampleCount*2)
 	if err := s.sendJSON(ctx, map[string]any{
-		"type":  "input_audio_buffer.append",
+		"type":  msgAudioAppend,
 		"audio": base64.StdEncoding.EncodeToString(payload),
 	}); err != nil {
 		return err
 	}
 	s.statsMu.Lock()
 	s.stats.AppendBytes += int64(len(payload))
-	s.stats.OutboundCounts["input_audio_buffer.append"]++
+	s.stats.OutboundCounts[msgAudioAppend]++
 	s.statsMu.Unlock()
 	return nil
 }
 
 func (s *Stream) Commit(ctx context.Context) error {
-	err := s.sendJSON(ctx, map[string]any{"type": "input_audio_buffer.commit"})
+	err := s.sendJSON(ctx, map[string]any{"type": msgAudioCommit})
 	if err == nil {
 		s.statsMu.Lock()
 		s.stats.CommitAt = time.Now()
 		s.statsMu.Unlock()
-		s.recordOutbound("input_audio_buffer.commit")
+		s.recordOutbound(msgAudioCommit)
 	}
 	return err
 }
@@ -385,7 +401,7 @@ func (s *Stream) Partial() string {
 func (s *Stream) HasPendingTranscription() bool {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
-	completed := s.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]
+	completed := s.stats.InboundCounts[msgTranscriptDone]
 	return s.stats.SpeechStartedCount > completed
 }
 
@@ -407,7 +423,7 @@ func (s *Stream) PendingTranscriptionCounts() (started, completed int) {
 	s.statsMu.Lock()
 	defer s.statsMu.Unlock()
 	return s.stats.SpeechStartedCount,
-		s.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]
+		s.stats.InboundCounts[msgTranscriptDone]
 }
 
 func (s *Stream) Events() <-chan StreamEvent { return s.events }
@@ -476,7 +492,7 @@ func postCommitEventAttrs(sinceCommit time.Duration, msg jsonMessage) (string, [
 		attribute.Int64("since_commit_ms", sinceCommit.Milliseconds()),
 	}
 	switch msgType {
-	case "conversation.item.input_audio_transcription.delta":
+	case msgTranscriptDelta:
 		attrs := base
 		if d, ok := msg["delta"].(string); ok {
 			attrs = append(attrs,
@@ -485,7 +501,7 @@ func postCommitEventAttrs(sinceCommit time.Duration, msg jsonMessage) (string, [
 			)
 		}
 		return "realtime.delta", attrs, true
-	case "conversation.item.input_audio_transcription.completed":
+	case msgTranscriptDone:
 		attrs := base
 		if t, ok := msg["transcript"].(string); ok {
 			attrs = append(attrs,
@@ -494,9 +510,9 @@ func postCommitEventAttrs(sinceCommit time.Duration, msg jsonMessage) (string, [
 			)
 		}
 		return "realtime.completed", attrs, true
-	case "conversation.item.input_audio_transcription.failed":
+	case msgTranscriptFailed:
 		return "realtime.failed", base, true
-	case "input_audio_buffer.cleared":
+	case msgAudioCleared:
 		// Lemonade 10.3 substitute for `.committed` + final transcript
 		// when the buffer was already drained mid-stream. Surface on
 		// the wait_final timeline so triaging "why was finalize so
@@ -513,11 +529,11 @@ func postCommitEventAttrs(sinceCommit time.Duration, msg jsonMessage) (string, [
 // bucket so session.updated / buffer events don't clutter the view.
 func inboundEventName(msgType string) string {
 	switch msgType {
-	case "conversation.item.input_audio_transcription.delta":
+	case msgTranscriptDelta:
 		return "realtime.transcription.delta"
-	case "conversation.item.input_audio_transcription.completed":
+	case msgTranscriptDone:
 		return "realtime.transcription.completed"
-	case "conversation.item.input_audio_transcription.failed":
+	case msgTranscriptFailed:
 		return "realtime.transcription.failed"
 	default:
 		return "realtime.inbound"
@@ -537,25 +553,25 @@ func inboundAttrs(elapsed time.Duration, msg jsonMessage) []attribute.KeyValue {
 		attrs = append(attrs, attribute.String("item_id", id))
 	}
 	switch msgType {
-	case "conversation.item.input_audio_transcription.delta":
+	case msgTranscriptDelta:
 		if d, ok := msg["delta"].(string); ok {
 			attrs = append(attrs,
 				attribute.Int("delta.text_len", len(d)),
 				attribute.String("delta.text", truncate(d, 80)),
 			)
 		}
-	case "conversation.item.input_audio_transcription.completed":
+	case msgTranscriptDone:
 		if t, ok := msg["transcript"].(string); ok {
 			attrs = append(attrs,
 				attribute.Int("transcript.text_len", len(t)),
 				attribute.String("transcript.text", truncate(t, 80)),
 			)
 		}
-	case "input_audio_buffer.speech_started":
+	case msgSpeechStarted:
 		if v, ok := numericField(msg, "audio_start_ms"); ok {
 			attrs = append(attrs, attribute.Int64("audio_start_ms", v))
 		}
-	case "input_audio_buffer.speech_stopped":
+	case msgSpeechStopped:
 		if v, ok := numericField(msg, "audio_end_ms"); ok {
 			attrs = append(attrs, attribute.Int64("audio_end_ms", v))
 		}
@@ -572,22 +588,22 @@ func (st *Stats) observeInbound(now time.Time, msg jsonMessage) {
 	st.LastInboundAt = now
 
 	switch msgType {
-	case "input_audio_buffer.speech_started":
+	case msgSpeechStarted:
 		st.SpeechStartedCount++
 		if st.FirstSpeechStartedAt.IsZero() {
 			st.FirstSpeechStartedAt = now
 		}
 		// New utterance underway → buffer has content again.
 		st.InPostCommittedSilence = false
-	case "input_audio_buffer.speech_stopped":
+	case msgSpeechStopped:
 		st.SpeechStoppedCount++
 		st.LastSpeechStoppedAt = now
-	case "input_audio_buffer.committed":
+	case msgAudioCommitted:
 		// Server-VAD-driven commit drained the buffer. Silent frames may
 		// still be flowing from the client, but they won't cause another
 		// utterance until VAD fires speech_started.
 		st.InPostCommittedSilence = true
-	case "conversation.item.input_audio_transcription.delta":
+	case msgTranscriptDelta:
 		if !st.CommitAt.IsZero() && now.After(st.CommitAt) {
 			st.DeltaCountPostCommit++
 			if st.FirstPostCommitType == "" {
@@ -598,7 +614,7 @@ func (st *Stats) observeInbound(now time.Time, msg jsonMessage) {
 				st.FirstPostCommitDelta = d
 			}
 		}
-	case "conversation.item.input_audio_transcription.completed":
+	case msgTranscriptDone:
 		if !st.CommitAt.IsZero() && st.FirstPostCommitType == "" {
 			st.FirstPostCommitType = "completed"
 			st.FirstPostCommitAt = now
@@ -695,12 +711,12 @@ func (s *Stream) setSessionSummaryAttrs() {
 	defer s.statsMu.Unlock()
 	attrs := []attribute.KeyValue{
 		attribute.Int64("session.duration_ms", time.Since(s.sessionStart).Milliseconds()),
-		attribute.Int("inbound.deltas_count", s.stats.InboundCounts["conversation.item.input_audio_transcription.delta"]),
-		attribute.Int("inbound.completed_count", s.stats.InboundCounts["conversation.item.input_audio_transcription.completed"]),
+		attribute.Int("inbound.deltas_count", s.stats.InboundCounts[msgTranscriptDelta]),
+		attribute.Int("inbound.completed_count", s.stats.InboundCounts[msgTranscriptDone]),
 		attribute.Int("inbound.speech_started_count", s.stats.SpeechStartedCount),
 		attribute.Int("inbound.speech_stopped_count", s.stats.SpeechStoppedCount),
-		attribute.Int("inbound.committed_count", s.stats.InboundCounts["input_audio_buffer.committed"]),
-		attribute.Int("outbound.append_count", s.stats.OutboundCounts["input_audio_buffer.append"]),
+		attribute.Int("inbound.committed_count", s.stats.InboundCounts[msgAudioCommitted]),
+		attribute.Int("outbound.append_count", s.stats.OutboundCounts[msgAudioAppend]),
 		attribute.Int64("outbound.append_bytes", s.stats.AppendBytes),
 	}
 	if s.targetRate > 0 {
@@ -1271,7 +1287,7 @@ func (s *DictationSession) handleStreamEvent(event StreamEvent) error {
 			return nil
 		}
 		s.lastSegmentAt.Store(time.Now().UnixNano())
-		text = s.formatSegmentText(text)
+		text = formatSegmentText(&s.segmentCount, text)
 		if s.liveSegments.Load() {
 			s.emitEvent(DictationEvent{Type: DictationEventSegment, Text: text})
 			return nil
@@ -1559,12 +1575,14 @@ func (s *DictationSession) trailingDuration() time.Duration {
 // formatSegmentText increments the segment counter and adds a leading
 // space when the new segment needs separation from the running text.
 // Atomic.Add returns the new count, so first-segment is `n == 1`.
-func (s *DictationSession) formatSegmentText(text string) string {
+// Shared between DictationSession and chatAudioSession so output
+// concatenation is identical across backends.
+func formatSegmentText(count *atomic.Int32, text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
-	if s.segmentCount.Add(1) == 1 {
+	if count.Add(1) == 1 {
 		return text
 	}
 	if strings.HasPrefix(text, " ") || strings.HasPrefix(text, "\n") {
@@ -1621,7 +1639,7 @@ func startsWithPunctuation(text string) bool {
 // that ships transcription deltas under a different field name than the
 // OpenAI-realtime spec).
 func dumpWSFrame(direction string, data []byte) {
-	if direction == "→" && strings.Contains(string(data), `"type":"input_audio_buffer.append"`) {
+	if direction == "→" && strings.Contains(string(data), `"type":msgAudioAppend`) {
 		return
 	}
 	sessionlog.Tracef("ws %s %s", direction, data)
@@ -1665,11 +1683,11 @@ func (s *Stream) readLoop() {
 				sessionlog.Debugf("realtime: %s", msgType)
 			}
 			s.markReady(nil)
-		case "input_audio_buffer.speech_started",
-			"input_audio_buffer.speech_stopped",
-			"input_audio_buffer.committed":
+		case msgSpeechStarted,
+			msgSpeechStopped,
+			msgAudioCommitted:
 			sessionlog.Debugf("realtime: %s", msgType)
-		case "input_audio_buffer.cleared":
+		case msgAudioCleared:
 			sessionlog.Debugf("realtime: %s", msgType)
 			// Lemonade 10.3 returns `cleared` (not `committed`) in
 			// response to a finalize-time commit when client/server VAD
@@ -1685,7 +1703,7 @@ func (s *Stream) readLoop() {
 			if committed {
 				s.emit(StreamEvent{Type: StreamEventTrailingSkipped})
 			}
-		case "conversation.item.input_audio_transcription.delta":
+		case msgTranscriptDelta:
 			var event transcriptionDeltaEvent
 			if err := raw.decode(&event); err != nil {
 				sessionlog.Warnf("realtime: delta decode failed: %v payload=%s", err, truncate(string(data), 200))
@@ -1699,7 +1717,7 @@ func (s *Stream) readLoop() {
 				partial := s.appendPartial(event.ItemID, event.Delta)
 				s.emitPartial(StreamEvent{Type: StreamEventPartial, Text: partial})
 			}
-		case "conversation.item.input_audio_transcription.completed":
+		case msgTranscriptDone:
 			var event transcriptionCompletedEvent
 			if err := raw.decode(&event); err != nil {
 				s.emit(StreamEvent{Type: StreamEventError, Err: err})
@@ -1710,7 +1728,7 @@ func (s *Stream) readLoop() {
 				s.emitPartial(StreamEvent{Type: StreamEventPartial, Text: ""})
 			}
 			s.emit(StreamEvent{Type: StreamEventFinal, Text: final})
-		case "conversation.item.input_audio_transcription.failed":
+		case msgTranscriptFailed:
 			var event transcriptionFailedEvent
 			if err := raw.decode(&event); err != nil {
 				s.emit(StreamEvent{Type: StreamEventError, Err: err})
