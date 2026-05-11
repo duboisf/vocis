@@ -251,49 +251,79 @@ func listRecallSegments() (*recall.Client, []recall.SegmentInfo, []int64, error)
 }
 
 func runRecallPick() error {
+	session, sessErr := sessionlog.Start()
+	if sessErr != nil {
+		return sessErr
+	}
+	defer session.Close()
+
+	startedAt := time.Now()
+	sessionlog.Infof("recall pick: starting (postprocess=%t no_fzf=%t selection=%q)",
+		recallPickPostprocess, recallPickNoFZF, recallPickSelection)
+
+	listStartedAt := time.Now()
 	client, segs, availableIDs, err := listRecallSegments()
 	if err != nil {
 		return err
 	}
+	sessionlog.Infof("recall pick: listed %d segment(s) in %s",
+		len(segs), time.Since(listStartedAt).Round(time.Millisecond))
 	if len(segs) == 0 {
 		fmt.Fprintln(os.Stderr, "no segments in buffer yet — speak into the mic first")
 		return nil
 	}
 
 	var ids []int64
+	var selectMode string
+	selectStartedAt := time.Now()
 	if sel := strings.TrimSpace(recallPickSelection); sel != "" {
+		selectMode = "flag"
 		ids, err = recall.ParseSelection(sel, availableIDs)
 		if err != nil {
 			return err
 		}
 	} else if useFZF := !recallPickNoFZF && fzfAvailable(); useFZF {
+		selectMode = "fzf"
 		ids, err = pickSegmentsWithFZF(segs)
 		if err != nil {
 			return err
 		}
 		if len(ids) == 0 {
+			sessionlog.Infof("recall pick: fzf returned no selection after %s",
+				time.Since(selectStartedAt).Round(time.Millisecond))
 			fmt.Fprintln(os.Stderr, "no selection")
 			return nil
 		}
 	} else {
+		selectMode = "table"
 		printSegmentTable(os.Stderr, segs)
 		ids, err = promptSegmentSelection(availableIDs)
 		if err != nil {
 			return err
 		}
 	}
+	sessionlog.Infof("recall pick: selected ids=%v via %s in %s",
+		ids, selectMode, time.Since(selectStartedAt).Round(time.Millisecond))
 
 	parts := make([]string, 0, len(ids))
 	empties := 0
 	for _, id := range ids {
 		fmt.Fprintf(os.Stderr, "transcribing segment #%d...\n", id)
+		sessionlog.Infof("recall pick: requesting transcribe id=%d postprocess=%t",
+			id, recallPickPostprocess)
+		reqStartedAt := time.Now()
 		txCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		text, err := client.Transcribe(txCtx, id, recallPickPostprocess)
 		cancel()
+		reqElapsed := time.Since(reqStartedAt).Round(time.Millisecond)
 		if err != nil {
+			sessionlog.Warnf("recall pick: transcribe id=%d failed after %s: %v",
+				id, reqElapsed, err)
 			return fmt.Errorf("segment %d: %w", id, err)
 		}
 		trimmed := strings.TrimSpace(text)
+		sessionlog.Infof("recall pick: received id=%d chars=%d in %s",
+			id, len(trimmed), reqElapsed)
 		if trimmed == "" {
 			empties++
 			fmt.Fprintf(os.Stderr, "  segment #%d: (empty — likely silence or noise)\n", id)
@@ -302,13 +332,18 @@ func runRecallPick() error {
 		parts = append(parts, trimmed)
 	}
 	if len(parts) == 0 {
+		sessionlog.Infof("recall pick: all %d segment(s) transcribed empty after %s",
+			empties, time.Since(startedAt).Round(time.Millisecond))
 		fmt.Fprintf(os.Stderr, "all %d segment(s) transcribed empty — nothing to print\n", empties)
 		return nil
 	}
 	if empties > 0 {
 		fmt.Fprintf(os.Stderr, "note: %d of %d segment(s) were empty and skipped\n", empties, len(ids))
 	}
-	fmt.Println(strings.Join(parts, recallPickJoin))
+	joined := strings.Join(parts, recallPickJoin)
+	sessionlog.Infof("recall pick: printing %d-char output, total %s elapsed",
+		len(joined), time.Since(startedAt).Round(time.Millisecond))
+	fmt.Println(joined)
 	return nil
 }
 

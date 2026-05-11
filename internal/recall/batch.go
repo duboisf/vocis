@@ -152,8 +152,7 @@ func (d *Daemon) runDictation(
 	// session times out or its consumer dies mid-feed, nothing drains
 	// `samples` and `samples <- chunk` blocks forever. dictCtx
 	// cancellation is our release valve — spanCtx is the root OTel
-	// context and never cancels, which would leak this goroutine and
-	// deadlock the transcribeMu-holding call.
+	// context and never cancels, which would leak this goroutine.
 	feedCtx, feedSpan := telemetry.StartSpan(dictCtx, spanPrefix+".feed",
 		attribute.Int("feed.chunk_samples", 2048),
 		attribute.Int("feed.total_samples", len(pcm)),
@@ -223,22 +222,20 @@ func (d *Daemon) runDictation(
 // updated — a batch result is a different artifact from per-segment
 // transcriptions, so clobbering per-segment caches would be wrong.
 //
-// Serialized on the same transcribeMu as single-segment transcription
-// to avoid parallel transports.
+// Concurrent calls (including with transcribeSegment) are fine: each
+// builds its own chatAudioSession with no shared state, and Lemonade
+// schedules requests server-side.
 //
 // ctx is the request-scoped context from handleConn — client
 // disconnection (Ctrl-C on the CLI) propagates through and tears down
-// the Lemonade WebSocket so the model stops being fed audio no one is
-// going to receive. A batch can legitimately take tens of minutes on a
-// local model, so there is no internal wall-clock timeout — the user
-// controls lifetime via Ctrl-C, and daemon shutdown also cancels.
+// the chat-audio transport so the model stops being fed audio no one
+// is going to receive. A batch can legitimately take tens of minutes
+// on a local model, so there is no internal wall-clock timeout — the
+// user controls lifetime via Ctrl-C, and daemon shutdown also cancels.
 func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess bool) (string, error) {
 	if len(ids) == 0 {
 		return "", fmt.Errorf("no segment ids provided")
 	}
-
-	d.transcribeMu.Lock()
-	defer d.transcribeMu.Unlock()
 
 	goroutinesBefore := runtime.NumGoroutine()
 	idsCopy := append([]int64(nil), ids...)
@@ -298,8 +295,15 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 	span.SetAttributes(attribute.Int("transcript.length", len(text)))
 
 	goroutinesAfter := runtime.NumGoroutine()
-	sessionlog.Infof("recall: batch transcribe done ids=%v text_len=%d goroutines %d→%d (Δ=%+d)",
-		idsCopy, len(text), goroutinesBefore, goroutinesAfter, goroutinesAfter-goroutinesBefore)
+	delta := goroutinesAfter - goroutinesBefore
+	if delta != 0 {
+		sessionlog.Warnf("recall: batch transcribe done ids=%v text_len=%d LEAKED goroutines %d→%d (Δ=%+d) — investigate, stack dump follows",
+			idsCopy, len(text), goroutinesBefore, goroutinesAfter, delta)
+		dumpGoroutineStacks()
+	} else {
+		sessionlog.Infof("recall: batch transcribe done ids=%v text_len=%d goroutines %d→%d (Δ=%+d)",
+			idsCopy, len(text), goroutinesBefore, goroutinesAfter, delta)
+	}
 
 	return text, nil
 }

@@ -13,7 +13,6 @@ import (
 	"math"
 	"net/http"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -73,8 +72,10 @@ type chatAudioSession struct {
 	liveSegments atomic.Bool
 	segmentCount atomic.Int32
 
-	historyMu sync.Mutex
-	history   []chatTurn
+	// Few-shot history. Owned exclusively by the worker goroutine —
+	// every read and write happens inside worker() (transcribeChunk →
+	// buildMessages reads; appendHistory writes). No mutex needed.
+	history []chatTurn
 
 	// workerDone closes once the worker exits, so Finalize can wait
 	// for in-flight HTTP work to drain before returning.
@@ -855,8 +856,6 @@ func (s *chatAudioSession) renderPrompt() string {
 }
 
 func (s *chatAudioSession) appendHistory(turn chatTurn) {
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
 	s.history = append(s.history, turn)
 	// Cap at 2*historyTurns to bound memory if Finalize never runs;
 	// only the most recent historyTurns are sent on the wire anyway.
@@ -866,16 +865,12 @@ func (s *chatAudioSession) appendHistory(turn chatTurn) {
 }
 
 func (s *chatAudioSession) historySnapshot() []chatTurn {
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
 	out := make([]chatTurn, len(s.history))
 	copy(out, s.history)
 	return out
 }
 
 func (s *chatAudioSession) historyLen() int {
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
 	return len(s.history)
 }
 

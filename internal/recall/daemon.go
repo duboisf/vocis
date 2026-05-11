@@ -36,9 +36,9 @@ type Daemon struct {
 	listener   net.Listener
 
 	// Transcription is done by reusing the existing streaming client.
-	// One per daemon; requests are serialized with a mutex so we don't
-	// trample the Silero session or spawn parallel WebSocket dials.
-	transcribeMu     sync.Mutex
+	// One per daemon. No mutex: each call constructs its own
+	// chatAudioSession (no shared state), http.Client is concurrency-
+	// safe, and Lemonade handles request scheduling on its side.
 	transcribeClient *transcribe.Client
 
 	shutdownOnce sync.Once
@@ -476,18 +476,18 @@ func (d *Daemon) listSegments() []SegmentInfo {
 
 // transcribeSegment feeds a segment's PCM through the realtime
 // transcription pipeline by emulating a recorder's sample stream.
-// Serialized with a mutex so we don't run parallel transports.
+// Concurrent calls are fine: each builds its own chatAudioSession
+// (no shared state), the http.Client is concurrency-safe, and
+// Lemonade schedules requests server-side.
 //
 // ctx is the request-scoped context from handleConn — cancelling it
-// (e.g. client disconnected) propagates into the dictation session so
-// the Lemonade WebSocket tears down promptly instead of running to
-// completion with no one to receive results. The OTel span is still
-// started under ctx so it remains a root span (handleConn's ctx carries
-// no existing span), giving each pick its own trace in Jaeger.
+// (e.g. client disconnected) propagates into the dictation session
+// so the chat-audio transport tears down promptly instead of running
+// to completion with no one to receive results. The OTel span is
+// still started under ctx so it remains a root span (handleConn's
+// ctx carries no existing span), giving each pick its own trace in
+// Jaeger.
 func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bool) (string, error) {
-	d.transcribeMu.Lock()
-	defer d.transcribeMu.Unlock()
-
 	goroutinesBefore := runtime.NumGoroutine()
 
 	spanCtx, span := telemetry.StartSpan(ctx, "vocis.recall.transcribe",
@@ -528,9 +528,27 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 	d.ring.SetTranscript(id, text)
 
 	goroutinesAfter := runtime.NumGoroutine()
-	sessionlog.Infof("recall: transcribe id=%d goroutines %d→%d (Δ=%+d)",
-		id, goroutinesBefore, goroutinesAfter, goroutinesAfter-goroutinesBefore)
+	delta := goroutinesAfter - goroutinesBefore
+	if delta != 0 {
+		sessionlog.Warnf("recall: transcribe id=%d LEAKED goroutines %d→%d (Δ=%+d) — investigate, stack dump follows",
+			id, goroutinesBefore, goroutinesAfter, delta)
+		dumpGoroutineStacks()
+	} else {
+		sessionlog.Infof("recall: transcribe id=%d goroutines %d→%d (Δ=%+d)",
+			id, goroutinesBefore, goroutinesAfter, delta)
+	}
 	return text, nil
+}
+
+// dumpGoroutineStacks writes a full goroutine stack trace to the
+// session log at WARN level. Called from the leak-detection branches
+// so the next leak comes with evidence of what's parked. Capped at
+// 1 MiB to bound log growth on a goroutine-explosion scenario.
+func dumpGoroutineStacks() {
+	const maxDump = 1 << 20
+	buf := make([]byte, maxDump)
+	n := runtime.Stack(buf, true)
+	sessionlog.Warnf("goroutine stack dump (%d bytes):\n%s", n, buf[:n])
 }
 
 // ---------------------------------------------------------------------------
