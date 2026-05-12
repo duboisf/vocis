@@ -293,9 +293,21 @@ type ChatAudioConfig struct {
 	// caller packs as many segments as fit under this budget per
 	// request and sends them sequentially. Smaller = more requests
 	// but each is fast and safe; larger = fewer requests but risk
-	// hitting the model's effective context limit. 0 disables the
-	// cap (single-request mode — only safe for small windows).
+	// hitting the model's effective context limit. 0 = auto-derive
+	// from the loaded model's recipe_options.ctx_size via
+	// /api/v1/health.
 	BatchMaxAudioSeconds int `yaml:"batch_max_audio_seconds"`
+	// CtxSize requests a specific Lemonade context-window size for
+	// the loaded model. 0 (default) leaves Lemonade alone — uses
+	// whatever ctx_size the server was started with (env var
+	// LEMONADE_CTX_SIZE, recipe_options.json, CLI flag). A positive
+	// value triggers a POST to /api/v1/load at daemon startup that
+	// reloads the model with this ctx_size; the daemon skips the
+	// reload when /api/v1/health reports the current ctx_size
+	// already matches. Bigger ctx = larger batch budget (more audio
+	// fits per request) but more NPU/GPU memory pinned per model.
+	// Gemma 4 E2B/E4B's theoretical ceiling is 131072.
+	CtxSize int `yaml:"ctx_size"`
 }
 
 const (
@@ -975,6 +987,9 @@ func (c Config) Validate() error {
 		}
 		if ca.BatchMaxAudioSeconds < 0 || ca.BatchMaxAudioSeconds > 600 {
 			return errors.New("transcription.chat_audio.batch_max_audio_seconds must be between 0 and 600")
+		}
+		if ca.CtxSize < 0 || ca.CtxSize > 1048576 {
+			return errors.New("transcription.chat_audio.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
 		}
 	}
 

@@ -1,12 +1,16 @@
 package transcribe
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"vocis/internal/sessionlog"
 )
 
 // LemonadeHealth captures the subset of /api/v1/health vocis cares
@@ -159,4 +163,87 @@ func (m LemonadeModelEntry) HasLabel(label string) bool {
 		}
 	}
 	return false
+}
+
+// EnsureModelCtxSize checks Lemonade's /api/v1/health for the named
+// model's current ctx_size and reloads it via POST /api/v1/load when
+// the value doesn't match desired. Idempotent — calls /load only when
+// a reload is actually needed, so daemon-restart loops don't churn
+// the model.
+//
+// desired<=0 is a no-op (the user hasn't asked us to pin ctx_size).
+// /health failures degrade to a warn-log and return nil — we'd rather
+// proceed with whatever the model already has than refuse to start.
+// /load failures DO return the error: the caller asked for a specific
+// size, can't honor it, surfacing is the right call.
+//
+// Note the reload is slow (~5-30s on NPU) the first time it's needed.
+// Subsequent daemon starts see a matching ctx_size and skip the call.
+func EnsureModelCtxSize(ctx context.Context, baseURL, modelName string, desired int) error {
+	if desired <= 0 {
+		return nil
+	}
+	if strings.TrimSpace(modelName) == "" {
+		return fmt.Errorf("EnsureModelCtxSize: modelName is empty")
+	}
+
+	health, err := FetchLemonadeHealth(ctx, baseURL)
+	if err != nil {
+		sessionlog.Warnf("chat-audio: ctx_size pin: /health probe failed (%v) — proceeding without enforcing ctx_size=%d", err, desired)
+		return nil
+	}
+	for _, m := range health.Loaded {
+		if m.Name == modelName && m.RecipeOptions.CtxSize == desired {
+			sessionlog.Infof("chat-audio: ctx_size pin: model %q already loaded with ctx_size=%d, no reload needed",
+				modelName, desired)
+			return nil
+		}
+	}
+
+	sessionlog.Infof("chat-audio: ctx_size pin: reloading model %q with ctx_size=%d via /api/v1/load", modelName, desired)
+	return postLemonadeLoad(ctx, baseURL, modelName, desired)
+}
+
+// postLemonadeLoad triggers a model reload via Lemonade's /v1/load
+// endpoint. Documented payload accepts model_name (required) plus
+// recipe-specific options; ctx_size applies to llamacpp / FLM
+// recipes.
+func postLemonadeLoad(ctx context.Context, baseURL, modelName string, ctxSize int) error {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		return fmt.Errorf("lemonade base_url is empty")
+	}
+	url := baseURL + "/load"
+
+	body := map[string]any{
+		"model_name": modelName,
+		"ctx_size":   ctxSize,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal /load body: %w", err)
+	}
+
+	// Generous timeout — loading a model on NPU can take 30+ seconds
+	// the first time. The caller is paused on this anyway and won't
+	// proceed until the right ctx_size is in place.
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return fmt.Errorf("build /load request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+	excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("POST %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(excerpt)))
+	}
+	sessionlog.Infof("chat-audio: ctx_size pin: /load OK — %s", strings.TrimSpace(string(excerpt)))
+	return nil
 }
