@@ -534,17 +534,25 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 
 	d.ring.SetTranscript(id, text)
 
-	goroutinesAfter := runtime.NumGoroutine()
-	delta := goroutinesAfter - goroutinesBefore
+	reportGoroutineDelta(fmt.Sprintf("transcribe id=%d", id), goroutinesBefore)
+	return text, nil
+}
+
+// reportGoroutineDelta logs the change in runtime.NumGoroutine() since
+// `before` was captured. Non-zero delta is a Warn + full stack dump;
+// zero is a routine Info line. Shared by transcribeSegment and
+// transcribeBatch so any future transcribe pipeline picks up the same
+// leak instrumentation just by calling this helper.
+func reportGoroutineDelta(label string, before int) {
+	after := runtime.NumGoroutine()
+	delta := after - before
 	if delta != 0 {
-		sessionlog.Warnf("recall: transcribe id=%d LEAKED goroutines %d→%d (Δ=%+d) — investigate, stack dump follows",
-			id, goroutinesBefore, goroutinesAfter, delta)
+		sessionlog.Warnf("recall: %s LEAKED goroutines %d→%d (Δ=%+d) — investigate, stack dump follows",
+			label, before, after, delta)
 		dumpGoroutineStacks()
 	} else {
-		sessionlog.Infof("recall: transcribe id=%d goroutines %d→%d (Δ=%+d)",
-			id, goroutinesBefore, goroutinesAfter, delta)
+		sessionlog.Infof("recall: %s goroutines %d→%d (Δ=%+d)", label, before, after, delta)
 	}
-	return text, nil
 }
 
 // dumpGoroutineStacks writes a full goroutine stack trace to the

@@ -232,16 +232,6 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 	}
 	span.SetAttributes(attribute.Int("transcript.length", len(text)))
 
-	goroutinesAfter := runtime.NumGoroutine()
-	delta := goroutinesAfter - goroutinesBefore
-	if delta != 0 {
-		sessionlog.Warnf("recall: batch transcribe done ids=%v text_len=%d LEAKED goroutines %d→%d (Δ=%+d) — investigate, stack dump follows",
-			idsCopy, len(text), goroutinesBefore, goroutinesAfter, delta)
-		dumpGoroutineStacks()
-	} else {
-		sessionlog.Infof("recall: batch transcribe done ids=%v text_len=%d goroutines %d→%d (Δ=%+d)",
-			idsCopy, len(text), goroutinesBefore, goroutinesAfter, delta)
-	}
-
+	reportGoroutineDelta(fmt.Sprintf("batch transcribe done ids=%v text_len=%d", idsCopy, len(text)), goroutinesBefore)
 	return text, nil
 }
