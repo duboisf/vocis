@@ -5,17 +5,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"vocis/internal/config"
 	"vocis/internal/transcribe"
 	"vocis/internal/recorder"
 	"vocis/internal/sessionlog"
-	"vocis/internal/telemetry"
 )
 
 var (
@@ -46,29 +42,11 @@ func init() {
 }
 
 func runTranscribe() error {
-	session, err := sessionlog.Start()
+	cfg, ctx, cleanup, err := bootCLIWithTelemetry("transcribe")
 	if err != nil {
 		return err
 	}
-	defer session.Close()
-
-	cfg, path, err := config.Load()
-	if err != nil {
-		return err
-	}
-	if err := cfg.Validate(); err != nil {
-		return err
-	}
-	sessionlog.Infof("vocis %s transcribe (config=%s)", version, path)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	shutdownTelemetry, err := telemetry.Init(ctx, cfg.Telemetry, version)
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownTelemetry(context.Background())
+	defer cleanup()
 
 	// Pin Lemonade's ctx_size if the user requested one. Runs BEFORE
 	// we open the mic so we don't record into a void while Lemonade

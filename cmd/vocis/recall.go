@@ -20,7 +20,6 @@ import (
 	"vocis/internal/config"
 	"vocis/internal/recall"
 	"vocis/internal/sessionlog"
-	"vocis/internal/telemetry"
 )
 
 var (
@@ -185,26 +184,11 @@ func init() {
 }
 
 func runRecallStart() error {
-	session, err := sessionlog.Start()
+	cfg, ctx, cleanup, err := bootCLIWithTelemetry("recall start")
 	if err != nil {
 		return err
 	}
-	defer session.Close()
-
-	cfg, path, err := config.Load()
-	if err != nil {
-		return err
-	}
-	sessionlog.Infof("vocis %s recall start (config=%s)", version, path)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	shutdownTelemetry, err := telemetry.Init(ctx, cfg.Telemetry, version)
-	if err != nil {
-		return fmt.Errorf("init telemetry: %w", err)
-	}
-	defer shutdownTelemetry(context.Background())
+	defer cleanup()
 
 	d := recall.NewDaemon(recall.DaemonOpts{Config: cfg})
 	fmt.Fprintln(os.Stderr, "recall daemon started — speak normally; use `vocis recall pick` from another terminal to transcribe a segment")

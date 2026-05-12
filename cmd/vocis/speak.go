@@ -14,8 +14,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"vocis/internal/config"
-	"vocis/internal/sessionlog"
 	"vocis/internal/tts"
 )
 
@@ -61,17 +59,11 @@ func init() {
 }
 
 func runSpeak(args []string) error {
-	session, err := sessionlog.Start()
+	cfg, session, err := bootCLI("speak")
 	if err != nil {
 		return err
 	}
 	defer session.Close()
-
-	cfg, path, err := config.Load()
-	if err != nil {
-		return err
-	}
-	sessionlog.Infof("vocis %s speak (config=%s)", version, path)
 
 	text, err := resolveSpeakText(args)
 	if err != nil {
