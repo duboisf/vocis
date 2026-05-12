@@ -472,7 +472,7 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 // streams (when streamSSE is on). Multi-clip chunks (force-cut
 // batches) produce one POST with N input_audio parts and skip
 // few-shot history — the audio itself IS the cross-chunk context.
-func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16) (string, error) {
+func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16) (text string, err error) {
 	var totalSamples int
 	wavs := make([][]byte, len(clips))
 	for i, c := range clips {
@@ -484,7 +484,10 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16)
 		attribute.Int("chunk.total_samples", totalSamples),
 		attribute.Int("chunk.duration_ms", totalSamples*1000/s.sampleRate),
 	)
-	defer telemetry.EndSpan(span, nil)
+	defer func() {
+		span.SetAttributes(attribute.String("chunk.response_text", text))
+		telemetry.EndSpan(span, err)
+	}()
 
 	messages := s.buildMessages(wavs)
 	body := map[string]any{
@@ -500,9 +503,24 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16)
 	for _, w := range wavs {
 		totalWAVBytes += len(w)
 	}
+	// Mirror buildMessages' trimming so the trace reflects what's
+	// actually on the wire (multi-clip drops history; otherwise the
+	// last historyTurns turns).
+	priorOnWire := s.historySnapshot()
+	if len(clips) > 1 {
+		priorOnWire = nil
+	} else if s.historyTurns < len(priorOnWire) {
+		priorOnWire = priorOnWire[len(priorOnWire)-s.historyTurns:]
+	}
+	priorTranscripts := make([]string, len(priorOnWire))
+	for i, t := range priorOnWire {
+		priorTranscripts[i] = t.transcript
+	}
 	span.SetAttributes(
 		attribute.Int("chunk.wav_bytes", totalWAVBytes),
 		attribute.Int("chunk.history_turns", s.historyLen()),
+		attribute.Int("chunk.history_sent_turns", len(priorOnWire)),
+		attribute.StringSlice("chunk.history_transcripts", priorTranscripts),
 		attribute.Int("chunk.request_bytes", len(raw)),
 	)
 	sessionlog.Infof("chat-audio: posting chunk clips=%d wav=%dB history=%d req=%dB",
@@ -531,8 +549,7 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("chat-audio HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(excerpt)))
+		return "", fmt.Errorf("chat-audio HTTP %d: %s", resp.StatusCode, httpBodyExcerpt(resp))
 	}
 
 	if s.streamSSE {
@@ -1220,8 +1237,7 @@ func (c *Client) transcribeBatchSub(ctx context.Context, endpoint string, index,
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("batch %d/%d HTTP %d: %s", index, total, resp.StatusCode, strings.TrimSpace(string(excerpt)))
+		return "", fmt.Errorf("batch %d/%d HTTP %d: %s", index, total, resp.StatusCode, httpBodyExcerpt(resp))
 	}
 	text, err := readChatCompletion(resp.Body)
 	if err != nil {

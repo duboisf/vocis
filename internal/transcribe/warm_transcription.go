@@ -1,12 +1,8 @@
 package transcribe
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -24,36 +20,25 @@ import (
 // model load on NPU can run several seconds, plus possible queueing
 // behind a current-loaded model swap.
 func LoadLemonadeModel(ctx context.Context, baseURL, model string) error {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if baseURL == "" {
-		return fmt.Errorf("base url is empty")
-	}
 	if strings.TrimSpace(model) == "" {
 		return fmt.Errorf("model name is empty")
+	}
+	url, err := lemonadeURL(baseURL, "/load")
+	if err != nil {
+		return err
 	}
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 	}
-	raw, err := json.Marshal(map[string]string{"model_name": model})
+	resp, err := postJSON(ctx, nil, url, map[string]string{"model_name": model})
 	if err != nil {
-		return fmt.Errorf("marshal /load body: %w", err)
-	}
-	url := baseURL + "/load"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
-	if err != nil {
-		return fmt.Errorf("build /load request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("POST %s: %w", url, err)
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("POST %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return fmt.Errorf("POST %s: status %d: %s", url, resp.StatusCode, httpBodyExcerpt(resp))
 	}
 	sessionlog.Debugf("lemonade /load %s ok", model)
 	return nil

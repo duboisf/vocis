@@ -1,12 +1,8 @@
 package transcribe
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -53,30 +49,15 @@ type LemonadeRecipeOptions struct {
 // response indicates Lemonade is busy loading something else, which
 // we'd rather surface than hide behind a retry.
 func FetchLemonadeHealth(ctx context.Context, baseURL string) (LemonadeHealth, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if baseURL == "" {
-		return LemonadeHealth{}, fmt.Errorf("lemonade base_url is empty")
+	url, err := lemonadeURL(baseURL, "/health")
+	if err != nil {
+		return LemonadeHealth{}, err
 	}
-	url := baseURL + "/health"
-
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return LemonadeHealth{}, fmt.Errorf("build request: %w", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return LemonadeHealth{}, fmt.Errorf("GET %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return LemonadeHealth{}, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
-	}
 	var out LemonadeHealth
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return LemonadeHealth{}, fmt.Errorf("decode health: %w", err)
+	if err := getJSON(ctx, url, &out); err != nil {
+		return LemonadeHealth{}, err
 	}
 	return out, nil
 }
@@ -119,32 +100,17 @@ type LemonadeModelEntry struct {
 // catalog (caller decides whether that's fatal — typically it isn't,
 // because user-pulled models lag the built-in catalog).
 func FetchLemonadeModel(ctx context.Context, baseURL, modelID string) (*LemonadeModelEntry, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if baseURL == "" {
-		return nil, fmt.Errorf("lemonade base_url is empty")
+	url, err := lemonadeURL(baseURL, "/models")
+	if err != nil {
+		return nil, err
 	}
-	url := baseURL + "/models"
-
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
-	}
 	var payload struct {
 		Data []LemonadeModelEntry `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, fmt.Errorf("decode models: %w", err)
+	if err := getJSON(ctx, url, &payload); err != nil {
+		return nil, err
 	}
 	for i := range payload.Data {
 		if payload.Data[i].ID == modelID {
@@ -238,41 +204,28 @@ func EnsureModelCtxSize(ctx context.Context, baseURL, modelName string, desired 
 // recipe-specific options; ctx_size applies to llamacpp / FLM
 // recipes.
 func postLemonadeLoad(ctx context.Context, baseURL, modelName string, ctxSize int) error {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if baseURL == "" {
-		return fmt.Errorf("lemonade base_url is empty")
-	}
-	url := baseURL + "/load"
-
-	body := map[string]any{
-		"model_name": modelName,
-		"ctx_size":   ctxSize,
-	}
-	raw, err := json.Marshal(body)
+	url, err := lemonadeURL(baseURL, "/load")
 	if err != nil {
-		return fmt.Errorf("marshal /load body: %w", err)
+		return err
 	}
-
 	// Generous timeout — loading a model on NPU can take 30+ seconds
 	// the first time. The caller is paused on this anyway and won't
 	// proceed until the right ctx_size is in place.
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	resp, err := postJSON(ctx, nil, url, map[string]any{
+		"model_name": modelName,
+		"ctx_size":   ctxSize,
+	})
 	if err != nil {
-		return fmt.Errorf("build /load request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("POST %s: %w", url, err)
+		return err
 	}
 	defer resp.Body.Close()
-	excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	excerpt := httpBodyExcerpt(resp)
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("POST %s: status %d: %s", url, resp.StatusCode, strings.TrimSpace(string(excerpt)))
+		return fmt.Errorf("POST %s: status %d: %s", url, resp.StatusCode, excerpt)
 	}
-	sessionlog.Infof("chat-audio: ctx_size pin: /load OK — %s", strings.TrimSpace(string(excerpt)))
+	sessionlog.Infof("chat-audio: ctx_size pin: /load OK — %s", excerpt)
 	return nil
 }
