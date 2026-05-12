@@ -55,6 +55,7 @@ type chatAudioSession struct {
 	minChunkPeak         float64
 	minChunkRMS          float64
 	extraSystemPrompt    string
+	batchUntilRelease    bool
 
 	// Audio assumptions: PCM16 mono at this sample rate. Lemonade's
 	// gemma audio path expects 16 kHz; the recorder already produces
@@ -153,6 +154,7 @@ func startChatAudioSession(
 		minChunkPeak:         cfg.ChatAudio.MinChunkPeak,
 		minChunkRMS:          cfg.ChatAudio.MinChunkRMS,
 		extraSystemPrompt:    opts.ExtraSystemPrompt,
+		batchUntilRelease:    cfg.ChatAudio.BatchUntilRelease,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		events:               make(chan DictationEvent, 16),
@@ -164,8 +166,8 @@ func startChatAudioSession(
 	}
 	s.liveSegments.Store(true)
 
-	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t context_mode=%s",
-		s.model, chunkMax, s.historyTurns, s.streamSSE, s.contextMode)
+	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t context_mode=%s batch_until_release=%t",
+		s.model, chunkMax, s.historyTurns, s.streamSSE, s.contextMode, s.batchUntilRelease)
 
 	// "Connection ready" is synthetic for the chat-audio backend — there
 	// is no upfront handshake to await. The run goroutine fires
@@ -352,6 +354,22 @@ func (s *chatAudioSession) run(
 			if vad != nil {
 				if evt := vad.Feed(chunk); evt == VADSpeechStopped {
 					vad.Reset()
+					if s.batchUntilRelease {
+						// Stash the speech episode into the pending
+						// batch instead of POSTing it. The trailing
+						// flush at hotkey release sends everything as
+						// one multi-clip request — see the comment on
+						// pendingForceCuts above.
+						if len(buf) > 0 {
+							clip := make([]int16, len(buf))
+							copy(clip, buf)
+							buf = buf[:0]
+							pendingForceCuts = append(pendingForceCuts, clip)
+							sessionlog.Debugf("chat-audio: vad_stopped batched (batch_until_release) clips=%d clip_ms=%d",
+								len(pendingForceCuts), len(clip)*1000/s.sampleRate)
+						}
+						continue
+					}
 					flush("vad_stopped", false)
 					continue
 				}

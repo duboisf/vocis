@@ -100,6 +100,15 @@ transcription:
     # arm of the check.
     min_chunk_peak: 0.02
     min_chunk_rms: 0.005
+    # batch_until_release: when true, Silero still trims dead air between
+    # speech episodes, but each VAD-stopped flush gets stashed instead of
+    # POSTed. Only the trailing flush at hotkey release fires the request
+    # — as one multi-clip POST covering the whole utterance. Trade-off:
+    # no live overlay partials during dictation (one paste at the end).
+    # Wins: model sees the full utterance as one continuous thing so
+    # punctuation/casing don't break across mid-phrase pauses, and the
+    # few-shot history is moot for the single request.
+    batch_until_release: false
     # NOTE: when postprocess.enabled is true, vocis automatically folds
     # postprocess.prompt into the chat-audio system message and skips
     # the separate /chat/completions cleanup call. The same Gemma model

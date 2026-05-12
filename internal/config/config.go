@@ -308,6 +308,19 @@ type ChatAudioConfig struct {
 	// fits per request) but more NPU/GPU memory pinned per model.
 	// Gemma 4 E2B/E4B's theoretical ceiling is 131072.
 	CtxSize int `yaml:"ctx_size"`
+	// BatchUntilRelease changes the chat-audio chunking policy: Silero
+	// still trims dead air between speech episodes, but each
+	// speech_stopped flush stashes the clip into the pending batch
+	// instead of POSTing immediately. Only the trailing flush at
+	// hotkey release (or a chunk_max_seconds force-cut spillover)
+	// actually sends — as one multi-clip request covering the whole
+	// utterance. Trade-off: no live overlay partials during dictation,
+	// one paste at the end. Wins: model sees the full utterance as one
+	// continuous thing so punctuation/casing don't break across
+	// pauses, and history (which was the source of mid-phrase
+	// regressions) is moot for the single request. Default false
+	// preserves the per-pause request behavior.
+	BatchUntilRelease bool `yaml:"batch_until_release"`
 }
 
 const (
