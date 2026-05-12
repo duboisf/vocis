@@ -285,6 +285,17 @@ type ChatAudioConfig struct {
 	// tweak formatting or per-language rules. {language} expands to
 	// Language at send time.
 	BatchPrompt string `yaml:"batch_prompt"`
+	// BatchMaxAudioSeconds caps the total audio duration packed into
+	// one /chat/completions request when `recall last` has more audio
+	// than fits in a single shot. Gemma's audio inputs are capped at
+	// ~30s each AND the model degrades with too many multimodal
+	// inputs at once, so a multi-minute window has to be split. The
+	// caller packs as many segments as fit under this budget per
+	// request and sends them sequentially. Smaller = more requests
+	// but each is fast and safe; larger = fewer requests but risk
+	// hitting the model's effective context limit. 0 disables the
+	// cap (single-request mode — only safe for small windows).
+	BatchMaxAudioSeconds int `yaml:"batch_max_audio_seconds"`
 }
 
 const (
@@ -562,7 +573,13 @@ func Default() Config {
 				// hum / room tone but keeps quiet speech.
 				MinChunkPeak: 0.02,
 				MinChunkRMS:  0.005,
-				BatchPrompt:  DefaultBatchPrompt,
+				BatchPrompt: DefaultBatchPrompt,
+				// 0 = auto: query Lemonade /api/v1/health for the loaded
+				// model's recipe_options.ctx_size and compute a safe
+				// audio-seconds budget from it (Gemma audio costs 6.25
+				// tokens/s per the USM encoder spec). Override with a
+				// positive number to pin the budget.
+				BatchMaxAudioSeconds: 0,
 			},
 		},
 		Recording: RecordingConfig{
@@ -952,6 +969,12 @@ func (c Config) Validate() error {
 		}
 		if ca.MinChunkRMS < 0 || ca.MinChunkRMS > 1 {
 			return errors.New("transcription.chat_audio.min_chunk_rms must be between 0 and 1")
+		}
+		if strings.TrimSpace(ca.BatchPrompt) == "" {
+			return errors.New("transcription.chat_audio.batch_prompt must not be empty")
+		}
+		if ca.BatchMaxAudioSeconds < 0 || ca.BatchMaxAudioSeconds > 600 {
+			return errors.New("transcription.chat_audio.batch_max_audio_seconds must be between 0 and 600")
 		}
 	}
 

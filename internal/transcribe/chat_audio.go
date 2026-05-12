@@ -1016,15 +1016,79 @@ type BatchSegment struct {
 	CapturedAt time.Time
 }
 
-// TranscribeBatchAudios sends every segment to /chat/completions as a
-// single request with one input_audio part per segment, labelled with
-// its capture timestamp. The model is asked (via BatchPrompt) to
-// produce one line per segment in the form `HH:MM:SS\t<transcript>`.
+// resolveBatchBudget returns the per-request audio-duration cap (in
+// seconds) and a label describing where the value came from. When the
+// user has pinned ChatAudio.BatchMaxAudioSeconds, that value is used
+// verbatim. When it's 0, we query Lemonade /api/v1/health for the
+// loaded model's recipe_options.ctx_size and compute a safe budget:
+//
+//   - Audio costs 6.25 tokens per second (Gemma 3n/4 USM encoder
+//     produces one token per 160ms frame — documented by Google).
+//   - Reserve 60% of context for non-audio overhead: system prompt
+//     (~200 tokens), per-segment labels (~10 tok each, and there can
+//     be 50+ on a multi-minute window of small VAD segments), and
+//     the model's reply. We saw an 80-segment request fail at
+//     ~4175 tokens against a 4096 ctx; tighter reservation prevents
+//     that recurring.
+//   - Floor of 10s so a tiny ctx_size still does something useful.
+//
+// On /health failure we fall back to 30 s — matches Gemma's per-clip
+// cap and is safe for any reasonable model.
+func (c *Client) resolveBatchBudget(ctx context.Context) (int, string) {
+	if pinned := c.cfg.ChatAudio.BatchMaxAudioSeconds; pinned > 0 {
+		return pinned, "config"
+	}
+	const (
+		audioTokensPerSec = 6.25
+		audioFraction     = 0.40 // 40% of ctx for audio, 60% for prompt + labels + response
+		fallback          = 30
+		floor             = 10
+	)
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	health, err := FetchLemonadeHealth(probeCtx, c.cfg.BaseURL)
+	if err != nil {
+		sessionlog.Warnf("chat-audio: batch budget falling back to %ds (health probe failed: %v)", fallback, err)
+		return fallback, "fallback_health_err"
+	}
+	var ctxSize int
+	for _, m := range health.Loaded {
+		if m.Name == c.cfg.Model && m.RecipeOptions.CtxSize > 0 {
+			ctxSize = m.RecipeOptions.CtxSize
+			break
+		}
+	}
+	if ctxSize <= 0 {
+		sessionlog.Warnf("chat-audio: batch budget falling back to %ds (no ctx_size for model %q in /health)", fallback, c.cfg.Model)
+		return fallback, "fallback_no_ctx_size"
+	}
+	budget := int(float64(ctxSize) * audioFraction / audioTokensPerSec)
+	if budget < floor {
+		budget = floor
+	}
+	sessionlog.Infof("chat-audio: batch budget auto=%ds (ctx_size=%d, %.0f%% reserved for audio at %.2f tok/s)",
+		budget, ctxSize, audioFraction*100, audioTokensPerSec)
+	return budget, "auto_from_ctx_size"
+}
+
+// TranscribeBatchAudios sends a sequence of segments to
+// /chat/completions, packing as many segments as fit under the
+// configured BatchMaxAudioSeconds budget into each request. Each
+// segment is sent as its own labelled input_audio part; the model is
+// asked (via BatchPrompt) to produce one line per segment in the form
+// `HH:MM:SS\t<transcript>`. Sub-batch responses are concatenated with
+// newlines in input order.
+//
+// Why we split: Gemma's audio inputs are individually capped at ~30s
+// AND the model degrades when given many multimodal inputs at once.
+// A multi-minute window cannot be sent as a single request. The
+// audio-duration budget is the conservative knob — pack small until
+// the user finds a number their model handles reliably.
 //
 // Unlike StartDictation, there is no streaming pump, no VAD, no
 // chunk_max splitting, and no few-shot history — the segments
-// themselves are the input, the response is the output. Postprocess
-// is not run; the batch prompt already produces cleaned text.
+// themselves are the input. Postprocess is not run; the batch prompt
+// already produces cleaned text.
 func (c *Client) TranscribeBatchAudios(ctx context.Context, segments []BatchSegment) (string, error) {
 	if len(segments) == 0 {
 		return "", errors.New("transcribe batch: no segments")
@@ -1033,19 +1097,84 @@ func (c *Client) TranscribeBatchAudios(ctx context.Context, segments []BatchSegm
 	if err != nil {
 		return "", err
 	}
+	for i, seg := range segments {
+		if seg.SampleRate <= 0 {
+			return "", fmt.Errorf("batch segment %d: invalid sample_rate=%d", i, seg.SampleRate)
+		}
+	}
+
+	budgetSeconds, budgetSource := c.resolveBatchBudget(ctx)
+	subBatches := packBatchSegments(segments, budgetSeconds)
 
 	ctx, span := telemetry.StartSpan(ctx, "vocis.transcribe.chat_audio.batch",
 		attribute.Int("batch.segment_count", len(segments)),
+		attribute.Int("batch.sub_batch_count", len(subBatches)),
+		attribute.Int("batch.max_audio_seconds", budgetSeconds),
+		attribute.String("batch.budget_source", budgetSource),
+	)
+	defer telemetry.EndSpan(span, nil)
+
+	sessionlog.Infof("chat-audio: batch start segments=%d sub_batches=%d max_audio_s=%d budget_source=%s",
+		len(segments), len(subBatches), budgetSeconds, budgetSource)
+
+	results := make([]string, 0, len(subBatches))
+	for i, batch := range subBatches {
+		text, err := c.transcribeBatchSub(ctx, endpoint, i+1, len(subBatches), batch)
+		if err != nil {
+			return "", err
+		}
+		results = append(results, strings.TrimRight(text, "\n"))
+	}
+	return strings.Join(results, "\n"), nil
+}
+
+// packBatchSegments greedily groups consecutive segments into
+// sub-batches whose accumulated audio duration stays under
+// budgetSeconds. A segment that alone exceeds the budget still gets
+// its own sub-batch — splitting one segment further would lose its
+// timestamp boundary, and the user's chunk_max_seconds already caps
+// individual segments below Gemma's per-input limit. budgetSeconds<=0
+// means "single sub-batch with everything" (use with caution).
+func packBatchSegments(segments []BatchSegment, budgetSeconds int) [][]BatchSegment {
+	if budgetSeconds <= 0 {
+		return [][]BatchSegment{segments}
+	}
+	var out [][]BatchSegment
+	var current []BatchSegment
+	var currentSamples int
+	for _, seg := range segments {
+		segSamples := len(seg.PCM)
+		budgetSamples := budgetSeconds * seg.SampleRate
+		// Flush current if adding this segment would overflow AND
+		// current already has something. A single oversize segment
+		// goes alone in its own sub-batch on the next iteration.
+		if currentSamples+segSamples > budgetSamples && len(current) > 0 {
+			out = append(out, current)
+			current = nil
+			currentSamples = 0
+		}
+		current = append(current, seg)
+		currentSamples += segSamples
+	}
+	if len(current) > 0 {
+		out = append(out, current)
+	}
+	return out
+}
+
+// transcribeBatchSub posts one sub-batch and returns its text.
+func (c *Client) transcribeBatchSub(ctx context.Context, endpoint string, index, total int, segments []BatchSegment) (string, error) {
+	ctx, span := telemetry.StartSpan(ctx, "vocis.transcribe.chat_audio.batch_sub",
+		attribute.Int("sub.index", index),
+		attribute.Int("sub.total", total),
+		attribute.Int("sub.segment_count", len(segments)),
 	)
 	defer telemetry.EndSpan(span, nil)
 
 	systemPrompt := strings.ReplaceAll(c.cfg.ChatAudio.BatchPrompt, "{language}", c.cfg.ChatAudio.Language)
 	parts := make([]map[string]any, 0, 2*len(segments))
-	var totalWAVBytes int
+	var totalWAVBytes, totalSamples int
 	for i, seg := range segments {
-		if seg.SampleRate <= 0 {
-			return "", fmt.Errorf("batch segment %d: invalid sample_rate=%d", i, seg.SampleRate)
-		}
 		wav := encodePCM16WAV(seg.PCM, seg.SampleRate)
 		label := fmt.Sprintf("[clip %d captured at %s]:", i+1, seg.CapturedAt.Format("15:04:05"))
 		parts = append(parts,
@@ -1053,50 +1182,52 @@ func (c *Client) TranscribeBatchAudios(ctx context.Context, segments []BatchSegm
 			audioPart(wav),
 		)
 		totalWAVBytes += len(wav)
+		totalSamples += len(seg.PCM)
 	}
+	audioSeconds := float64(totalSamples) / float64(segments[0].SampleRate)
 	body := map[string]any{
 		"model": c.cfg.Model,
 		"messages": []map[string]any{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": parts},
 		},
-		// No SSE for batch: we want the full response in one shot, no
-		// per-token overlay updates make sense here.
 		"stream": false,
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("marshal batch request: %w", err)
+		return "", fmt.Errorf("marshal batch sub-request %d/%d: %w", index, total, err)
 	}
 	span.SetAttributes(
-		attribute.Int("batch.wav_bytes", totalWAVBytes),
-		attribute.Int("batch.request_bytes", len(raw)),
+		attribute.Int("sub.wav_bytes", totalWAVBytes),
+		attribute.Int("sub.request_bytes", len(raw)),
+		attribute.Float64("sub.audio_seconds", audioSeconds),
 	)
-	sessionlog.Infof("chat-audio: batch POST segments=%d wav=%dB req=%dB",
-		len(segments), totalWAVBytes, len(raw))
+	sessionlog.Infof("chat-audio: batch POST %d/%d segments=%d audio=%.2fs wav=%dB req=%dB",
+		index, total, len(segments), audioSeconds, totalWAVBytes, len(raw))
 	if redacted, err := redactedRequestJSON(body); err == nil {
-		sessionlog.Debugf("chat-audio: batch request body (audio redacted) → %s", redacted)
+		sessionlog.Debugf("chat-audio: batch %d/%d request body (audio redacted) → %s", index, total, redacted)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
-		return "", fmt.Errorf("build batch request: %w", err)
+		return "", fmt.Errorf("build batch sub-request %d/%d: %w", index, total, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("post batch: %w", err)
+		return "", fmt.Errorf("post batch %d/%d: %w", index, total, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("batch HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(excerpt)))
+		return "", fmt.Errorf("batch %d/%d HTTP %d: %s", index, total, resp.StatusCode, strings.TrimSpace(string(excerpt)))
 	}
 	text, err := readChatCompletion(resp.Body)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("batch %d/%d: %w", index, total, err)
 	}
-	span.SetAttributes(attribute.Int("batch.response_length", len(text)))
+	span.SetAttributes(attribute.Int("sub.response_length", len(text)))
+	sessionlog.Infof("chat-audio: batch RESP %d/%d chars=%d", index, total, len(text))
 	return text, nil
 }

@@ -24,11 +24,22 @@ type LemonadeHealth struct {
 }
 
 type LemonadeLoadedModel struct {
-	Name       string `json:"model_name"`
-	Type       string `json:"type"` // audio | llm | tts | embedding | ...
-	Device     string `json:"device"`
-	Recipe     string `json:"recipe"`
-	Checkpoint string `json:"checkpoint"`
+	Name       string                       `json:"model_name"`
+	Type       string                       `json:"type"` // audio | llm | tts | embedding | ...
+	Device     string                       `json:"device"`
+	Recipe     string                       `json:"recipe"`
+	Checkpoint string                       `json:"checkpoint"`
+	// RecipeOptions surfaces runtime knobs the recipe was loaded with.
+	// CtxSize is the only field vocis currently reads — it's the actual
+	// prompt-token budget the model will accept, which can be MUCH
+	// smaller than the model's theoretical max_context_window (an FLM
+	// recipe on an NPU typically pins it to 4096 even when the model
+	// itself supports 128K).
+	RecipeOptions LemonadeRecipeOptions `json:"recipe_options"`
+}
+
+type LemonadeRecipeOptions struct {
+	CtxSize int `json:"ctx_size"`
 }
 
 // FetchLemonadeHealth returns the parsed /api/v1/health payload for the
