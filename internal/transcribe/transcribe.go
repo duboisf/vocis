@@ -798,6 +798,16 @@ type DictationEvent struct {
 
 type FinalizeResult struct {
 	Text string
+	// RetractFromLivePrevLen, when > 0, is the rune count the caller
+	// must strip from its already-emitted live text (the running
+	// concatenation of DictationEventSegment/ReplaceSegment events)
+	// before concatenating Text. Used by the chat-audio
+	// continuation_rebatch path when a rebatch fires AFTER liveSegments
+	// flipped to false: the prior segment lives in the caller's
+	// liveText (it was emitted before Finalize), not in the
+	// trailing-collector's buffer, so the retraction has to be
+	// forwarded up here for the caller to apply.
+	RetractFromLivePrevLen int
 }
 
 // Dictation is the surface every backend's session must expose to the

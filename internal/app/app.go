@@ -644,6 +644,26 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	sessionlog.Infof("finalization completed elapsed=%s", finalizeDuration)
 	trailing := strings.TrimSpace(result.Text)
 
+	// Apply any rebatch retraction that the backend couldn't absorb
+	// into its trailing buffer (because the prior emitted segment
+	// lives in state.liveText, not in trailing — happens when a
+	// chat-audio continuation_rebatch fires DURING Finalize on the
+	// last segment that was emitted live).
+	if result.RetractFromLivePrevLen > 0 {
+		runes := []rune(state.liveText)
+		if result.RetractFromLivePrevLen <= len(runes) {
+			state.liveText = string(runes[:len(runes)-result.RetractFromLivePrevLen])
+		} else {
+			state.liveText = ""
+		}
+		if i := strings.LastIndex(state.displayText, "\n"); i >= 0 {
+			state.displayText = state.displayText[:i]
+		} else {
+			state.displayText = ""
+		}
+		sessionlog.Infof("rebatch retraction applied to live buffer: prev_runes=%d", result.RetractFromLivePrevLen)
+	}
+
 	text := state.liveText
 	if trailing != "" {
 		if text == "" {

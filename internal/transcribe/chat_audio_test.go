@@ -674,6 +674,97 @@ func TestChatAudioSessionContinuationRebatch(t *testing.T) {
 	}
 }
 
+// TestChatAudioSessionContinuationRebatchPostFinalizeRetractsFromLive
+// regression: when the prior segment was emitted on the events channel
+// (i.e. before liveSegments flipped to false) and the trailing flush
+// triggers a rebatch, the worker emits the result via the finals queue
+// because liveSegments is now false. The trailing-collector can't
+// absorb a retraction against its empty buffer, so the unapplied
+// retraction must be forwarded up via FinalizeResult.RetractFromLivePrevLen
+// for the caller to strip from its already-emitted live text. Without
+// this plumbing, the prior broken segment stays in liveText and the
+// unified rebatch text is appended ON TOP, double-pasting the prefix.
+func TestChatAudioSessionContinuationRebatchPostFinalizeRetractsFromLive(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"alpha beta gamma.\"}}]}\n\n")
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	cfg := config.TranscriptionConfig{
+		Backend: config.BackendLemonadeChat,
+		BaseURL: server.URL + "/api/v1",
+		Model:   "gemma-test",
+		ChatAudio: config.ChatAudioConfig{
+			ChunkMaxSeconds:     10,
+			HistoryTurns:        2,
+			Prompt:              "Transcribe.",
+			Language:            "en",
+			Stream:              true,
+			ContinuationRebatch: true,
+		},
+	}
+	samples := make(chan []int16, 1)
+	opts := DictationOpts{
+		SampleRate: 8000,
+		Channels:   1,
+		Samples:    samples,
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, httpClient, opts)
+	if err != nil {
+		t.Fatalf("startChatAudioSession: %v", err)
+	}
+
+	// Seed history with an unfinished prior segment as if it had been
+	// emitted live earlier in the session. lastEmittedFormatted
+	// reflects the runes the caller (app.go) already added to its
+	// liveText: " alpha beta" (12 runes, including leading space).
+	priorPCM := make([]int16, 8000)
+	for i := range priorPCM {
+		priorPCM[i] = 1000
+	}
+	session.history = []chatTurn{{
+		pcm:        priorPCM,
+		wav:        encodePCM16WAV(priorPCM, 8000),
+		transcript: "alpha beta",
+	}}
+	session.lastEmittedFormatted = " alpha beta"
+
+	// Push the chunk THEN immediately close samples so the trailing
+	// flush fires before any non-trailing chunk is processed. Worker
+	// will see liveSegments=false at processing time (Finalize flipped
+	// it), so the rebatch result goes through the finals queue.
+	chunk := make([]int16, 8000)
+	for i := range chunk {
+		chunk[i] = 2000
+	}
+	samples <- chunk
+	close(samples)
+
+	finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := session.Finalize(finalCtx)
+	if err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	const priorEmittedRunes = 11 // " alpha beta"
+	if result.RetractFromLivePrevLen != priorEmittedRunes {
+		t.Fatalf("RetractFromLivePrevLen=%d want %d (the prior segment's rune count)",
+			result.RetractFromLivePrevLen, priorEmittedRunes)
+	}
+	if !strings.Contains(result.Text, "alpha beta gamma.") {
+		t.Fatalf("trailing text=%q want unified transcript", result.Text)
+	}
+	if strings.Count(result.Text, "alpha") != 1 {
+		t.Fatalf("trailing text=%q has %d occurrences of 'alpha' want 1 (no duplication)",
+			result.Text, strings.Count(result.Text, "alpha"))
+	}
+}
+
 // TestChatAudioSessionDropsSilentChunk verifies the energy gate
 // prevents a chunk of all-zero PCM from ever reaching the model. This
 // is the defense against Gemma hallucinating a long "I cannot

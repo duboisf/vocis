@@ -226,6 +226,7 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 	defer telemetry.EndSpan(collectSpan, nil)
 
 	var trailing string
+	var retractFromLive int
 	for {
 		select {
 		case <-ctx.Done():
@@ -235,19 +236,30 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 			return FinalizeResult{}, collectCtx.Err()
 		case res, ok := <-s.finals:
 			if !ok {
-				return FinalizeResult{Text: trailing}, nil
+				return FinalizeResult{Text: trailing, RetractFromLivePrevLen: retractFromLive}, nil
 			}
 			if res.err != nil {
 				return FinalizeResult{}, res.err
 			}
 			if res.replacePrevLen > 0 {
 				// Continuation rebatch lands after liveSegments was
-				// flipped to false — retract the last appended chunk
-				// of `trailing` (PrevLen runes) and replace with the
-				// unified text.
+				// flipped to false. Try to retract from the
+				// trailing-collector's buffer first; any portion of
+				// the retraction that doesn't fit (because the prior
+				// emitted segment lives in the caller's liveText
+				// rather than in trailing) is forwarded up via
+				// RetractFromLivePrevLen so the caller strips it from
+				// its own buffer before joining.
 				runes := []rune(trailing)
-				if res.replacePrevLen <= len(runes) {
-					trailing = string(runes[:len(runes)-res.replacePrevLen])
+				applied := res.replacePrevLen
+				if applied > len(runes) {
+					applied = len(runes)
+				}
+				if applied > 0 {
+					trailing = string(runes[:len(runes)-applied])
+				}
+				if remainder := res.replacePrevLen - applied; remainder > 0 {
+					retractFromLive += remainder
 				}
 			}
 			trailing += res.text
