@@ -184,10 +184,9 @@ const (
 )
 
 type TranscriptionConfig struct {
-	Backend     string `yaml:"backend"`
-	BaseURL     string `yaml:"base_url"`
-	RealtimeURL string `yaml:"realtime_url"`
-	Model       string `yaml:"model"`
+	Backend string `yaml:"backend"`
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
 	Language    string `yaml:"language"`
 	PromptHint  string `yaml:"prompt_hint"`
 	// RequestLimit is the HTTP request timeout (seconds) applied to the
@@ -341,56 +340,8 @@ const (
 )
 
 const (
-	BackendLemonade     = "lemonade"
 	BackendLemonadeChat = "lemonade-chat"
 )
-
-// Backend-capability methods centralize the "what does this backend
-// do differently?" branches that used to live as scattered
-// `if backend == X` checks throughout the codebase. Adding a backend
-// means updating these methods, not chasing 8 conditional sites.
-
-// CombinesPostProcess reports whether this backend folds postprocess
-// instructions into its own call and produces a cleaned transcript in
-// one shot. Callers skip the separate /chat/completions postprocess
-// pass when this is true.
-func (t TranscriptionConfig) CombinesPostProcess() bool {
-	return t.Backend == BackendLemonadeChat
-}
-
-// AlwaysStreamsPartials reports whether this backend's partial events
-// are always useful (independent of streaming.show_partial_overlay).
-// Chat-audio's SSE deltas are the only signal the user has that the
-// model is generating; realtime-WS interim transcripts can flicker
-// and are gated by the explicit flag.
-func (t TranscriptionConfig) AlwaysStreamsPartials() bool {
-	return t.Backend == BackendLemonadeChat
-}
-
-// FoldsPromptHintIntoSystem reports whether transcription.prompt_hint
-// should be passed via the chat-audio system message rather than via
-// a backend-native field. Realtime WS has its own session.prompt slot
-// so folding would just duplicate.
-func (t TranscriptionConfig) FoldsPromptHintIntoSystem() bool {
-	return t.Backend == BackendLemonadeChat
-}
-
-// NeedsTranscriptionLabelGuard reports whether the configured model
-// must carry the `transcription` label on Lemonade. Realtime WS
-// silently emits empty deltas for non-transcription-typed models.
-// Chat-audio routes through /chat/completions which works on llm-
-// typed models too.
-func (t TranscriptionConfig) NeedsTranscriptionLabelGuard() bool {
-	return t.Backend == BackendLemonade
-}
-
-// SkipPostProcessModelWarm reports whether the postprocess model
-// should be left out of the startup warm. Chat-audio combines, so
-// loading a separate llm model would just evict gemma from the
-// single llm slot.
-func (t TranscriptionConfig) SkipPostProcessModelWarm() bool {
-	return t.Backend == BackendLemonadeChat
-}
 
 // DefaultChatAudioPrompt is the transcription instruction validated
 // against gemma4-it-e2b-FLM via Lemonade. The {language} token
@@ -423,50 +374,26 @@ type RecordingConfig struct {
 	DuckVolume         float64 `yaml:"duck_volume"`
 }
 
+// StreamingConfig holds the Silero VAD knobs used by the chat-audio
+// backend. The realtime-WebSocket fields it once carried have been
+// removed; commit 2 moves what remains into transcription.chat_audio.
 type StreamingConfig struct {
-	ShowPartialOverlay bool    `yaml:"show_partial_overlay"`
-	PrefixPaddingMS    int     `yaml:"prefix_padding_ms"`
-	SilenceDurationMS  int     `yaml:"silence_duration_ms"`
-	Threshold          float64 `yaml:"threshold"`
-	// ManualCommit disables server-side VAD for Lemonade and relies on the
-	// client-issued input_audio_buffer.commit at Finalize. Trades live partial
-	// transcripts (and the overlay that shows them) for lower end-of-utterance
-	// latency, since Lemonade stops running an interim transcription in
-	// parallel with the final. OpenAI backend ignores this flag.
-	ManualCommit bool `yaml:"manual_commit"`
-	// ClientVAD runs an energy-threshold voice activity detector on the
-	// client side and sends input_audio_buffer.commit whenever it detects
-	// a pause (silence_duration_ms of low-energy audio). Pauses chunk a
-	// long dictation into several transcribed segments without the user
-	// releasing the hotkey, cutting the end-of-utterance latency tied to
-	// Lemonade's post-commit Whisper pass. Requires ManualCommit=true
-	// (server VAD must be off or the two detectors would race).
-	ClientVAD bool `yaml:"client_vad"`
+	// PrefixPaddingMS is the minimum required speech duration before
+	// Silero declares "speech started". Maps to chat-audio's min-speech
+	// hysteresis.
+	PrefixPaddingMS int `yaml:"prefix_padding_ms"`
+	// SilenceDurationMS is the minimum required silence duration before
+	// Silero closes a speech episode. Maps to chat-audio's min-silence
+	// hysteresis.
+	SilenceDurationMS int `yaml:"silence_duration_ms"`
 	// MinUtteranceMS is the minimum accumulated speech duration an
-	// episode needs before a pause is allowed to trigger a commit.
-	// Shorter episodes reset silently and roll into the next utterance
-	// (or the final hotkey-release commit). Whisper transcribes
-	// reliably on ~1s+ segments; shorter clips produce unstable output.
-	// Only meaningful when ClientVAD is on.
+	// episode needs before it can be committed. Shorter episodes are
+	// dropped to avoid Gemma hallucinating on sub-second clips.
 	MinUtteranceMS int `yaml:"min_utterance_ms"`
 	// OnnxruntimeLibrary is an optional absolute path to
 	// libonnxruntime.so. When empty, vocis auto-discovers the library
 	// from common install locations (/usr/local/lib, /usr/lib, etc.).
-	// Only consulted when ClientVAD is on.
 	OnnxruntimeLibrary string `yaml:"onnxruntime_library"`
-	// WaitFinalSeconds is the minimum time to wait for the trailing transcript
-	// after Finalize commits the audio buffer. Cloud backends answer in under
-	// a second; local backends running Whisper on CPU commonly need 5-15s for
-	// first-request model load + inference. Scaled timeout is max(this,
-	// trailing_duration / 5).
-	WaitFinalSeconds int `yaml:"wait_final_seconds"`
-	// TailSilenceMS appends this many milliseconds of silent PCM to
-	// the audio buffer before the finalize commit. Whisper-family
-	// transcribers (including Gemma-FLM) need a silent tail to segment
-	// the last word reliably — without it the trailing word often gets
-	// dropped from the transcript. 300ms is the usual sweet spot; set
-	// to 0 to disable. The pad is only sent at Finalize, not mid-hold.
-	TailSilenceMS int `yaml:"tail_silence_ms"`
 }
 
 type InsertionConfig struct {
@@ -574,13 +501,10 @@ func Default() Config {
 		HotkeyMode: "hold",
 		Transcription: TranscriptionConfig{
 			// Default to chat-audio with Gemma 4 audio: gemma4-it-e2b-FLM
-			// is more reliable in practice than whisper-v3-turbo-FLM over
-			// the realtime WS and handles language-mixing transparently.
-			// Flip to BackendLemonade + whisper-v3-turbo-FLM via
-			// `vocis config backend` if you prefer the realtime path.
+			// is the only transcription backend vocis ships today (the
+			// realtime-WebSocket backend was removed).
 			Backend:      BackendLemonadeChat,
 			BaseURL:      "http://localhost:13305/api/v1",
-			RealtimeURL:  "ws://localhost:9000",
 			Model:        "gemma4-it-e2b-FLM",
 			PromptHint:   DefaultPromptHint,
 			RequestLimit: 45,
@@ -628,24 +552,13 @@ func Default() Config {
 			DuckVolume:         0.1,
 		},
 		Streaming: StreamingConfig{
-			// Defaults tuned for the Lemonade + Silero setup most users
-			// run locally: server-side VAD off (ManualCommit), Silero
-			// client VAD on for mid-hold chunking, partial overlay off
-			// (manual-commit mode doesn't stream interim deltas). Cloud
-			// OpenAI users who want live partials should flip
-			// ManualCommit=false, ClientVAD=false, ShowPartialOverlay=true.
-			ShowPartialOverlay: false,
-			// Zero values leave the VAD knobs unset, so each backend
-			// uses its own server-VAD defaults (Lemonade: threshold=0.01,
-			// silence=800, prefix=250; OpenAI: threshold=0.5, silence=500,
-			// prefix=300). Override per-field only if you know the scale
-			// for the backend you're targeting — Lemonade's threshold is
-			// RMS energy, OpenAI's is a probability.
-			PrefixPaddingMS:   0,
-			SilenceDurationMS: 0,
-			Threshold:         0,
-			ManualCommit:      true,
-			ClientVAD:         true,
+			// Silero hysteresis knobs used by the chat-audio backend.
+			// These names (prefix_padding_ms / silence_duration_ms) are
+			// historical — the realtime-WS backend they originally
+			// targeted is gone. Commit 2 moves them under
+			// transcription.chat_audio.silero with clearer names.
+			PrefixPaddingMS:   150,
+			SilenceDurationMS: 500,
 			// $HOME/opt/onnxruntime/lib/... is where the onnxruntime
 			// release tarball lands when unpacked into ~/opt — the
 			// documented install location. resolveOnnxruntimeLibrary
@@ -655,12 +568,6 @@ func Default() Config {
 			// auto-discovery candidates instead.
 			OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
 			MinUtteranceMS:     1000,
-			WaitFinalSeconds:   15,
-			// 800ms was picked empirically: 300ms left Gemma-FLM
-			// uncertain about the last word on quick releases (it
-			// would emit "..." instead of the word). A longer tail
-			// gives the model confident silence to segment on.
-			TailSilenceMS: 800,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
@@ -863,7 +770,14 @@ func decodeStrict(data []byte, cfg *Config) error {
 var retiredKeys = []struct{ path, since, reason string }{
 	{"transcription.organization", "post-OpenAI-removal", "OpenAI realtime backend was removed; org/project headers no longer apply"},
 	{"transcription.project", "post-OpenAI-removal", "OpenAI realtime backend was removed; org/project headers no longer apply"},
+	{"transcription.realtime_url", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio uses base_url only"},
 	{"streaming.noise_reduction", "config-cull", "Lemonade ignored this field; it was dead config"},
+	{"streaming.manual_commit", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio always finalizes locally"},
+	{"streaming.client_vad", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio always runs Silero VAD"},
+	{"streaming.show_partial_overlay", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio partials always render"},
+	{"streaming.threshold", "post-WS-removal", "realtime WebSocket backend was removed; Silero hysteresis replaces the energy threshold"},
+	{"streaming.wait_final_seconds", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio has no post-commit wait"},
+	{"streaming.tail_silence_ms", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio does not pad a WS audio buffer"},
 	{"yaml_indent", "config-cull", "self-output indentation is now hardcoded to 2"},
 	{"postprocess.min_p", "config-cull", "rarely-tuned sampler knob"},
 	{"postprocess.frequency_penalty", "config-cull", "rarely-tuned sampler knob"},
@@ -973,10 +887,9 @@ func (c Config) Validate() error {
 	}
 
 	switch c.Transcription.Backend {
-	case "", BackendLemonade, BackendLemonadeChat:
+	case "", BackendLemonadeChat:
 	default:
-		return fmt.Errorf("transcription.backend must be %q or %q",
-			BackendLemonade, BackendLemonadeChat)
+		return fmt.Errorf("transcription.backend must be %q", BackendLemonadeChat)
 	}
 
 	if c.Transcription.Backend == BackendLemonadeChat {
@@ -1063,28 +976,8 @@ func (c Config) Validate() error {
 		return errors.New("streaming.silence_duration_ms must be between 0 and 5000")
 	}
 
-	if c.Streaming.Threshold < 0 || c.Streaming.Threshold > 1 {
-		return errors.New("streaming.threshold must be between 0 and 1")
-	}
-
-	if c.Streaming.WaitFinalSeconds < 1 || c.Streaming.WaitFinalSeconds > 60 {
-		return errors.New("streaming.wait_final_seconds must be between 1 and 60")
-	}
-
-	if c.Streaming.TailSilenceMS < 0 || c.Streaming.TailSilenceMS > 2000 {
-		return errors.New("streaming.tail_silence_ms must be between 0 and 2000")
-	}
-
 	if c.Streaming.MinUtteranceMS < 0 || c.Streaming.MinUtteranceMS > 10000 {
 		return errors.New("streaming.min_utterance_ms must be between 0 and 10000")
-	}
-
-	if c.Streaming.ManualCommit && c.Streaming.ShowPartialOverlay {
-		return errors.New("streaming.show_partial_overlay requires streaming.manual_commit=false (manual-commit mode disables server-side interim transcripts)")
-	}
-
-	if c.Streaming.ClientVAD && !c.Streaming.ManualCommit {
-		return errors.New("streaming.client_vad requires streaming.manual_commit=true (otherwise server VAD and client VAD race to commit)")
 	}
 
 	if c.Overlay.Width < 200 || c.Overlay.Height < 80 {

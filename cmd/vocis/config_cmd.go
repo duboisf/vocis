@@ -19,12 +19,9 @@ import (
 	"vocis/internal/config"
 )
 
-// Lemonade protocol defaults used when probing /health fails or is unreachable.
-// These match the defaults documented in config.example.yaml.
-const (
-	lemonadeDefaultBaseURL     = "http://localhost:13305/api/v1"
-	lemonadeDefaultRealtimeURL = "ws://localhost:9000"
-)
+// Lemonade protocol default used when probing /health fails or is unreachable.
+// Matches the default documented in config.example.yaml.
+const lemonadeDefaultBaseURL = "http://localhost:13305/api/v1"
 
 var configCmd = &cobra.Command{
 	Use:   "config",
@@ -46,11 +43,9 @@ Use --force to overwrite without diffing.`,
 
 var configBackendCmd = &cobra.Command{
 	Use:   "backend",
-	Short: "Pick the transcription backend (lemonade or lemonade-chat)",
-	Long: `Interactively pick the backend and rewrite transcription.backend plus the URL
-fields. Selecting lemonade probes http://localhost:13305/api/v1/health for the
-websocket_port and sets realtime_url accordingly; falls back to ws://localhost:9000
-when the probe fails.`,
+	Short: "Set the transcription backend (lemonade-chat)",
+	Long: `Sets transcription.backend to lemonade-chat (the only supported backend) and
+probes the local Lemonade Server to populate transcription.base_url.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runConfigBackend()
 	},
@@ -186,48 +181,21 @@ func runConfigBackend() error {
 		return err
 	}
 
-	fmt.Printf("Current backend: %s\n\n", cfg.Transcription.Backend)
-	fmt.Println("Available backends:")
-	fmt.Println("  1) lemonade       — local Lemonade Server, realtime WS (Whisper-FLM family)")
-	fmt.Println("  2) lemonade-chat  — local Lemonade Server, chat-completions with input_audio (Gemma audio)")
-	fmt.Print("\nPick [1-2]: ")
+	fmt.Printf("Current backend: %s\n", cfg.Transcription.Backend)
 
-	choice, err := readLine()
-	if err != nil {
-		return err
+	cfg.Transcription.Backend = config.BackendLemonadeChat
+	base, _, detected := detectLemonade()
+	cfg.Transcription.BaseURL = base
+	// Default the model to the user-tested Gemma 4 audio variant.
+	if cfg.Transcription.Model == "" || cfg.Transcription.Model == "whisper-v3-turbo-FLM" {
+		cfg.Transcription.Model = "gemma4-it-e2b-FLM"
 	}
-
-	switch strings.ToLower(strings.TrimSpace(choice)) {
-	case "1", "lemonade":
-		cfg.Transcription.Backend = config.BackendLemonade
-		base, ws, detected := detectLemonade()
-		cfg.Transcription.BaseURL = base
-		cfg.Transcription.RealtimeURL = ws
-		status := "used defaults (no server responded)"
-		if detected {
-			status = "detected running Lemonade Server"
-		}
-		fmt.Printf("\nSet backend=lemonade (%s)\n  base_url=%s\n  realtime_url=%s\n", status, base, ws)
-	case "2", "lemonade-chat":
-		cfg.Transcription.Backend = config.BackendLemonadeChat
-		base, _, detected := detectLemonade()
-		cfg.Transcription.BaseURL = base
-		// realtime_url is unused by this backend; leave whatever the
-		// user already had so they can flip back to lemonade without
-		// losing the WS endpoint.
-		// Default the model to the user-tested Gemma 4 audio variant.
-		if cfg.Transcription.Model == "" || cfg.Transcription.Model == "whisper-v3-turbo-FLM" {
-			cfg.Transcription.Model = "gemma4-it-e2b-FLM"
-		}
-		status := "used defaults (no server responded)"
-		if detected {
-			status = "detected running Lemonade Server"
-		}
-		fmt.Printf("\nSet backend=lemonade-chat (%s)\n  base_url=%s\n  model=%s\n",
-			status, base, cfg.Transcription.Model)
-	default:
-		return fmt.Errorf("invalid choice: %q", strings.TrimSpace(choice))
+	status := "used defaults (no server responded)"
+	if detected {
+		status = "detected running Lemonade Server"
 	}
+	fmt.Printf("\nSet backend=lemonade-chat (%s)\n  base_url=%s\n  model=%s\n",
+		status, base, cfg.Transcription.Model)
 
 	if err := config.Save(path, cfg); err != nil {
 		return err
@@ -237,33 +205,26 @@ func runConfigBackend() error {
 }
 
 // detectLemonade probes the default Lemonade REST endpoint and returns
-// (base_url, realtime_url, detected). When /health exposes websocket_port,
-// that port is used for the realtime URL; otherwise we fall back to
-// ws://localhost:9000.
+// (base_url, _, detected). The second return value is retained for
+// backward compat at the call site; it is always empty after the
+// realtime-WebSocket backend removal.
 func detectLemonade() (string, string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, lemonadeDefaultBaseURL+"/health", nil)
 	if err != nil {
-		return lemonadeDefaultBaseURL, lemonadeDefaultRealtimeURL, false
+		return lemonadeDefaultBaseURL, "", false
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return lemonadeDefaultBaseURL, lemonadeDefaultRealtimeURL, false
+		return lemonadeDefaultBaseURL, "", false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return lemonadeDefaultBaseURL, lemonadeDefaultRealtimeURL, false
+		return lemonadeDefaultBaseURL, "", false
 	}
-
-	var payload struct {
-		WebsocketPort int `json:"websocket_port"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err == nil && payload.WebsocketPort > 0 {
-		return lemonadeDefaultBaseURL, fmt.Sprintf("ws://localhost:%d", payload.WebsocketPort), true
-	}
-	return lemonadeDefaultBaseURL, lemonadeDefaultRealtimeURL, true
+	return lemonadeDefaultBaseURL, "", true
 }
 
 type modelChoice struct {

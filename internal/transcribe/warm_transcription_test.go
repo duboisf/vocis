@@ -20,7 +20,7 @@ func TestEnsureTranscribeModelLoaded_NoopWhenAlreadyLoaded(t *testing.T) {
 
 	onLoadingCount := 0
 	err := EnsureTranscribeModelLoaded(context.Background(), config.TranscriptionConfig{
-		Backend: config.BackendLemonade,
+		Backend: config.BackendLemonadeChat,
 		Model:   "whisper-v3-turbo-FLM",
 		BaseURL: stub.URL + "/api/v1",
 	}, func(string) { onLoadingCount++ })
@@ -44,7 +44,7 @@ func TestEnsureTranscribeModelLoaded_LoadsWhenMissing(t *testing.T) {
 	var gotModel string
 	onLoadingCount := 0
 	err := EnsureTranscribeModelLoaded(context.Background(), config.TranscriptionConfig{
-		Backend: config.BackendLemonade,
+		Backend: config.BackendLemonadeChat,
 		Model:   "whisper-v3-turbo-FLM",
 		BaseURL: stub.URL + "/api/v1",
 	}, func(m string) {
@@ -79,7 +79,7 @@ func TestEnsureTranscribeModelLoaded_PropagatesLoadError(t *testing.T) {
 	defer stub.Close()
 
 	err := EnsureTranscribeModelLoaded(context.Background(), config.TranscriptionConfig{
-		Backend: config.BackendLemonade,
+		Backend: config.BackendLemonadeChat,
 		Model:   "whisper-v3-turbo-FLM",
 		BaseURL: stub.URL + "/api/v1",
 	}, nil)

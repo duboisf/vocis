@@ -79,28 +79,10 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 		return fmt.Errorf("transcription.base_url is empty")
 	}
 
-	// Label guard only applies to backends where the configured model
-	// must carry the `transcription` label — realtime WS silently
-	// returns empty deltas otherwise. Chat-audio drives
-	// /chat/completions, which works on llm-typed models like
-	// gemma-FLM that don't carry the `transcription` label.
-	if cfg.NeedsTranscriptionLabelGuard() {
-		if entry, err := FetchLemonadeModel(ctx, baseURL, model); err != nil {
-			// Catalog fetch failed — don't block on it. The user's model
-			// might be a user-pulled custom that doesn't show up in the
-			// catalog, or the /models endpoint hiccupped. Log and move on.
-			sessionlog.Warnf("lemonade preflight: could not verify labels for %s (%v) — proceeding", model, err)
-		} else if entry == nil {
-			sessionlog.Debugf("lemonade preflight: %s not in catalog (custom user model?) — skipping label check", model)
-		} else if !entry.HasLabel("transcription") {
-			return fmt.Errorf(
-				"transcription.model %q is not a transcription model on this Lemonade instance "+
-					"(labels: %v) — pick a model carrying the `transcription` label "+
-					"(e.g. whisper-v3-turbo-FLM) via `vocis config models`",
-				model, entry.Labels,
-			)
-		}
-	}
+	// chat-audio drives /chat/completions, which works on llm-typed
+	// models like gemma-FLM. No label guard is needed — every reachable
+	// model is acceptable here, so we go straight to the /health check
+	// and load.
 
 	health, err := FetchLemonadeHealth(ctx, baseURL)
 	if err != nil {
@@ -159,23 +141,15 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 		sessionlog.Debugf("lemonade: transcription model %s already loaded", txModel)
 	}
 
-	// Skip warming the postprocess model on backends that combine
-	// transcription + cleanup in a single call (chat-audio): app.go
-	// never makes a separate postprocess request there, so loading a
-	// separate llm model would just evict gemma from the single llm
-	// slot Lemonade allows.
-	if cfg.PostProcess.Enabled && cfg.Transcription.SkipPostProcessModelWarm() {
+	// chat-audio combines transcription + cleanup in a single call, so
+	// app.go never makes a separate postprocess request — loading a
+	// distinct llm model here would just evict gemma from the single
+	// llm slot Lemonade allows. Note the postprocess.model value so
+	// users see why it's being ignored.
+	if cfg.PostProcess.Enabled {
 		ppModel := strings.TrimSpace(cfg.PostProcess.Model)
 		if ppModel != "" && ppModel != txModel {
 			sessionlog.Infof("postprocess.model=%s ignored — combine mode reuses transcription.model=%s for cleanup", ppModel, txModel)
-		}
-	} else if cfg.PostProcess.Enabled && transcribeClient != nil {
-		ppModel := strings.TrimSpace(cfg.PostProcess.Model)
-		if ppModel != "" && !health.IsLoaded(ppModel) {
-			sessionlog.Infof("lemonade: %s not loaded (resident: %v) — warming in background", ppModel, health.LoadedNames())
-			go transcribeClient.WarmPostProcess(context.Background(), ppModel)
-		} else if ppModel != "" {
-			sessionlog.Debugf("lemonade: postprocess model %s already loaded", ppModel)
 		}
 	}
 	return nil

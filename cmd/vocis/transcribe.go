@@ -145,12 +145,11 @@ func runTranscribe() error {
 		return fmt.Errorf("aborted by signal")
 	}
 
-	// Outer cap: 2x the streaming wait-final floor. The inner Finalize
-	// has its own scaled deadline (max of WaitFinalSeconds and audio
-	// duration / 5); the outer just guarantees the CLI eventually
-	// returns even if the inner deadline math is off.
-	finalizeTimeout := time.Duration(cfg.Streaming.WaitFinalSeconds*2) * time.Second
-	finalizeCtx, finalizeCancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	// Outer cap on chat-audio finalize. The chat-audio session has its
+	// own per-chunk timeouts; this is a wall-clock backstop so the CLI
+	// always returns. 60s leaves comfortable headroom for a multi-clip
+	// trailing batch under a cold model load.
+	finalizeCtx, finalizeCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer finalizeCancel()
 
 	result, err := dictation.Finalize(finalizeCtx)

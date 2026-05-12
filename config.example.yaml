@@ -3,22 +3,14 @@ hotkey_mode: hold
 log_window_title: false
 
 transcription:
-  # backend: pick the Lemonade transcription protocol. Two values:
-  #   "lemonade"      (default) — Lemonade Server's realtime WebSocket.
-  #                   Pairs with the Whisper-FLM family
-  #                   (whisper-v3-turbo-FLM, etc.). Streams interim
-  #                   transcripts. base_url + realtime_url both used.
-  #   "lemonade-chat" — Lemonade Server's /chat/completions endpoint
-  #                   with `input_audio` content parts. Pairs with
-  #                   Gemma audio variants (gemma4-it-e2b-FLM,
-  #                   gemma3n-e4b-it-FLM). One HTTP POST per VAD-bounded
-  #                   speech chunk; see chat_audio: below for knobs.
-  #                   Audio is capped at 30s per request; longer
-  #                   utterances chunk transparently with few-shot
-  #                   history threading context across boundaries.
+  # backend: only "lemonade-chat" is supported. It posts each VAD-bounded
+  # speech chunk to Lemonade's /chat/completions endpoint with the audio
+  # embedded as an `input_audio` content part. Pairs with Gemma audio
+  # variants (gemma4-it-e2b-FLM, gemma3n-e4b-it-FLM). Audio is capped at
+  # 30s per request; longer utterances chunk transparently with few-shot
+  # history threading context across boundaries.
   backend: lemonade-chat
   base_url: http://localhost:13305/api/v1
-  realtime_url: ws://localhost:9000
   model: gemma4-it-e2b-FLM
   language: en
   prompt_hint: >-
@@ -133,34 +125,19 @@ recording:
   duck_volume: 0.1
 
 streaming:
-  # Live-subtitle overlay showing interim transcripts as you speak.
-  # Requires manual_commit=false (server-side VAD must be on so the
-  # backend streams interim results). Default is off because the
-  # default manual_commit=true disables interim streaming.
-  show_partial_overlay: false
-  # prefix_padding_ms / silence_duration_ms / threshold: zero means "let
-  # Lemonade use its own server-VAD defaults." As of 10.4 those are
-  # threshold=0.01 (RMS energy), silence=800, prefix=250.
-  prefix_padding_ms: 0
-  silence_duration_ms: 0
-  threshold: 0
-  # manual_commit: disables server-side VAD on Lemonade and commits the
-  # audio buffer explicitly when the hotkey is released. Trades live
-  # partials for lower end-of-utterance latency (Lemonade stops running
-  # an interim transcription in parallel with the final). Must be paired
-  # with show_partial_overlay=false.
-  manual_commit: true
-  # client_vad: runs an energy-threshold pause detector client-side and
-  # sends input_audio_buffer.commit every time you pause, chunking a
-  # long hold into several transcribed segments instead of one big one
-  # at release. Requires manual_commit=true. Reuses the threshold /
-  # silence_duration_ms / prefix_padding_ms knobs above.
-  client_vad: true
+  # Silero VAD knobs used by the chat-audio backend to bound each
+  # speech episode before posting to /chat/completions. Commit 2 moves
+  # these under transcription.chat_audio.silero with clearer names.
+  #
+  # prefix_padding_ms: minimum speech duration before Silero opens an
+  # episode (default 150).
+  # silence_duration_ms: minimum non-speech duration before Silero
+  # closes one (default 500).
+  prefix_padding_ms: 150
+  silence_duration_ms: 500
   # min_utterance_ms: minimum accumulated speech an episode needs
-  # before a pause can trigger a mid-session commit. Segments shorter
-  # than this are suppressed and roll into the next utterance (or the
-  # hotkey-release commit). Whisper produces unreliable output on
-  # sub-1s clips, so 1000 is the default.
+  # before it can be committed. Shorter clips are dropped so Gemma
+  # doesn't hallucinate on sub-second audio. Default 1000.
   min_utterance_ms: 1000
   # onnxruntime_library: path to libonnxruntime.so. Supports $HOME
   # and other env vars (expanded at runtime via os.ExpandEnv).
@@ -168,20 +145,8 @@ streaming:
   # unpacked into ~/opt. Blank the field to fall back to the
   # auto-discovery candidates (/usr/local/lib, /usr/lib,
   # /usr/lib/x86_64-linux-gnu, $HOME/.local/lib). Install from
-  # https://github.com/microsoft/onnxruntime/releases — only
-  # consulted when client_vad is true.
+  # https://github.com/microsoft/onnxruntime/releases.
   onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
-  # Minimum seconds to wait for the trailing transcript after Finalize
-  # commits the audio buffer. Default 15 matches local Lemonade where
-  # Whisper inference commonly takes 5–15 s.
-  wait_final_seconds: 15
-  # tail_silence_ms: append this many ms of silent PCM to the audio
-  # buffer right before the finalize commit. Whisper-family models
-  # (including Gemma-FLM) need a silent tail to segment the last word
-  # reliably — without it, releasing the hotkey mid-word often drops
-  # the trailing word from the transcript. 300ms is a solid default;
-  # set 0 to disable, cap is 2000.
-  tail_silence_ms: 800
 
 insertion:
   mode: auto
