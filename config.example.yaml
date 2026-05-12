@@ -109,6 +109,15 @@ transcription:
     # punctuation/casing don't break across mid-phrase pauses, and the
     # few-shot history is moot for the single request.
     batch_until_release: false
+    # continuation_rebatch: keep per-pause POSTs, but when the previous
+    # chunk's transcript ended without terminal punctuation (./?/!/…),
+    # send the NEXT chunk as a multi-clip POST that prepends the prior
+    # audio. The model returns one unified transcript for both clips,
+    # which replaces (not appends to) the prior history entry. A
+    # replace-segment event tells the overlay + injector to retract the
+    # broken prior segment and substitute the fix (backspace + retype in
+    # the target window). Mutually exclusive with batch_until_release.
+    continuation_rebatch: false
     # NOTE: when postprocess.enabled is true, vocis automatically folds
     # postprocess.prompt into the chat-audio system message and skips
     # the separate /chat/completions cleanup call. The same Gemma model

@@ -989,6 +989,38 @@ func (a *App) handleDictationEvent(
 		sessionlog.Infof("stream segment accumulated: %d chars total", len(state.liveText))
 		return nil
 
+	case transcribe.DictationEventReplaceSegment:
+		// Continuation rebatch: retract the prior segment from the
+		// accumulated text and substitute the unified transcript. The
+		// target window isn't pasted into until Finalize completes, so
+		// this is purely an in-memory swap of liveText / displayText —
+		// no injector backspace required.
+		if event.PrevLen > 0 {
+			runes := []rune(state.liveText)
+			if event.PrevLen <= len(runes) {
+				state.liveText = string(runes[:len(runes)-event.PrevLen])
+			}
+			// displayText separates segments with "\n"; drop the trailing line.
+			if i := strings.LastIndex(state.displayText, "\n"); i >= 0 {
+				state.displayText = state.displayText[:i]
+			} else {
+				state.displayText = ""
+			}
+		}
+		text := strings.TrimSpace(event.Text)
+		state.liveText += event.Text
+		if text != "" {
+			if state.displayText != "" {
+				state.displayText += "\n"
+			}
+			state.displayText += text
+		}
+		state.currentPartial = ""
+		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
+		sessionlog.Infof("stream segment replaced: prev_runes=%d, %d chars total",
+			event.PrevLen, len(state.liveText))
+		return nil
+
 	default:
 		return nil
 	}

@@ -493,6 +493,187 @@ func TestChatAudioSessionMultiClipForceCutBatching(t *testing.T) {
 	}
 }
 
+func TestEndsWithTerminalPunctuation(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"hello.", true},
+		{"hello?", true},
+		{"hello!", true},
+		{"trailed off…", true},
+		{"hello.\n", true},
+		{"hello.  ", true},
+		{"and it", false},
+		{"and it,", false},
+		{"", false},
+		{"   ", false},
+	}
+	for _, c := range cases {
+		if got := endsWithTerminalPunctuation(c.in); got != c.want {
+			t.Errorf("endsWithTerminalPunctuation(%q)=%v want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestFormatReplacement(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		priorFmt string
+		newText  string
+		want     string
+	}{
+		{"first segment no leading space", "first segment", "unified", "unified"},
+		{"prior had leading space", " second", "unified", " unified"},
+		{"new starts with punctuation no space added", " second", ", actually unified", ", actually unified"},
+		{"new already has leading space kept", " second", " unified", " unified"},
+		{"empty new is empty", " second", "  ", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := &chatAudioSession{lastEmittedFormatted: c.priorFmt}
+			if got := s.formatReplacement(c.newText); got != c.want {
+				t.Fatalf("formatReplacement(%q) with prior %q = %q, want %q",
+					c.newText, c.priorFmt, got, c.want)
+			}
+		})
+	}
+}
+
+// TestChatAudioSessionContinuationRebatch verifies that when
+// continuation_rebatch is on and history's last entry's transcript
+// lacks terminal punctuation, the next chunk is sent as a multi-clip
+// POST that prepends the prior audio — the model sees both clips as
+// one continuous utterance and the request must skip few-shot history
+// (the audio itself is the cross-clip context).
+func TestChatAudioSessionContinuationRebatch(t *testing.T) {
+	type seenRequest struct{ body []byte }
+	var (
+		mu   sync.Mutex
+		seen []seenRequest
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen = append(seen, seenRequest{body: body})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"Sometimes I talk and it stops here.\"}}]}\n\n")
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	cfg := config.TranscriptionConfig{
+		Backend: config.BackendLemonadeChat,
+		BaseURL: server.URL + "/api/v1",
+		Model:   "gemma-test",
+		ChatAudio: config.ChatAudioConfig{
+			ChunkMaxSeconds:     10,
+			HistoryTurns:        2,
+			Prompt:              "Transcribe in {language}.",
+			Language:            "en",
+			Stream:              true,
+			ContinuationRebatch: true,
+		},
+	}
+	samples := make(chan []int16, 1)
+	opts := DictationOpts{
+		SampleRate: 8000, // != sileroSampleRate so VAD is skipped
+		Channels:   1,
+		Samples:    samples,
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, httpClient, opts)
+	if err != nil {
+		t.Fatalf("startChatAudioSession: %v", err)
+	}
+
+	// Seed history with a prior turn whose transcript lacks terminal
+	// punctuation. Pre-seed before any samples arrive so the worker's
+	// happens-before is established via the chunksCh send.
+	priorPCM := make([]int16, 8000) // 1s of audio @ 8 kHz
+	for i := range priorPCM {
+		priorPCM[i] = 1000
+	}
+	session.history = []chatTurn{{
+		pcm:        priorPCM,
+		wav:        encodePCM16WAV(priorPCM, 8000),
+		transcript: "Sometimes I talk and it",
+	}}
+	session.lastEmittedFormatted = " Sometimes I talk and it"
+
+	// Push one chunk of speech, then close so the trailing flush fires.
+	chunk := make([]int16, 8000)
+	for i := range chunk {
+		chunk[i] = 2000
+	}
+	samples <- chunk
+	close(samples)
+
+	finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := session.Finalize(finalCtx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	mu.Lock()
+	calls := len(seen)
+	var body []byte
+	if calls > 0 {
+		body = seen[0].body
+	}
+	mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("calls=%d want 1", calls)
+	}
+
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(req.Messages) != 2 {
+		t.Fatalf("messages=%d want 2 (system + user) — rebatch must skip few-shot history", len(req.Messages))
+	}
+	if req.Messages[0]["role"] != "system" {
+		t.Fatalf("messages[0].role=%v", req.Messages[0]["role"])
+	}
+	sys := req.Messages[0]["content"].(string)
+	if !strings.Contains(sys, "ALL clips") {
+		t.Fatalf("system message missing multi-clip framing: %q", sys)
+	}
+	if req.Messages[1]["role"] != "user" {
+		t.Fatalf("messages[1].role=%v want user", req.Messages[1]["role"])
+	}
+	parts := req.Messages[1]["content"].([]any)
+	audioCount := 0
+	for _, p := range parts {
+		if p.(map[string]any)["type"] == "input_audio" {
+			audioCount++
+		}
+	}
+	if audioCount != 2 {
+		t.Fatalf("user content audio parts=%d want 2 (prior + current)", audioCount)
+	}
+	for _, m := range req.Messages {
+		if m["role"] == "assistant" {
+			t.Fatalf("rebatched request unexpectedly has assistant history turn: %v", m)
+		}
+	}
+
+	// History should have been REPLACED, not appended.
+	if got := len(session.history); got != 1 {
+		t.Fatalf("history len=%d want 1 (rebatch replaces, not appends)", got)
+	}
+	if got := session.history[0].transcript; got != "Sometimes I talk and it stops here." {
+		t.Fatalf("history[0].transcript=%q want the unified transcript", got)
+	}
+}
+
 // TestChatAudioSessionDropsSilentChunk verifies the energy gate
 // prevents a chunk of all-zero PCM from ever reaching the model. This
 // is the defense against Gemma hallucinating a long "I cannot

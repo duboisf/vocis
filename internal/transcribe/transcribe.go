@@ -779,11 +779,21 @@ type DictationEventType string
 const (
 	DictationEventPartial DictationEventType = "partial"
 	DictationEventSegment DictationEventType = "segment"
+	// DictationEventReplaceSegment retracts the immediately-previous
+	// segment and substitutes Text in its place. PrevLen is the rune
+	// count of the prior segment's text as it was previously emitted
+	// (used by the injector to know how many backspaces to send into
+	// the target window). Emitted by the chat-audio backend when
+	// continuation_rebatch is on and a multi-clip re-batch produced
+	// a unified transcript covering the previously-emitted segment +
+	// the current chunk.
+	DictationEventReplaceSegment DictationEventType = "replace_segment"
 )
 
 type DictationEvent struct {
-	Type DictationEventType
-	Text string
+	Type    DictationEventType
+	Text    string
+	PrevLen int
 }
 
 type FinalizeResult struct {
@@ -857,6 +867,14 @@ type DictationSession struct {
 type finalResult struct {
 	text string
 	err  error
+	// replacePrevLen, when > 0, marks this result as a retraction-then-
+	// replace of the previously-queued finalResult's text. Used by the
+	// chat-audio continuation_rebatch path when a rebatch happens after
+	// liveSegments has flipped to false (post-Finalize): we can't fire
+	// a DictationEventReplaceSegment because the worker has switched to
+	// the finals queue, so the trailing-collector drops the last
+	// queued text and substitutes this one.
+	replacePrevLen int
 }
 
 func (c *Client) StartDictation(ctx context.Context, opts DictationOpts) (Dictation, error) {

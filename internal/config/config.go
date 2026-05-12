@@ -321,6 +321,18 @@ type ChatAudioConfig struct {
 	// regressions) is moot for the single request. Default false
 	// preserves the per-pause request behavior.
 	BatchUntilRelease bool `yaml:"batch_until_release"`
+	// ContinuationRebatch keeps the per-pause POST cadence but, when
+	// the previous chunk's transcript ends without terminal
+	// punctuation (./?/!/…), sends the NEXT chunk as a multi-clip
+	// request that prepends the prior chunk's audio. The model
+	// returns one unified transcript covering both clips, which
+	// replaces (not appends to) the prior history entry, and a
+	// DictationEventReplaceSegment is emitted so the overlay/injector
+	// can retract the broken prior segment and substitute the fix.
+	// Mutually exclusive with BatchUntilRelease (which already sends
+	// one POST per utterance so there's nothing to rebatch). Off by
+	// default.
+	ContinuationRebatch bool `yaml:"continuation_rebatch"`
 }
 
 const (
@@ -1003,6 +1015,9 @@ func (c Config) Validate() error {
 		}
 		if ca.CtxSize < 0 || ca.CtxSize > 1048576 {
 			return errors.New("transcription.chat_audio.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
+		}
+		if ca.BatchUntilRelease && ca.ContinuationRebatch {
+			return errors.New("transcription.chat_audio.batch_until_release and continuation_rebatch are mutually exclusive (batch_until_release already sends one POST per utterance, so there's nothing to rebatch)")
 		}
 	}
 
