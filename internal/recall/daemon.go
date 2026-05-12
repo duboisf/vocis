@@ -77,18 +77,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("init silero: %w", err)
 	}
 
-	// Pin Lemonade's ctx_size if the user requested one. Idempotent —
-	// only reloads when the loaded model's current ctx_size doesn't
-	// match. Done before opening the socket so the first transcribe
-	// request sees the right context window. Use a separate deadline
-	// from ctx; the daemon's ctx is long-lived and we'd hold it open.
-	if cx := d.cfg.Transcription.ChatAudio.CtxSize; cx > 0 {
-		ensureCtx, ensureCancel := context.WithTimeout(ctx, 2*time.Minute)
-		if err := transcribe.EnsureModelCtxSize(ensureCtx, d.cfg.Transcription.BaseURL, d.cfg.Transcription.Model, cx); err != nil {
-			ensureCancel()
-			return fmt.Errorf("ensure ctx_size=%d: %w", cx, err)
-		}
-		ensureCancel()
+	// Pin Lemonade's ctx_size if the user requested one. Done before
+	// opening the socket so the first transcribe request sees the
+	// right context window. No-op when ctx_size is 0.
+	if err := transcribe.EnsureModelCtxSizeFromConfig(ctx, d.cfg); err != nil {
+		return err
 	}
 
 	if err := d.initPersistence(); err != nil {

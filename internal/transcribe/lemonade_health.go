@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"vocis/internal/config"
 	"vocis/internal/sessionlog"
 )
 
@@ -163,6 +164,34 @@ func (m LemonadeModelEntry) HasLabel(label string) bool {
 		}
 	}
 	return false
+}
+
+// EnsureModelCtxSizeFromConfig reads ChatAudio.CtxSize from cfg and
+// pins the model's ctx_size via Lemonade /api/v1/load when set. The
+// no-config-set case is a no-op so callers can invoke this
+// unconditionally during startup. Applies a 2-minute deadline (NPU
+// first-time loads can stall for 30+ s) and wraps errors with the
+// requested size for log-readability.
+//
+// This is the helper the recall daemon, `serve`, and the standalone
+// `vocis transcribe` CLI all call. Centralizing it ensures the same
+// timeout, the same skip-when-empty-model behavior, and the same
+// error-wrapping across entrypoints.
+func EnsureModelCtxSizeFromConfig(ctx context.Context, cfg config.Config) error {
+	cx := cfg.Transcription.ChatAudio.CtxSize
+	if cx <= 0 {
+		return nil
+	}
+	model := strings.TrimSpace(cfg.Transcription.Model)
+	if model == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := EnsureModelCtxSize(ctx, cfg.Transcription.BaseURL, model, cx); err != nil {
+		return fmt.Errorf("ensure ctx_size=%d: %w", cx, err)
+	}
+	return nil
 }
 
 // EnsureModelCtxSize checks Lemonade's /api/v1/health for the named

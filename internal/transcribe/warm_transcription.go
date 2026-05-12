@@ -154,13 +154,13 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 
 	txModel := strings.TrimSpace(cfg.Transcription.Model)
 	// Pin Lemonade's ctx_size before the background warm. If the
-	// model is loaded with the wrong size, we reload it with the
-	// right one now (synchronously) so the warm path doesn't race
-	// with another reload. If ctx_size config is 0 this is a no-op.
-	if cx := cfg.Transcription.ChatAudio.CtxSize; cx > 0 && txModel != "" {
-		if err := EnsureModelCtxSize(ctx, baseURL, txModel, cx); err != nil {
-			return fmt.Errorf("ensure ctx_size=%d for %s: %w", cx, txModel, err)
-		}
+	// model is loaded with the wrong size, EnsureModelCtxSizeFromConfig
+	// reloads it synchronously so the warm path doesn't race with
+	// another reload. No-op when ctx_size is 0.
+	if err := EnsureModelCtxSizeFromConfig(ctx, cfg); err != nil {
+		return err
+	}
+	if cfg.Transcription.ChatAudio.CtxSize > 0 && txModel != "" {
 		// Re-fetch health so the IsLoaded check below sees the
 		// post-reload state.
 		if fresh, err := FetchLemonadeHealth(ctx, baseURL); err == nil {

@@ -70,18 +70,11 @@ func runTranscribe() error {
 	}
 	defer shutdownTelemetry(context.Background())
 
-	// Pin Lemonade's ctx_size if the user requested one. Idempotent
-	// (no reload when /health already reports the requested size), so
-	// repeated `vocis transcribe` invocations don't churn the model.
-	// Runs BEFORE we open the mic to avoid recording into a void
-	// while Lemonade is reloading. 0 in config is a no-op.
-	if cx := cfg.Transcription.ChatAudio.CtxSize; cx > 0 {
-		ensureCtx, ensureCancel := context.WithTimeout(ctx, 2*time.Minute)
-		if err := transcribe.EnsureModelCtxSize(ensureCtx, cfg.Transcription.BaseURL, cfg.Transcription.Model, cx); err != nil {
-			ensureCancel()
-			return fmt.Errorf("ensure ctx_size=%d: %w", cx, err)
-		}
-		ensureCancel()
+	// Pin Lemonade's ctx_size if the user requested one. Runs BEFORE
+	// we open the mic so we don't record into a void while Lemonade
+	// is reloading. No-op when ctx_size is 0.
+	if err := transcribe.EnsureModelCtxSizeFromConfig(ctx, cfg); err != nil {
+		return err
 	}
 
 	rec := recorder.New()
