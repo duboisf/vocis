@@ -30,14 +30,11 @@ func TestChatAudioLiveLemonade(t *testing.T) {
 	}
 
 	cfg := config.TranscriptionConfig{
-		BaseURL:         "http://localhost:13305/api/v1",
-		Model:           "gemma4-it-e2b-FLM",
-		ChunkMaxSeconds: 28,
-		HistoryTurns:    1,
+		BaseURL: "http://localhost:13305/api/v1",
+		Model:   "gemma4-it-e2b-FLM",
 		Prompt: "Transcribe the following speech segment in {language}. " +
 			"Only output the transcription, with no newlines.",
 		Language: "en",
-		Stream:   true,
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{
@@ -73,26 +70,21 @@ func TestChatAudioLiveLemonade(t *testing.T) {
 	t.Logf("live transcript: %q", strings.TrimSpace(res.Text))
 }
 
-// TestChatAudioLiveLemonadeInlineClips verifies the inline-clips
-// context mode produces a request shape Lemonade accepts. Sends two
-// short clips through the session (forcing a force-cut), the second
-// of which carries the first's audio inline as a [prior clip 1] part.
-// Same gating as the few-shot live test.
-func TestChatAudioLiveLemonadeInlineClips(t *testing.T) {
+// TestChatAudioLiveLemonadeForceCutBatch sends more audio than the
+// pinned chunk-max so a force-cut fires and the session ends up
+// posting a multi-clip request. Verifies Lemonade accepts the shape.
+// Same gating as the basic live test.
+func TestChatAudioLiveLemonadeForceCutBatch(t *testing.T) {
 	if os.Getenv("VOCIS_LIVE_LEMONADE") != "1" {
 		t.Skip("VOCIS_LIVE_LEMONADE not set; skipping live Lemonade integration test")
 	}
 
 	cfg := config.TranscriptionConfig{
-		BaseURL:         "http://localhost:13305/api/v1",
-		Model:           "gemma4-it-e2b-FLM",
-		ChunkMaxSeconds: 2, // force a 2-chunk run from 4s of audio
-		HistoryTurns:    1,
+		BaseURL: "http://localhost:13305/api/v1",
+		Model:   "gemma4-it-e2b-FLM",
 		Prompt: "Transcribe the following speech segment in {language}. " +
 			"Only output the transcription, with no newlines.",
-		Language:    "en",
-		Stream:      true,
-		ContextMode: config.ChatAudioContextInlineClips,
+		Language: "en",
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{
@@ -101,7 +93,9 @@ func TestChatAudioLiveLemonadeInlineClips(t *testing.T) {
 		Samples:    samples,
 	}
 
-	const seconds = 4
+	// Send slightly more audio than the pinned chunk-max so a
+	// force-cut fires and we end up with two clips on the wire.
+	const seconds = defaultChunkMaxSeconds + 2
 	audio := make([]int16, 16000*seconds)
 	amp := int16(math.MaxInt16 / 10)
 	for i := range audio {
@@ -122,5 +116,5 @@ func TestChatAudioLiveLemonadeInlineClips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Finalize: %v", err)
 	}
-	t.Logf("inline-clips live transcript: %q", strings.TrimSpace(res.Text))
+	t.Logf("force-cut batch live transcript: %q", strings.TrimSpace(res.Text))
 }

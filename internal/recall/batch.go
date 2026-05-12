@@ -8,6 +8,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"vocis/internal/recorder"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
 	"vocis/internal/transcribe"
@@ -61,7 +62,7 @@ func (d *Daemon) runDictation(
 	samples := make(chan []int16, 8)
 	session, err := d.transcribeClient.StartDictation(dictCtx, transcribe.DictationOpts{
 		SampleRate: sampleRate,
-		Channels:   d.cfg.Recording.Channels,
+		Channels:   recorder.Channels,
 		Samples:    samples,
 		// Let waitForCompletion scale its post-commit budget to the
 		// audio we're about to feed — otherwise the 15 s wait_final
@@ -139,8 +140,14 @@ func (d *Daemon) runDictation(
 
 	if postprocess && d.cfg.PostProcess.Enabled {
 		_, ppSpan := telemetry.StartSpan(spanCtx, spanPrefix+".postprocess")
-		ppCtx, ppCancel := context.WithTimeout(context.Background(),
-			time.Duration(d.cfg.PostProcess.TotalTimeoutSec)*time.Second)
+		// Use a generous wall-clock cap for the recall path's
+		// postprocess call. The per-request timeout that PostProcess
+		// itself enforces is pinned in internal/transcribe; this is
+		// just a context fence so a runaway HTTP call can't hang
+		// the daemon. 60 s covers a cold-loaded model plus a long
+		// transcript without coupling to the transcribe package's
+		// internal default.
+		ppCtx, ppCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		pp := d.transcribeClient.PostProcess(ppCtx, d.cfg.PostProcess, text, nil)
 		ppCancel()
 		if !pp.Skipped {

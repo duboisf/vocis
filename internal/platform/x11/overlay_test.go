@@ -7,7 +7,6 @@ import (
 
 	"github.com/BurntSushi/xgbutil"
 
-	"vocis/internal/config"
 	"vocis/internal/ui"
 )
 
@@ -166,9 +165,7 @@ func TestFormatTwoPhaseElapsed(t *testing.T) {
 func TestPhaseDoneLineIncludesElapsed(t *testing.T) {
 	t.Parallel()
 
-	o := &Overlay{cfg: config.OverlayConfig{
-		Finishing: config.OverlayFinish{PhaseDone: "done"},
-	}}
+	o := &Overlay{}
 	got := o.phaseDoneLine("Wrapping up", 2300*time.Millisecond)
 	if got != "Wrapping up — done (2.3s)" {
 		t.Fatalf("phaseDoneLine = %q, want %q", got, "Wrapping up — done (2.3s)")

@@ -23,8 +23,6 @@ import (
 )
 
 type Overlay struct {
-	cfg config.OverlayConfig
-
 	mu       sync.Mutex
 	x        *xgbutil.XUtil
 	win      *xwindow.Window
@@ -68,18 +66,18 @@ type countdownPhase struct {
 }
 
 type viewState struct {
-	title        string
-	titleSuffix  string
-	submitHint   bool
-	subtitle     string
-	body         string
-	accent       color.RGBA
-	reactiveWave   bool
-	idleWave       bool
-	heartbeatWave  bool
+	title         string
+	titleSuffix   string
+	submitHint    bool
+	subtitle      string
+	body          string
+	accent        color.RGBA
+	reactiveWave  bool
+	idleWave      bool
+	heartbeatWave bool
 }
 
-func NewOverlay(cfg config.OverlayConfig) (*Overlay, error) {
+func NewOverlay() (*Overlay, error) {
 	// Suppress xgb's internal logger — it logs "Invalid event/error type: <nil>"
 	// when connections are closed, which is expected and not useful.
 	xgb.Logger.SetOutput(io.Discard)
@@ -94,28 +92,27 @@ func NewOverlay(cfg config.OverlayConfig) (*Overlay, error) {
 		return nil, err
 	}
 
-	x, y := position(xu, cfg)
+	x, y := position(xu)
 	mask := xproto.CwBackPixel | xproto.CwBorderPixel | xproto.CwOverrideRedirect
-	win.Create(xu.RootWin(), x, y, cfg.Width, cfg.Height, int(mask), 0x101623, 0, 1)
+	win.Create(xu.RootWin(), x, y, ui.OverlayWidth, ui.OverlayHeight, int(mask), 0x101623, 0, 1)
 	win.Map()
 	win.Unmap()
-	_ = ewmh.WmWindowOpacitySet(xu, win.Id, cfg.Opacity)
+	_ = ewmh.WmWindowOpacitySet(xu, win.Id, ui.OverlayOpacity)
 	win.Stack(xproto.StackModeAbove)
 
-	renderer := ui.NewOverlayRenderer(cfg)
+	renderer := ui.NewOverlayRenderer()
 
 	return &Overlay{
-		cfg:       cfg,
 		x:         xu,
 		win:       win,
 		renderer:  renderer,
-		height:    cfg.Height,
+		height:    ui.OverlayHeight,
 		baseX:     x,
 		baseY:     y,
 		fadeAlpha: 1,
 		state: viewState{
-			title:    cfg.Ready.Title,
-			subtitle: cfg.Ready.Subtitle,
+			title:    ui.OverlayReadyTitle,
+			subtitle: ui.OverlayReadySubtitle,
 			body:     "",
 			accent:   color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		},
@@ -124,8 +121,8 @@ func NewOverlay(cfg config.OverlayConfig) (*Overlay, error) {
 
 func (o *Overlay) ShowHint(text string) {
 	o.show(viewState{
-		title:    o.cfg.Ready.Title,
-		subtitle: o.cfg.Ready.Subtitle,
+		title:    ui.OverlayReadyTitle,
+		subtitle: ui.OverlayReadySubtitle,
 		body:     text,
 		accent:   color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		idleWave: true,
@@ -135,9 +132,9 @@ func (o *Overlay) ShowHint(text string) {
 func (o *Overlay) ShowListening(windowClass, hotkeyMode string) {
 	body := ui.ListeningBody("")
 	o.show(viewState{
-		title:        o.cfg.Listening.Title,
-		titleSuffix:  " " + o.cfg.Listening.Suffix,
-		subtitle:     o.cfg.Listening.Connecting,
+		title:        ui.OverlayListeningTitle,
+		titleSuffix:  " " + ui.OverlayListeningSuffix,
+		subtitle:     ui.OverlayListeningConnecting,
 		body:         body,
 		accent:       color.RGBA{R: 34, G: 197, B: 94, A: 255},
 		reactiveWave: true,
@@ -148,10 +145,10 @@ func (o *Overlay) SetConnected(windowClass string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != o.cfg.Listening.Title {
+	if !o.visible || o.state.title != ui.OverlayListeningTitle {
 		return
 	}
-	o.state.subtitle = config.ExpandTemplate(o.cfg.Listening.Connected, map[string]string{
+	o.state.subtitle = config.ExpandTemplate(ui.OverlayListeningConnected, map[string]string{
 		"window": windowClass,
 	})
 	o.drawLocked()
@@ -161,16 +158,16 @@ func (o *Overlay) SetConnecting(attempt, max int) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != o.cfg.Listening.Title {
+	if !o.visible || o.state.title != ui.OverlayListeningTitle {
 		return
 	}
 	if attempt > 1 {
-		o.state.subtitle = config.ExpandTemplate(o.cfg.Listening.Reconnecting, map[string]string{
+		o.state.subtitle = config.ExpandTemplate(ui.OverlayListeningReconnecting, map[string]string{
 			"attempt": fmt.Sprintf("%d", attempt),
 			"max":     fmt.Sprintf("%d", max),
 		})
 	} else {
-		o.state.subtitle = o.cfg.Listening.Connecting
+		o.state.subtitle = ui.OverlayListeningConnecting
 	}
 	o.drawLocked()
 }
@@ -183,10 +180,10 @@ func (o *Overlay) SetLoadingModel(modelName string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != o.cfg.Listening.Title {
+	if !o.visible || o.state.title != ui.OverlayListeningTitle {
 		return
 	}
-	o.state.subtitle = config.ExpandTemplate(o.cfg.Listening.LoadingModel, map[string]string{
+	o.state.subtitle = config.ExpandTemplate(ui.OverlayListeningLoadingModel, map[string]string{
 		"model": modelName,
 	})
 	o.drawLocked()
@@ -196,10 +193,10 @@ func (o *Overlay) SetSubmitMode(enabled bool) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != o.cfg.Listening.Title {
+	if !o.visible || o.state.title != ui.OverlayListeningTitle {
 		return
 	}
-	o.state.titleSuffix = " " + o.cfg.Listening.Suffix
+	o.state.titleSuffix = " " + ui.OverlayListeningSuffix
 	o.state.submitHint = enabled
 	o.drawLocked()
 }
@@ -208,11 +205,11 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != o.cfg.Listening.Title {
+	if !o.visible || o.state.title != ui.OverlayListeningTitle {
 		return
 	}
 
-	subtitle := config.ExpandTemplate(o.cfg.Listening.Connected, map[string]string{"window": windowClass})
+	subtitle := config.ExpandTemplate(ui.OverlayListeningConnected, map[string]string{"window": windowClass})
 	targetText := ui.NormalizeListeningText(text)
 	body := ui.ListeningBody(targetText)
 	o.liveBody = body
@@ -242,7 +239,7 @@ func (o *Overlay) AnimateChunk(text string) {
 	}
 
 	o.mu.Lock()
-	if !o.visible || o.state.title != o.cfg.Listening.Title {
+	if !o.visible || o.state.title != ui.OverlayListeningTitle {
 		o.mu.Unlock()
 		return
 	}
@@ -260,15 +257,15 @@ func (o *Overlay) AnimateChunk(text string) {
 func (o *Overlay) ShowFinishing(body, shortcut string) {
 	var suffix string
 	if shortcut != "" {
-		suffix = " " + config.ExpandTemplate(o.cfg.Finishing.CancelHint, map[string]string{
+		suffix = " " + config.ExpandTemplate(ui.OverlayFinishingCancelHint, map[string]string{
 			"shortcut": shortcut,
 		})
 	}
 
 	o.show(viewState{
-		title:         o.cfg.Finishing.Title,
+		title:         ui.OverlayFinishingTitle,
 		titleSuffix:   suffix,
-		subtitle:      formatElapsed(o.cfg.Finishing.WrappingUp, 0),
+		subtitle:      formatElapsed(ui.OverlayFinishingWrappingUp, 0),
 		body:          body,
 		accent:        color.RGBA{R: 96, G: 165, B: 250, A: 255},
 		heartbeatWave: true,
@@ -280,7 +277,7 @@ func (o *Overlay) ShowFinishing(body, shortcut string) {
 	o.countdownExtend = make(chan countdownPhase, 1)
 	o.mu.Unlock()
 
-	go o.animateElapsed(countdownPhase{label: o.cfg.Finishing.WrappingUp})
+	go o.animateElapsed(countdownPhase{label: ui.OverlayFinishingWrappingUp})
 }
 
 func (o *Overlay) SetFinishingPhase(label string) {
@@ -315,7 +312,7 @@ func (o *Overlay) SetFinishingText(body string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if !o.visible || o.state.title != o.cfg.Finishing.Title {
+	if !o.visible || o.state.title != ui.OverlayFinishingTitle {
 		return
 	}
 	o.state.body = body
@@ -341,7 +338,7 @@ func formatTwoPhaseElapsed(doneLabel, activeLabel string, elapsed time.Duration)
 // e.g. "Wrapping up — done (2.3s)". Pushed onto completedPhases so the user
 // can see how long each stage of finishing took.
 func (o *Overlay) phaseDoneLine(label string, elapsed time.Duration) string {
-	return fmt.Sprintf("%s — %s (%.1fs)", label, o.cfg.Finishing.PhaseDone, elapsed.Seconds())
+	return fmt.Sprintf("%s — %s (%.1fs)", label, ui.OverlayFinishingPhaseDone, elapsed.Seconds())
 }
 
 func (o *Overlay) animateElapsed(phase countdownPhase) {
@@ -388,7 +385,7 @@ func (o *Overlay) animateElapsed(phase countdownPhase) {
 			o.mu.Unlock()
 		case <-ticker.C:
 			o.mu.Lock()
-			if !o.visible || o.state.title != o.cfg.Finishing.Title {
+			if !o.visible || o.state.title != ui.OverlayFinishingTitle {
 				o.mu.Unlock()
 				return
 			}
@@ -401,8 +398,8 @@ func (o *Overlay) animateElapsed(phase countdownPhase) {
 
 func (o *Overlay) ShowSuccess(text string) {
 	o.show(viewState{
-		title:    o.cfg.Success.Title,
-		subtitle: o.cfg.Success.Subtitle,
+		title:    ui.OverlaySuccessTitle,
+		subtitle: ui.OverlaySuccessSubtitle,
 		body:     ui.Shorten(strings.ReplaceAll(text, "\n", " "), o.renderer.BodyTextLimit()),
 		accent:   color.RGBA{R: 56, G: 189, B: 248, A: 255},
 	}, true)
@@ -410,7 +407,7 @@ func (o *Overlay) ShowSuccess(text string) {
 
 func (o *Overlay) ShowWarning(text string) {
 	o.show(viewState{
-		title:  o.cfg.Warning.Title,
+		title:  ui.OverlayWarningTitle,
 		body:   text,
 		accent: color.RGBA{R: 251, G: 191, B: 36, A: 255},
 	}, true)
@@ -418,7 +415,7 @@ func (o *Overlay) ShowWarning(text string) {
 
 func (o *Overlay) ShowError(err error) {
 	o.show(viewState{
-		title:    o.cfg.Error.Title,
+		title:    ui.OverlayErrorTitle,
 		subtitle: ui.Shorten(err.Error(), o.renderer.SubtitleTextLimit()),
 		accent:   color.RGBA{R: 248, G: 113, B: 113, A: 255},
 	}, true)
@@ -568,7 +565,7 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 			o.applyStateLocked(state)
 			o.drawLocked()
 			if autoHide {
-				duration := time.Duration(o.cfg.AutoHideMillis) * time.Millisecond
+				duration := time.Duration(ui.OverlayAutoHideMillis) * time.Millisecond
 				o.hide = time.AfterFunc(duration, func() {
 					o.fadeOut()
 				})
@@ -576,9 +573,9 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 			o.mu.Unlock()
 			return
 		}
-		o.fadeAlpha = o.cfg.Opacity
+		o.fadeAlpha = ui.OverlayOpacity
 		o.fadeOffset = 0
-		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.cfg.Opacity)
+		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, ui.OverlayOpacity)
 		o.win.Move(o.baseX, o.baseY)
 		token := o.fadeToken
 		o.mu.Unlock()
@@ -601,7 +598,7 @@ func (o *Overlay) show(state viewState, autoHide bool) {
 	fadeToken := o.fadeToken
 
 	if autoHide {
-		duration := time.Duration(o.cfg.AutoHideMillis) * time.Millisecond
+		duration := time.Duration(ui.OverlayAutoHideMillis) * time.Millisecond
 		o.hide = time.AfterFunc(duration, func() {
 			o.fadeOut()
 		})
@@ -655,8 +652,8 @@ func (o *Overlay) applyStateLocked(state viewState) {
 	o.height = needed
 	o.targetHeight = needed
 	o.resizeToken++
-	o.win.Resize(o.cfg.Width, needed)
-	if state.title == o.cfg.Listening.Title {
+	o.win.Resize(ui.OverlayWidth, needed)
+	if state.title == ui.OverlayListeningTitle {
 		o.liveBody = state.body
 	} else {
 		o.liveBody = ""
@@ -683,7 +680,7 @@ func (o *Overlay) animateCrossFade(token uint64, state viewState, autoHide bool)
 		o.hide = nil
 	}
 	if autoHide {
-		duration := time.Duration(o.cfg.AutoHideMillis) * time.Millisecond
+		duration := time.Duration(ui.OverlayAutoHideMillis) * time.Millisecond
 		o.hide = time.AfterFunc(duration, func() {
 			o.fadeOut()
 		})
@@ -771,7 +768,7 @@ func (o *Overlay) animateChunk(token uint64, text string) {
 		time.Sleep(16 * time.Millisecond)
 
 		o.mu.Lock()
-		if token != o.animToken || !o.visible || o.state.title != o.cfg.Listening.Title {
+		if token != o.animToken || !o.visible || o.state.title != ui.OverlayListeningTitle {
 			o.mu.Unlock()
 			return
 		}
@@ -785,7 +782,7 @@ func (o *Overlay) animateChunk(token uint64, text string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	if token != o.animToken || !o.visible || o.state.title != o.cfg.Listening.Title {
+	if token != o.animToken || !o.visible || o.state.title != ui.OverlayListeningTitle {
 		return
 	}
 	o.animating = false
@@ -805,7 +802,7 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 		time.Sleep(28 * time.Millisecond)
 
 		o.mu.Lock()
-		if token != o.partialToken || o.animating || !o.visible || o.state.title != o.cfg.Listening.Title {
+		if token != o.partialToken || o.animating || !o.visible || o.state.title != ui.OverlayListeningTitle {
 			o.mu.Unlock()
 			return
 		}
@@ -817,19 +814,12 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 	}
 }
 
-
-
-
-
-
-
 func (o *Overlay) captureFrameLocked() *image.RGBA {
 	f := o.frameLocked()
 	f.CrossPrev = nil
 	f.CrossFadeT = 0
 	return o.renderer.Render(f)
 }
-
 
 const resizeStep = 4
 
@@ -859,7 +849,7 @@ func (o *Overlay) animateResize(token uint64) {
 				o.height = target
 			}
 		}
-		o.win.Resize(o.cfg.Width, o.height)
+		o.win.Resize(ui.OverlayWidth, o.height)
 		o.drawLocked()
 		o.mu.Unlock()
 	}
@@ -931,7 +921,7 @@ func (o *Overlay) animateFadeIn(token uint64) {
 		}
 		linear := float64(i) / float64(steps)
 		eased := ui.EaseOutCubic(linear)
-		o.fadeAlpha = linear * o.cfg.Opacity
+		o.fadeAlpha = linear * ui.OverlayOpacity
 		o.fadeOffset = int(float64(fadeSlideDistance) * (1 - eased))
 		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
 		o.win.Move(o.baseX, o.baseY-o.fadeOffset)
@@ -939,10 +929,10 @@ func (o *Overlay) animateFadeIn(token uint64) {
 	}
 
 	o.mu.Lock()
-	o.fadeAlpha = o.cfg.Opacity
+	o.fadeAlpha = ui.OverlayOpacity
 	o.fadeOffset = 0
 	o.slidingIn = false
-	_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.cfg.Opacity)
+	_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, ui.OverlayOpacity)
 	o.win.Move(o.baseX, o.baseY)
 	o.mu.Unlock()
 }
@@ -961,7 +951,7 @@ func (o *Overlay) animateFadeOut(token uint64) {
 		}
 		linear := float64(i) / float64(steps)
 		eased := ui.EaseInCubic(linear)
-		o.fadeAlpha = o.cfg.Opacity * (1 - linear)
+		o.fadeAlpha = ui.OverlayOpacity * (1 - linear)
 		o.fadeOffset = int(float64(fadeSlideDistance) * eased)
 		_ = ewmh.WmWindowOpacitySet(o.x, o.win.Id, o.fadeAlpha)
 		o.win.Move(o.baseX, o.baseY-o.fadeOffset)
@@ -978,23 +968,19 @@ func (o *Overlay) animateFadeOut(token uint64) {
 	o.mu.Unlock()
 }
 
-
-
-
-
 func (o *Overlay) repositionLocked() {
-	x, y := position(o.x, o.cfg)
+	x, y := position(o.x)
 	o.baseX = x
 	o.baseY = y
 }
 
-func position(xu *xgbutil.XUtil, cfg config.OverlayConfig) (int, int) {
+func position(xu *xgbutil.XUtil) (int, int) {
 	monX, monY, monW, _ := activeMonitor(xu)
-	x := monX + monW/2 - cfg.Width/2
+	x := monX + monW/2 - ui.OverlayWidth/2
 	if x < 0 {
 		x = 0
 	}
-	y := monY + cfg.MarginTop
+	y := monY + ui.OverlayMarginTop
 	if y < 0 {
 		y = 0
 	}
@@ -1033,5 +1019,3 @@ func activeMonitor(xu *xgbutil.XUtil) (x, y, w, h int) {
 	info := reply.ScreenInfo[0]
 	return int(info.XOrg), int(info.YOrg), int(info.Width), int(info.Height)
 }
-
-

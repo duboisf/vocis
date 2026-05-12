@@ -88,7 +88,7 @@ func TestRejectDeprecatedOpenAIKey(t *testing.T) {
 func TestRejectDeprecatedOpenAIKey_AcceptsTranscription(t *testing.T) {
 	t.Parallel()
 
-	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  backend: lemonade-chat\n")
+	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  base_url: x\n")
 	if err := rejectDeprecatedKeys("/tmp/example.yaml", data); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -96,19 +96,21 @@ func TestRejectDeprecatedOpenAIKey_AcceptsTranscription(t *testing.T) {
 
 // TestDecodeStrictRejectsUnknownField pins the policy: any key in the user's
 // config that doesn't map to a struct field must fail the load. This is
-// how we prevent stale fields (e.g. a removed `timed_out:`) from silently
-// hanging around after a rename — the user has to delete the stale key
-// before vocis starts again.
+// how we prevent stale fields from silently hanging around after a removal —
+// the user has to delete the stale key before vocis starts again.
+//
+// The previous spelling used `overlay.finishing.timed_out`; with the
+// overlay block gone, we now check a transcription-level typo instead.
 func TestDecodeStrictRejectsUnknownField(t *testing.T) {
 	t.Parallel()
 
-	data := []byte("hotkey: ctrl+shift+space\noverlay:\n  finishing:\n    title: Finishing\n    timed_out: \"oops\"\n")
+	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  totally_made_up: 1\n")
 	cfg := Default()
 	err := decodeStrict(data, &cfg)
 	if err == nil {
-		t.Fatal("expected decodeStrict to reject unknown field `timed_out`")
+		t.Fatal("expected decodeStrict to reject unknown field `totally_made_up`")
 	}
-	if !strings.Contains(err.Error(), "timed_out") {
+	if !strings.Contains(err.Error(), "totally_made_up") {
 		t.Fatalf("error should mention the offending field, got: %v", err)
 	}
 }
@@ -117,13 +119,13 @@ func TestDecodeStrictRejectsUnknownField(t *testing.T) {
 func TestDecodeStrictAcceptsKnownFields(t *testing.T) {
 	t.Parallel()
 
-	data := []byte("hotkey: ctrl+shift+space\noverlay:\n  finishing:\n    title: Finishing\n    wrapping_up: \"Wrapping up\"\n")
+	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  model: gemma4-it-e2b-FLM\n")
 	cfg := Default()
 	if err := decodeStrict(data, &cfg); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Overlay.Finishing.Title != "Finishing" {
-		t.Fatalf("expected title to be set, got %q", cfg.Overlay.Finishing.Title)
+	if cfg.Transcription.Model != "gemma4-it-e2b-FLM" {
+		t.Fatalf("expected model to be set, got %q", cfg.Transcription.Model)
 	}
 }
 
@@ -168,7 +170,7 @@ func TestRejectDeprecatedKeysRejectsNestedChatAudio(t *testing.T) {
 func TestRejectDeprecatedKeysAllowsFlatTranscription(t *testing.T) {
 	t.Parallel()
 
-	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  model: gemma4-it-e2b-FLM\n  chunk_max_seconds: 28\n  silero:\n    silence_ms: 500\n")
+	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  model: gemma4-it-e2b-FLM\n  silero:\n    onnxruntime_library: /tmp/libonnxruntime.so\n")
 	if err := rejectDeprecatedKeys("/tmp/example.yaml", data); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,5 +203,59 @@ streaming:
 	}
 	if !strings.Contains(s, "model: gemma4-it-e2b-FLM") {
 		t.Fatalf("model key dropped: %s", s)
+	}
+}
+
+// TestStripRetiredKeysDropsOverlaySection confirms a config still
+// carrying an `overlay:` block loads cleanly after the cull — every
+// overlay knob is now pinned in internal/ui, so the YAML section is
+// dropped wholesale rather than rejected.
+func TestStripRetiredKeysDropsOverlaySection(t *testing.T) {
+	t.Parallel()
+
+	in := []byte(`hotkey: ctrl+shift+space
+transcription:
+  model: gemma4-it-e2b-FLM
+overlay:
+  width: 800
+  height: 200
+  ready:
+    title: Custom
+    subtitle: Custom Sub
+`)
+	out := stripRetiredKeys(in)
+	s := string(out)
+	if strings.Contains(s, "overlay:") {
+		t.Fatalf("overlay section still present after strip: %s", s)
+	}
+	if !strings.Contains(s, "model: gemma4-it-e2b-FLM") {
+		t.Fatalf("model key dropped: %s", s)
+	}
+}
+
+// TestStripRetiredKeysDropsRecordingTuningKnobs confirms the
+// recording.sample_rate/channels/etc. knobs are dropped (with a
+// warn-log) rather than failing the strict decoder.
+func TestStripRetiredKeysDropsRecordingTuningKnobs(t *testing.T) {
+	t.Parallel()
+
+	in := []byte(`hotkey: ctrl+shift+space
+recording:
+  device: default
+  backend: pulse
+  sample_rate: 16000
+  channels: 1
+  max_duration_seconds: 120
+  duck_volume: 0.1
+`)
+	out := stripRetiredKeys(in)
+	s := string(out)
+	if !strings.Contains(s, "device: default") {
+		t.Fatalf("device key dropped: %s", s)
+	}
+	for _, k := range []string{"backend:", "sample_rate:", "channels:", "max_duration_seconds:", "duck_volume:"} {
+		if strings.Contains(s, k) {
+			t.Fatalf("retired key %q still present: %s", k, s)
+		}
 	}
 }

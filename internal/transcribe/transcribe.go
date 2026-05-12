@@ -12,8 +12,15 @@ import (
 	"github.com/openai/openai-go/v3/option"
 
 	"vocis/internal/config"
-	"vocis/internal/sessionlog"
 )
+
+// defaultRequestTimeoutSeconds is the per-HTTP-request timeout
+// applied to the transcription SDK client. Used to live as
+// `transcription.request_timeout_seconds`; pinned here once it was
+// clear nobody tuned it. 45 s covers a cold local model load + a
+// max-length chunk transcription comfortably; set to 0 in code to
+// disable, but that's a rebuild-and-redeploy change.
+const defaultRequestTimeoutSeconds = 45
 
 // ErrInputAudioBufferCommitEmpty was previously emitted by the realtime
 // WebSocket backend when a finalize-time commit found the audio buffer
@@ -36,29 +43,19 @@ type Client struct {
 }
 
 func New(cfg config.TranscriptionConfig) *Client {
-	timeout := time.Duration(cfg.RequestLimit) * time.Second
+	timeout := time.Duration(defaultRequestTimeoutSeconds) * time.Second
 
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
 
 	opts := []option.RequestOption{
 		option.WithBaseURL(baseURL),
-	}
-	// RequestLimit=0 disables the HTTP request timeout entirely — useful
-	// because Lemonade's first-request postprocess call can take minutes
-	// on a cold local model load. Only apply a timeout when the user
-	// picked a positive value.
-	if timeout > 0 {
-		opts = append(opts, option.WithRequestTimeout(timeout))
-	} else {
-		sessionlog.Infof("transcription: request timeout disabled (request_timeout_seconds=0)")
+		option.WithRequestTimeout(timeout),
 	}
 
 	sdkClient := openaisdk.NewClient(opts...)
 
-	// Plain http.Client for the chat-audio backend. timeout=0 disables
-	// the per-request cap (matches the SDK option above) so a cold
-	// local model load can complete on first request without tripping
-	// a fixed deadline.
+	// Plain http.Client for the chat-audio backend, sharing the same
+	// per-request cap as the SDK above.
 	httpClient := &http.Client{Timeout: timeout}
 
 	return &Client{

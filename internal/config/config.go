@@ -55,6 +55,14 @@ const DefaultPromptHint = "Transcribe naturally for a programmer. " +
 	"Prefer technical terminology for software, CLI, cloud, and API concepts. " +
 	"Preserve obvious technical terms, acronyms, and capitalization when the audio supports them."
 
+// DefaultChatAudioPrompt is the transcription instruction validated
+// against gemma4-it-e2b-FLM via Lemonade. The {language} token
+// expands to TranscriptionConfig.Language at request build time.
+const DefaultChatAudioPrompt = "Transcribe the following speech segment in {language}. " +
+	"Follow these specific instructions for formatting the answer:\n" +
+	"* Only output the transcription, with no newlines.\n" +
+	"* When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three."
+
 type Config struct {
 	Hotkey         string              `yaml:"hotkey"`
 	HotkeyMode     string              `yaml:"hotkey_mode"`
@@ -62,27 +70,21 @@ type Config struct {
 	Transcription  TranscriptionConfig `yaml:"transcription"`
 	Recording      RecordingConfig     `yaml:"recording"`
 	Insertion      InsertionConfig     `yaml:"insertion"`
-	Overlay        OverlayConfig       `yaml:"overlay"`
 	PostProcess    PostProcessConfig   `yaml:"postprocess"`
 	Telemetry      TelemetryConfig     `yaml:"telemetry"`
 	Recall         RecallConfig        `yaml:"recall"`
 	Speak          SpeakConfig         `yaml:"speak"`
 }
 
+// PostProcessConfig is the user-facing knobs for the optional LLM
+// cleanup pass after a dictation. Timeouts, the min-word-count
+// floor, and the sampling knobs were pinned as consts in
+// internal/transcribe — only the three policy choices remain here:
+// is cleanup on, which model does it, and what's the cleanup prompt.
 type PostProcessConfig struct {
-	Enabled              bool   `yaml:"enabled"`
-	Model                string `yaml:"model"`
-	Prompt               string `yaml:"prompt"`
-	MinWordCount         int    `yaml:"min_word_count"`
-	FirstTokenTimeoutSec int    `yaml:"first_token_timeout_seconds"`
-	TotalTimeoutSec      int    `yaml:"total_timeout_seconds"`
-	// Sampling knobs. Pointers so nil = "use the backend default".
-	// Zero is a meaningful value (temperature=0 is greedy decoding).
-	// Only Temperature and TopP are exposed — other sampler params
-	// (frequency/presence/repetition penalty, stop, min_p) were
-	// rarely-tuned knobs that bloated the config surface.
-	Temperature *float64 `yaml:"temperature,omitempty"`
-	TopP        *float64 `yaml:"top_p,omitempty"`
+	Enabled bool   `yaml:"enabled"`
+	Model   string `yaml:"model"`
+	Prompt  string `yaml:"prompt"`
 }
 
 type TelemetryConfig struct {
@@ -105,6 +107,13 @@ type SpeakConfig struct {
 // captures mic audio continuously, runs Silero VAD, and keeps a bounded
 // ring buffer of speech segments that the user can later transcribe via
 // `vocis recall pick`. See docs/overview.md for the user-facing shape.
+//
+// The VAD hysteresis (min_silence_ms / min_speech_ms / min_utterance_ms
+// / preroll_ms), the per-segment cap (max_segment_seconds), and the
+// silence-rejection thresholds (min_segment_peak / min_segment_rms)
+// were pinned as consts in internal/recall — the values were never
+// actually tuned in the field. The remaining knobs are the ring bounds
+// (retention/max_segments), the socket path, and the persist block.
 type RecallConfig struct {
 	// RetentionSeconds is how far back in time segments are kept. Older
 	// segments are evicted from the ring buffer even if MaxSegments
@@ -118,40 +127,6 @@ type RecallConfig struct {
 	// the pick subcommand connects to. Empty = auto-resolve under
 	// $XDG_RUNTIME_DIR/vocis/recall.sock (or /tmp fallback).
 	SocketPath string `yaml:"socket_path"`
-	// MinSilenceMS / MinSpeechMS / MinUtteranceMS mirror the Silero VAD
-	// hysteresis knobs in internal/transcribe/silero.go. They control
-	// when a speech episode starts, when it ends, and whether it's long
-	// enough to keep.
-	MinSilenceMS   int `yaml:"min_silence_ms"`
-	MinSpeechMS    int `yaml:"min_speech_ms"`
-	MinUtteranceMS int `yaml:"min_utterance_ms"`
-	// PrerollMS is how much audio before the VAD speech-start is
-	// included in the segment, so word onsets aren't clipped.
-	PrerollMS int `yaml:"preroll_ms"`
-	// MaxSegmentSeconds caps an individual segment's duration. A long
-	// monologue without a pause gets flushed at this boundary so the
-	// ring buffer can't grow unbounded from a single stream.
-	MaxSegmentSeconds int `yaml:"max_segment_seconds"`
-	// MinSegmentPeak is the minimum peak sample level (0-1, abs-max /
-	// 32768) a finalized segment must have to be kept in the ring
-	// buffer. Below this, the segment is treated as silence or noise
-	// and dropped. Silero VAD can get stuck declaring in-speech on
-	// low-level ambient noise (fans, keyboards) that briefly crosses
-	// its probability threshold; without this filter those sessions
-	// fill the ring with 30 s force-flushed noise segments. A value
-	// around 0.02 rejects fan/room tone while keeping quiet speech.
-	// Set to 0 to keep every segment (useful only for debugging).
-	MinSegmentPeak float64 `yaml:"min_segment_peak"`
-	// MinSegmentRMS is the minimum RMS (root mean square) sample level
-	// a finalized segment must have to be kept. RMS discriminates
-	// sustained energy from a silent segment that happens to contain
-	// a single loud click, which peak alone can't: a 24 s silence
-	// segment with one keyboard clack can easily have peak > 0.04
-	// while its RMS stays below 0.005. A value around 0.005 rejects
-	// near-silence while keeping genuinely quiet speech (speech RMS
-	// is typically 0.01-0.05 even at soft volumes). Set to 0 to
-	// disable the RMS filter and rely on peak alone.
-	MinSegmentRMS float64 `yaml:"min_segment_rms"`
 	// Persist controls whether captured segments are mirrored to disk.
 	// Default is memory-only — always-on mic audio does not land on
 	// disk unless the user explicitly opts in by setting mode=disk.
@@ -182,40 +157,25 @@ const (
 	RecallPersistDisk   = "disk"
 )
 
-// TranscriptionConfig holds every transcription knob. With only one
-// backend (lemonade-chat) left, the chunker/few-shot/Silero/batch
-// knobs that used to live under `transcription.chat_audio.*` were
-// hoisted onto this struct directly.
+// TranscriptionConfig holds the user-facing transcription knobs. The
+// protocol-shape knobs (request timeout, stream SSE on/off,
+// context_mode, history_turns, chunk_max_seconds, batch_prompt,
+// batch_max_audio_seconds) were pinned as consts in internal/transcribe
+// — they had defaults nobody ever changed in practice. What remains are
+// the things tied to the user's environment (base_url, model, the
+// Silero library path), genuine policy choices (custom prompt,
+// language, hallucination filters, ctx_size, batch_until_release,
+// continuation_rebatch), and the energy gate (min_chunk_peak/rms).
 type TranscriptionConfig struct {
 	BaseURL    string `yaml:"base_url"`
 	Model      string `yaml:"model"`
 	PromptHint string `yaml:"prompt_hint"`
-	// RequestLimit is the HTTP request timeout (seconds) applied to the
-	// transcription SDK client. Gates postprocess `/chat/completions`
-	// and any other REST calls. Set to 0 to disable the timeout
-	// entirely — useful on Lemonade where a cold local model load can
-	// legitimately take minutes. The WS handshake and write deadlines
-	// still get a 5 s floor regardless.
-	RequestLimit int `yaml:"request_timeout_seconds"`
 	// HallucinationFilters drops finals whose trimmed text exactly
 	// matches one of these entries (case-insensitive). Whisper and
 	// Gemma-FLM routinely hallucinate stock phrases — "Thank you.",
 	// "Thanks for watching." — on silence or very quiet audio. Exact
 	// match only; a substring filter would eat legitimate speech.
 	HallucinationFilters []string `yaml:"hallucination_filters"`
-	// ChunkMaxSeconds is the upper bound on a single chunk's audio
-	// duration, in seconds. Gemma 3n / 4 cap audio at 30s per request,
-	// so we hold a safety margin under that. A long monologue without
-	// a VAD-detected pause gets force-cut at this boundary and the
-	// remainder rolls into the next chunk.
-	ChunkMaxSeconds int `yaml:"chunk_max_seconds"`
-	// HistoryTurns is how many prior (user-audio, assistant-transcript)
-	// pairs to include as few-shot context on each request. 0 disables
-	// history entirely (each chunk transcribed in isolation). Larger
-	// values balloon the request body fast — at 30s of 16 kHz mono
-	// PCM16 each prior turn adds ~1.3 MB of base64 audio, so keep it
-	// modest. Default 2 matches the user's tested payload shape.
-	HistoryTurns int `yaml:"history_turns"`
 	// Prompt is the instruction text sent alongside every audio chunk.
 	// Defaults to the Google-recommended ASR prompt with formatting
 	// rules. {language} expands to Language at send time.
@@ -224,30 +184,6 @@ type TranscriptionConfig struct {
 	// "its original language" lets the model auto-detect (and is what
 	// the user tested with). Set to "en", "fr", etc. to force.
 	Language string `yaml:"language"`
-	// Stream controls whether requests use SSE streaming. true emits
-	// per-token deltas to the overlay as they arrive; false waits for
-	// the full completion before showing the chunk transcript.
-	Stream bool `yaml:"stream"`
-	// ContextMode picks how prior chunks are threaded into a new
-	// request:
-	//   "few_shot"     — each prior chunk becomes a (user-audio,
-	//                    assistant-transcript) turn pair. The model
-	//                    sees its own transcripts verbatim, which
-	//                    keeps proper-noun spelling stable across
-	//                    chunks. Cost: re-uploads the prior audio
-	//                    bytes on every request.
-	//   "inline_clips" — prior chunks are appended as additional
-	//                    `input_audio` parts inside the same user
-	//                    message, alongside the current chunk. The
-	//                    model gets all audio at once and produces
-	//                    one transcript covering only the final clip
-	//                    (per the prompt instruction). Matches the
-	//                    multi-clip shape Google's Gemma docs show.
-	//                    Cost: model has to re-decode prior audio
-	//                    instead of trusting a prior transcript.
-	// Empty value defaults to "few_shot" for backward compatibility
-	// with users who set up the backend before this knob existed.
-	ContextMode string `yaml:"context_mode"`
 	// MinChunkPeak / MinChunkRMS gate every chunk on peak (max-abs)
 	// and RMS sample energy (each normalized to 0-1 by /32768) before
 	// a /chat/completions POST. Below either threshold the chunk is
@@ -262,25 +198,6 @@ type TranscriptionConfig struct {
 	// either to 0 to disable that arm of the check.
 	MinChunkPeak float64 `yaml:"min_chunk_peak"`
 	MinChunkRMS  float64 `yaml:"min_chunk_rms"`
-	// BatchPrompt is the system prompt for the one-shot multi-segment
-	// transcription used by `vocis recall last`. The model receives
-	// every segment as a labelled input_audio part and emits one line
-	// per segment prefixed with the capture timestamp. Override to
-	// tweak formatting or per-language rules. {language} expands to
-	// Language at send time.
-	BatchPrompt string `yaml:"batch_prompt"`
-	// BatchMaxAudioSeconds caps the total audio duration packed into
-	// one /chat/completions request when `recall last` has more audio
-	// than fits in a single shot. Gemma's audio inputs are capped at
-	// ~30s each AND the model degrades with too many multimodal
-	// inputs at once, so a multi-minute window has to be split. The
-	// caller packs as many segments as fit under this budget per
-	// request and sends them sequentially. Smaller = more requests
-	// but each is fast and safe; larger = fewer requests but risk
-	// hitting the model's effective context limit. 0 = auto-derive
-	// from the loaded model's recipe_options.ctx_size via
-	// /api/v1/health.
-	BatchMaxAudioSeconds int `yaml:"batch_max_audio_seconds"`
 	// CtxSize requests a specific Lemonade context-window size for
 	// the loaded model. 0 (default) leaves Lemonade alone — uses
 	// whatever ctx_size the server was started with (env var
@@ -317,36 +234,23 @@ type TranscriptionConfig struct {
 	// one POST per utterance so there's nothing to rebatch). Off by
 	// default.
 	ContinuationRebatch bool `yaml:"continuation_rebatch"`
-	// Silero is the VAD hysteresis block used by the chat-audio
-	// chunker. The realtime-WS backend (gone since the previous
-	// commit) used to read these knobs from a top-level streaming:
-	// section; now that chat-audio is the only consumer, they live
-	// inline with the rest of its config.
+	// Silero is the path to the onnxruntime library. The hysteresis
+	// values (silence_ms / speech_ms / min_utterance_ms) are pinned
+	// in internal/transcribe — they were never tuned in the field.
 	Silero SileroConfig `yaml:"silero"`
 }
 
-// SileroConfig holds the Silero VAD hysteresis knobs the chat-audio
-// chunker uses to bound a speech episode. The semantic field names
-// (silence_ms / speech_ms) replace the OpenAI-realtime-leaking names
-// the old streaming: section used (silence_duration_ms /
-// prefix_padding_ms).
+// SileroConfig is just the onnxruntime library path now. The
+// hysteresis knobs (silence_ms / speech_ms / min_utterance_ms) were
+// pinned as consts in internal/transcribe; the path stays in config
+// because it's the one piece of Silero state that varies with how
+// the user installed onnxruntime.
 type SileroConfig struct {
 	// OnnxruntimeLibrary is an optional absolute path to
 	// libonnxruntime.so. When empty, vocis auto-discovers the library
 	// from common install locations. Supports $HOME / ${VAR} expansion
 	// at runtime.
 	OnnxruntimeLibrary string `yaml:"onnxruntime_library"`
-	// SilenceMS is the minimum non-speech duration that closes a
-	// speech episode. Was streaming.silence_duration_ms. Default 500.
-	SilenceMS int `yaml:"silence_ms"`
-	// SpeechMS is the minimum speech duration that opens a speech
-	// episode. Was streaming.prefix_padding_ms. Default 150.
-	SpeechMS int `yaml:"speech_ms"`
-	// MinUtteranceMS is the minimum accumulated speech an episode
-	// needs before it can be committed. Shorter episodes are dropped
-	// to keep Gemma from hallucinating on sub-second clips. Default
-	// 1000.
-	MinUtteranceMS int `yaml:"min_utterance_ms"`
 }
 
 const (
@@ -354,38 +258,12 @@ const (
 	ChatAudioContextInlineClips = "inline_clips"
 )
 
-
-// DefaultChatAudioPrompt is the transcription instruction validated
-// against gemma4-it-e2b-FLM via Lemonade. The {language} token
-// expands to ChatAudioConfig.Language at request build time.
-const DefaultChatAudioPrompt = "Transcribe the following speech segment in {language}. " +
-	"Follow these specific instructions for formatting the answer:\n" +
-	"* Only output the transcription, with no newlines.\n" +
-	"* When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three."
-
-// DefaultBatchPrompt drives the one-shot multi-segment batch path used
-// by `vocis recall last`. Each segment arrives as a labelled
-// input_audio part of the form "[clip N captured at HH:MM:SS]:" and
-// the model is asked to emit exactly one line per segment, prefixed
-// with that timestamp. {language} expands to ChatAudioConfig.Language.
-const DefaultBatchPrompt = "Transcribe each of the following speech segments in {language}. " +
-	"Each segment is preceded by a label of the form \"[clip N captured at HH:MM:SS]:\". " +
-	"Output one line per input segment, in input order, formatted exactly as:\n" +
-	"  HH:MM:SS\\t<transcript>\n" +
-	"where HH:MM:SS is copied verbatim from the segment's label and <transcript> is the cleaned speech.\n" +
-	"Cleanup: remove fillers (um, uh), fix punctuation, write digits for numbers (1.7 not one point seven). " +
-	"If a segment has no intelligible speech, output its timestamp followed by a tab and nothing else. " +
-	"Never output preamble, commentary, bullet points, or anything beyond the requested lines."
-
 type RecordingConfig struct {
-	Backend            string  `yaml:"backend"`
-	Device             string  `yaml:"device"`
-	SampleRate         int     `yaml:"sample_rate"`
-	Channels           int     `yaml:"channels"`
-	MaxDurationSeconds int     `yaml:"max_duration_seconds"`
-	DuckVolume         float64 `yaml:"duck_volume"`
+	// Device is the PulseAudio source ID to record from. "default" /
+	// empty picks the system default source. Run `pactl list short
+	// sources` to see candidates.
+	Device string `yaml:"device"`
 }
-
 
 type InsertionConfig struct {
 	Mode             string   `yaml:"mode"`
@@ -423,78 +301,14 @@ type InsertionConfig struct {
 	KittyVerifyPaste bool `yaml:"kitty_verify_paste"`
 }
 
-type OverlayConfig struct {
-	Width          int            `yaml:"width"`
-	Height         int            `yaml:"height"`
-	MarginTop      int            `yaml:"margin_top"`
-	Opacity        float64        `yaml:"opacity"`
-	AutoHideMillis int            `yaml:"auto_hide_millis"`
-	Font           string         `yaml:"font"`
-	FontSize       float64        `yaml:"font_size"`
-	Branding       string         `yaml:"branding"`
-	Ready          OverlayReady   `yaml:"ready"`
-	Listening      OverlayListen  `yaml:"listening"`
-	Finishing      OverlayFinish  `yaml:"finishing"`
-	Success        OverlaySuccess `yaml:"success"`
-	Error          OverlayError   `yaml:"error"`
-	Warning        OverlayWarning `yaml:"warning"`
-}
-
-type OverlayReady struct {
-	Title    string `yaml:"title"`
-	Subtitle string `yaml:"subtitle"`
-}
-
-type OverlayListen struct {
-	Title        string `yaml:"title"`
-	Suffix       string `yaml:"suffix"`
-	SubmitHint   string `yaml:"submit_hint"`
-	Connecting   string `yaml:"connecting"`
-	Reconnecting string `yaml:"reconnecting"`
-	Connected    string `yaml:"connected"`
-	// LoadingModel is the subtitle shown while vocis is forcing a
-	// local transcription model into memory at session-start. Supports
-	// {model} template expansion with the configured transcribe model
-	// name. Only applies on the Lemonade backend — cloud backends
-	// always have the model warm.
-	LoadingModel string `yaml:"loading_model"`
-}
-
-type OverlayFinish struct {
-	Title      string `yaml:"title"`
-	CancelHint string `yaml:"cancel_hint"`
-	WrappingUp string `yaml:"wrapping_up"`
-	PPWait     string `yaml:"pp_wait"`
-	PPStream   string `yaml:"pp_stream"`
-	PhaseDone  string `yaml:"phase_done"`
-}
-
-type OverlaySuccess struct {
-	Title    string `yaml:"title"`
-	Subtitle string `yaml:"subtitle"`
-}
-
-type OverlayError struct {
-	Title string `yaml:"title"`
-}
-
-type OverlayWarning struct {
-	Title              string `yaml:"title"`
-	NoSpeech           string `yaml:"no_speech"`
-	Cancelled          string `yaml:"cancelled"`
-	PostprocessSkipped string `yaml:"postprocess_skipped"`
-	TargetGone         string `yaml:"target_gone"`
-}
-
 func Default() Config {
 	return Config{
 		Hotkey:     "ctrl+shift+space",
 		HotkeyMode: "hold",
 		Transcription: TranscriptionConfig{
-			BaseURL:      "http://localhost:13305/api/v1",
-			Model:        "gemma4-it-e2b-FLM",
-			PromptHint:   DefaultPromptHint,
-			RequestLimit: 45,
+			BaseURL:    "http://localhost:13305/api/v1",
+			Model:      "gemma4-it-e2b-FLM",
+			PromptHint: DefaultPromptHint,
 			HallucinationFilters: []string{
 				"Thank you.",
 				"Thanks.",
@@ -505,28 +319,12 @@ func Default() Config {
 				"you",
 				".",
 			},
-			// 28s holds a 2s margin under the documented 30s cap so
-			// rounding/header overhead can't trip the limit.
-			ChunkMaxSeconds: 28,
-			// 2 prior turns matches the user-tested payload. Adds
-			// ~2.6 MB worst-case base64 to a request body — large
-			// but well under any sane HTTP body limit.
-			HistoryTurns: 2,
-			Prompt:       DefaultChatAudioPrompt,
-			Language:     "its original language",
-			Stream:       true,
-			ContextMode:  ChatAudioContextFewShot,
+			Prompt:   DefaultChatAudioPrompt,
+			Language: "its original language",
 			// Energy gate matching recall's defaults. Rejects fan
 			// hum / room tone but keeps quiet speech.
 			MinChunkPeak: 0.02,
 			MinChunkRMS:  0.005,
-			BatchPrompt:  DefaultBatchPrompt,
-			// 0 = auto: query Lemonade /api/v1/health for the loaded
-			// model's recipe_options.ctx_size and compute a safe
-			// audio-seconds budget from it (Gemma audio costs 6.25
-			// tokens/s per the USM encoder spec). Override with a
-			// positive number to pin the budget.
-			BatchMaxAudioSeconds: 0,
 			Silero: SileroConfig{
 				// $HOME/opt/onnxruntime/lib/... is where the
 				// onnxruntime release tarball lands when unpacked
@@ -536,18 +334,10 @@ func Default() Config {
 				// installed system-wide can blank the field to fall
 				// back to the auto-discovery candidates.
 				OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
-				SilenceMS:          500,
-				SpeechMS:           150,
-				MinUtteranceMS:     1000,
 			},
 		},
 		Recording: RecordingConfig{
-			Backend:            "auto",
-			Device:             "default",
-			SampleRate:         16000,
-			Channels:           1,
-			MaxDurationSeconds: 120,
-			DuckVolume:         0.1,
+			Device: "default",
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
@@ -568,49 +358,6 @@ func Default() Config {
 			KittyRemoteControl: true,
 			KittyVerifyPaste:   true,
 		},
-		Overlay: OverlayConfig{
-			Width:          620,
-			Height:         132,
-			MarginTop:      44,
-			Opacity:        0.94,
-			AutoHideMillis: 1800,
-			Branding:       "Vocis",
-			Ready: OverlayReady{
-				Title:    "Ready",
-				Subtitle: "Voice typing is armed",
-			},
-			Listening: OverlayListen{
-				Title:        "Listening",
-				Suffix:       "— release to paste",
-				SubmitHint:   "⏎ submit",
-				Connecting:   "○ Connecting...",
-				Reconnecting: "○ Reconnecting... (attempt {attempt}/{max})",
-				Connected:    "● Ready to type into {window}",
-				LoadingModel: "○ Loading {model}...",
-			},
-			Finishing: OverlayFinish{
-				Title:      "Finishing",
-				CancelHint: "— press {shortcut} to cancel",
-				WrappingUp: "Wrapping up",
-				PPWait:     "Wait",
-				PPStream:   "Stream",
-				PhaseDone:  "done",
-			},
-			Success: OverlaySuccess{
-				Title:    "Typed",
-				Subtitle: "Transcription inserted into your active app",
-			},
-			Error: OverlayError{
-				Title: "Error",
-			},
-			Warning: OverlayWarning{
-				Title:              "Heads up",
-				NoSpeech:           "No speech detected",
-				Cancelled:          "Cancelled — transcription discarded",
-				PostprocessSkipped: "Raw text pasted — cleanup was skipped due to a timeout or error",
-				TargetGone:         "Target window closed — transcript copied to clipboard",
-			},
-		},
 		PostProcess: PostProcessConfig{
 			Enabled: true,
 			// Same model as transcription. On the chat-audio backend the
@@ -620,12 +367,8 @@ func Default() Config {
 			// they're separate calls but both go to gemma — Lemonade's
 			// llm slot only fits one model, so reusing the transcription
 			// model avoids a 5-10 s slot swap on every dictation.
-			Model:                "gemma4-it-e2b-FLM",
-			Prompt:               DefaultPostProcessPrompt,
-			MinWordCount:         10,
-			FirstTokenTimeoutSec: 10,
-			TotalTimeoutSec:      15,
-			Temperature:          floatPtr(0.2),
+			Model:  "gemma4-it-e2b-FLM",
+			Prompt: DefaultPostProcessPrompt,
 		},
 		Telemetry: TelemetryConfig{
 			Enabled:  false,
@@ -636,18 +379,11 @@ func Default() Config {
 			// an always-on recall. Segments are small (~100-400 KB each);
 			// 7 days at typical speaking pace stays well under 1 GB even
 			// with persist.mode=disk. Set to 0 for unbounded time.
-			RetentionSeconds:  604800,
+			RetentionSeconds: 604800,
 			// 2000 keeps disk under ~800 MB worst-case. Set to 0 for
 			// unbounded count (only the time bound applies).
-			MaxSegments:       2000,
-			SocketPath:        "",
-			MinSilenceMS:      500,
-			MinSpeechMS:       150,
-			MinUtteranceMS:    500,
-			PrerollMS:         300,
-			MaxSegmentSeconds: 30,
-			MinSegmentPeak:    0.02,
-			MinSegmentRMS:     0.005,
+			MaxSegments: 2000,
+			SocketPath:  "",
 			Persist: RecallPersistConfig{
 				Mode: RecallPersistMemory,
 				Dir:  defaultRecallStateDir(),
@@ -666,8 +402,6 @@ func Default() Config {
 		},
 	}
 }
-
-func floatPtr(v float64) *float64 { return &v }
 
 // defaultRecallStateDir returns the default for `recall.persist.dir`.
 // Emits the portable `$HOME/.local/state/vocis/recall` form rather
@@ -769,8 +503,35 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"postprocess.presence_penalty", "config-cull", "rarely-tuned sampler knob"},
 	{"postprocess.repetition_penalty", "config-cull", "rarely-tuned sampler knob"},
 	{"postprocess.stop", "config-cull", "rarely-tuned sampler knob"},
+	{"postprocess.min_word_count", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
+	{"postprocess.first_token_timeout_seconds", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
+	{"postprocess.total_timeout_seconds", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
+	{"postprocess.temperature", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
+	{"postprocess.top_p", "config-cull", "rarely-tuned sampler knob (no default; hardcode if needed)"},
 	{"recall.batch_gap_ms", "one-shot-batch", "`recall last` no longer concatenates PCM; each segment is sent as its own input_audio part"},
 	{"recall.batch_max_seconds", "one-shot-batch", "`recall last` no longer concatenates PCM; total audio is now bounded by Gemma's context window"},
+	{"recall.min_silence_ms", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
+	{"recall.min_speech_ms", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
+	{"recall.min_utterance_ms", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
+	{"recall.preroll_ms", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
+	{"recall.max_segment_seconds", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
+	{"recall.min_segment_peak", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
+	{"recall.min_segment_rms", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
+	{"recording.backend", "config-cull", "auto-detected; pinned in internal/recorder"},
+	{"recording.sample_rate", "config-cull", "Silero+chat-audio require 16 kHz; pinned in internal/recorder"},
+	{"recording.channels", "config-cull", "chat-audio requires mono; pinned in internal/recorder"},
+	{"recording.max_duration_seconds", "config-cull", "pinned in internal/recorder as the default; nobody tuned it"},
+	{"recording.duck_volume", "config-cull", "pinned in internal/audio as the default; nobody tuned it"},
+	{"transcription.request_timeout_seconds", "config-cull", "pinned in internal/transcribe; the 45s default was never tuned"},
+	{"transcription.chunk_max_seconds", "config-cull", "pinned in internal/transcribe; 28s sits 2s under Gemma's 30s cap"},
+	{"transcription.history_turns", "config-cull", "pinned in internal/transcribe; 2 turns was never tuned"},
+	{"transcription.stream", "config-cull", "pinned in internal/transcribe as true (SSE streaming is always on)"},
+	{"transcription.context_mode", "config-cull", "pinned in internal/transcribe as few_shot; inline_clips was never picked"},
+	{"transcription.batch_prompt", "config-cull", "pinned in internal/transcribe as the documented batch prompt"},
+	{"transcription.batch_max_audio_seconds", "config-cull", "always auto-derived from ctx_size in internal/transcribe"},
+	{"transcription.silero.silence_ms", "config-cull", "pinned in internal/transcribe (500 ms) — never tuned"},
+	{"transcription.silero.speech_ms", "config-cull", "pinned in internal/transcribe (150 ms) — never tuned"},
+	{"transcription.silero.min_utterance_ms", "config-cull", "pinned in internal/transcribe (1000 ms) — never tuned"},
 }
 
 // retiredSections lists whole YAML sections (top-level or nested via
@@ -787,6 +548,7 @@ var retiredKeys = []struct{ path, since, reason string }{
 var retiredSections = []struct{ path, since, reason string }{
 	{"streaming", "streaming-fold", "streaming: was folded into transcription.silero (silence_ms / speech_ms / min_utterance_ms / onnxruntime_library)"},
 	{"transcription.chat_audio", "chat-audio-flatten", "every field on transcription.chat_audio.* was hoisted to transcription.* directly (chunk_max_seconds, history_turns, prompt, language, stream, context_mode, min_chunk_peak, min_chunk_rms, batch_prompt, batch_max_audio_seconds, ctx_size, batch_until_release, continuation_rebatch, silero)"},
+	{"overlay", "config-cull", "every overlay knob (dimensions, opacity, font, title/subtitle text, templates) was pinned as a Go const in internal/ui — UI copy is no longer config-driven"},
 }
 
 // stripRetiredKeys parses the YAML, walks the retiredKeys list, and
@@ -917,25 +679,11 @@ func (c Config) Validate() error {
 		return errors.New("transcription.model must not be empty")
 	}
 
-	if c.Transcription.ChunkMaxSeconds < 1 || c.Transcription.ChunkMaxSeconds > 30 {
-		return errors.New("transcription.chunk_max_seconds must be between 1 and 30")
-	}
-	if c.Transcription.HistoryTurns < 0 || c.Transcription.HistoryTurns > 8 {
-		return errors.New("transcription.history_turns must be between 0 and 8")
-	}
 	if strings.TrimSpace(c.Transcription.Prompt) == "" {
 		return errors.New("transcription.prompt must not be empty")
 	}
 	if strings.TrimSpace(c.Transcription.Language) == "" {
 		return errors.New("transcription.language must not be empty")
-	}
-	switch c.Transcription.ContextMode {
-	case "", ChatAudioContextFewShot, ChatAudioContextInlineClips:
-	default:
-		return fmt.Errorf(
-			"transcription.context_mode must be %q or %q",
-			ChatAudioContextFewShot, ChatAudioContextInlineClips,
-		)
 	}
 	if c.Transcription.MinChunkPeak < 0 || c.Transcription.MinChunkPeak > 1 {
 		return errors.New("transcription.min_chunk_peak must be between 0 and 1")
@@ -943,26 +691,11 @@ func (c Config) Validate() error {
 	if c.Transcription.MinChunkRMS < 0 || c.Transcription.MinChunkRMS > 1 {
 		return errors.New("transcription.min_chunk_rms must be between 0 and 1")
 	}
-	if strings.TrimSpace(c.Transcription.BatchPrompt) == "" {
-		return errors.New("transcription.batch_prompt must not be empty")
-	}
-	if c.Transcription.BatchMaxAudioSeconds < 0 || c.Transcription.BatchMaxAudioSeconds > 600 {
-		return errors.New("transcription.batch_max_audio_seconds must be between 0 and 600")
-	}
 	if c.Transcription.CtxSize < 0 || c.Transcription.CtxSize > 1048576 {
 		return errors.New("transcription.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
 	}
 	if c.Transcription.BatchUntilRelease && c.Transcription.ContinuationRebatch {
 		return errors.New("transcription.batch_until_release and continuation_rebatch are mutually exclusive (batch_until_release already sends one POST per utterance, so there's nothing to rebatch)")
-	}
-	if c.Transcription.Silero.SilenceMS < 0 || c.Transcription.Silero.SilenceMS > 5000 {
-		return errors.New("transcription.silero.silence_ms must be between 0 and 5000")
-	}
-	if c.Transcription.Silero.SpeechMS < 0 || c.Transcription.Silero.SpeechMS > 2000 {
-		return errors.New("transcription.silero.speech_ms must be between 0 and 2000")
-	}
-	if c.Transcription.Silero.MinUtteranceMS < 0 || c.Transcription.Silero.MinUtteranceMS > 10000 {
-		return errors.New("transcription.silero.min_utterance_ms must be between 0 and 10000")
 	}
 
 	switch c.HotkeyMode {
@@ -971,37 +704,10 @@ func (c Config) Validate() error {
 		return fmt.Errorf("hotkey_mode must be hold or toggle")
 	}
 
-	if c.Transcription.RequestLimit < 0 || c.Transcription.RequestLimit > 300 {
-		return errors.New("transcription.request_timeout_seconds must be between 0 (disabled) and 300")
-	}
-
 	switch c.Insertion.Mode {
 	case "auto", "clipboard", "type":
 	default:
 		return fmt.Errorf("insertion.mode must be auto, clipboard, or type")
-	}
-
-	if c.Recording.SampleRate <= 0 || c.Recording.SampleRate > 48000 {
-		return errors.New("recording.sample_rate must be between 1 and 48000")
-	}
-
-	if c.Recording.Channels <= 0 || c.Recording.Channels > 2 {
-		return errors.New("recording.channels must be 1 or 2")
-	}
-
-	if c.Recording.MaxDurationSeconds < 0 || c.Recording.MaxDurationSeconds > 600 {
-		return errors.New("recording.max_duration_seconds must be between 0 and 600")
-	}
-
-	switch c.Recording.Backend {
-	case "", "auto", "pulse":
-	default:
-		return fmt.Errorf("recording.backend must be auto or pulse")
-	}
-
-
-	if c.Overlay.Width < 200 || c.Overlay.Height < 80 {
-		return errors.New("overlay dimensions are too small")
 	}
 
 	// 30-day ceiling on retention: keeps the validation bound sane
@@ -1016,27 +722,6 @@ func (c Config) Validate() error {
 	}
 	if c.Recall.RetentionSeconds == 0 && c.Recall.MaxSegments == 0 {
 		return errors.New("recall: at least one of retention_seconds or max_segments must be > 0")
-	}
-	if c.Recall.MinSilenceMS < 0 || c.Recall.MinSilenceMS > 5000 {
-		return errors.New("recall.min_silence_ms must be between 0 and 5000")
-	}
-	if c.Recall.MinSpeechMS < 0 || c.Recall.MinSpeechMS > 5000 {
-		return errors.New("recall.min_speech_ms must be between 0 and 5000")
-	}
-	if c.Recall.MinUtteranceMS < 0 || c.Recall.MinUtteranceMS > 10000 {
-		return errors.New("recall.min_utterance_ms must be between 0 and 10000")
-	}
-	if c.Recall.PrerollMS < 0 || c.Recall.PrerollMS > 5000 {
-		return errors.New("recall.preroll_ms must be between 0 and 5000")
-	}
-	if c.Recall.MaxSegmentSeconds < 1 || c.Recall.MaxSegmentSeconds > 300 {
-		return errors.New("recall.max_segment_seconds must be between 1 and 300")
-	}
-	if c.Recall.MinSegmentPeak < 0 || c.Recall.MinSegmentPeak > 1 {
-		return errors.New("recall.min_segment_peak must be between 0 and 1")
-	}
-	if c.Recall.MinSegmentRMS < 0 || c.Recall.MinSegmentRMS > 1 {
-		return errors.New("recall.min_segment_rms must be between 0 and 1")
 	}
 	switch c.Recall.Persist.Mode {
 	case "", RecallPersistMemory, RecallPersistDisk:
@@ -1054,38 +739,5 @@ func (c Config) Validate() error {
 		return errors.New("speak.voice must not be empty")
 	}
 
-	if err := c.PostProcess.validate(); err != nil {
-		return err
-	}
-
-	c.validateOverlayTemplates()
-
 	return nil
-}
-
-func (p PostProcessConfig) validate() error {
-	if p.Temperature != nil && (*p.Temperature < 0 || *p.Temperature > 2) {
-		return errors.New("postprocess.temperature must be between 0 and 2")
-	}
-	if p.TopP != nil && (*p.TopP <= 0 || *p.TopP > 1) {
-		return errors.New("postprocess.top_p must be between 0 (exclusive) and 1")
-	}
-	return nil
-}
-
-func (c Config) validateOverlayTemplates() {
-	templates := []struct {
-		key      string
-		template string
-		expected []string
-	}{
-		{"overlay.listening.connected", c.Overlay.Listening.Connected, []string{"window"}},
-		{"overlay.listening.reconnecting", c.Overlay.Listening.Reconnecting, []string{"attempt", "max"}},
-		{"overlay.finishing.cancel_hint", c.Overlay.Finishing.CancelHint, []string{"shortcut"}},
-	}
-	for _, tt := range templates {
-		for _, w := range ValidateTemplate(tt.template, tt.expected) {
-			sessionlog.Warnf("config %s: %s", tt.key, w)
-		}
-	}
 }

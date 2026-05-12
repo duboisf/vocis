@@ -9,6 +9,12 @@ import (
 	"vocis/internal/sessionlog"
 )
 
+// DefaultDuckVolume is the canonical "ducked-while-recording" sink
+// level. Used to live in `recording.duck_volume`; pinned here once
+// the field came out of config because nobody tuned it. 0.1 means
+// other audio drops to 10% of its current volume during dictation.
+const DefaultDuckVolume = 0.1
+
 // Ducker lowers the default audio sink volume while recording and restores it after.
 type Ducker struct {
 	savedVolumes map[string]string

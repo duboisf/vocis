@@ -24,6 +24,56 @@ import (
 	"vocis/internal/telemetry"
 )
 
+// chat-audio protocol-shape constants pinned at the package level.
+// These used to be YAML knobs but had defaults nobody changed in
+// practice, so they live as Go consts at the consumer site to keep
+// the config surface small.
+const (
+	// defaultChunkMaxSeconds is the upper bound on a single chunk's
+	// audio duration. Gemma 3n / 4 cap audio at 30 s per request, so
+	// we hold a 2 s safety margin. A long monologue without a
+	// VAD-detected pause gets force-cut at this boundary and the
+	// remainder rolls into the next chunk.
+	defaultChunkMaxSeconds = 28
+	// defaultHistoryTurns is how many prior (user-audio,
+	// assistant-transcript) pairs ride along on each request as
+	// few-shot context. Each turn adds ~1.3 MB of base64 audio worst-
+	// case at 30 s/16 kHz mono PCM16, so 2 is a balance between
+	// cross-chunk consistency and request size.
+	defaultHistoryTurns = 2
+	// defaultStreamSSE controls whether requests use SSE streaming.
+	// Always on — partials are how the user knows the model is
+	// actually generating their transcript.
+	defaultStreamSSE = true
+	// defaultContextMode picks how prior chunks are threaded into a
+	// new request. ChatAudioContextFewShot pairs each prior chunk
+	// with its transcript and was the validated default.
+	defaultContextMode = config.ChatAudioContextFewShot
+	// defaultSileroSilenceMS / defaultSileroSpeechMS /
+	// defaultSileroMinUtteranceMS are the Silero hysteresis knobs
+	// used by the chat-audio chunker. Pinned here because nobody
+	// ever tuned them in practice — the values match the OpenAI-
+	// realtime defaults the original code shipped with.
+	defaultSileroSilenceMS     = 500
+	defaultSileroSpeechMS      = 150
+	defaultSileroMinUtteranceMS = 1000
+)
+
+// DefaultBatchPrompt drives the one-shot multi-segment batch path
+// used by `vocis recall last`. Each segment arrives as a labelled
+// input_audio part of the form "[clip N captured at HH:MM:SS]:" and
+// the model is asked to emit exactly one line per segment, prefixed
+// with that timestamp. {language} expands to TranscriptionConfig.Language
+// at request build time. Used to live as `transcription.batch_prompt`.
+const DefaultBatchPrompt = "Transcribe each of the following speech segments in {language}. " +
+	"Each segment is preceded by a label of the form \"[clip N captured at HH:MM:SS]:\". " +
+	"Output one line per input segment, in input order, formatted exactly as:\n" +
+	"  HH:MM:SS\\t<transcript>\n" +
+	"where HH:MM:SS is copied verbatim from the segment's label and <transcript> is the cleaned speech.\n" +
+	"Cleanup: remove fillers (um, uh), fix punctuation, write digits for numbers (1.7 not one point seven). " +
+	"If a segment has no intelligible speech, output its timestamp followed by a tab and nothing else. " +
+	"Never output preamble, commentary, bullet points, or anything beyond the requested lines."
+
 // chatAudioSession is the lemonade-chat backend's implementation of the
 // dictation surface. Unlike the realtime-WebSocket transports, this
 // backend is request/response: each VAD-detected utterance becomes one
@@ -47,17 +97,17 @@ type chatAudioSession struct {
 	endpoint   string
 	model      string
 
-	chunkMaxSamples      int
-	historyTurns         int
-	promptTemplate       string
-	language             string
-	streamSSE            bool
-	contextMode          string
-	minChunkPeak         float64
-	minChunkRMS          float64
-	extraSystemPrompt    string
-	batchUntilRelease    bool
-	continuationRebatch  bool
+	chunkMaxSamples     int
+	historyTurns        int
+	promptTemplate      string
+	language            string
+	streamSSE           bool
+	contextMode         string
+	minChunkPeak        float64
+	minChunkRMS         float64
+	extraSystemPrompt   string
+	batchUntilRelease   bool
+	continuationRebatch bool
 
 	// lastEmittedFormatted is the segment text most recently sent on
 	// the events channel as DictationEventSegment or as the Text of a
@@ -144,25 +194,17 @@ func startChatAudioSession(
 	if err != nil {
 		return nil, err
 	}
-	chunkMax := cfg.ChunkMaxSeconds
-	if chunkMax <= 0 {
-		chunkMax = 28
-	}
-	contextMode := cfg.ContextMode
-	if contextMode == "" {
-		contextMode = config.ChatAudioContextFewShot
-	}
 	pumpCtx, cancel := context.WithCancel(ctx)
 	s := &chatAudioSession{
 		httpClient:           httpClient,
 		endpoint:             endpoint,
 		model:                cfg.Model,
-		chunkMaxSamples:      chunkMax * opts.SampleRate,
-		historyTurns:         cfg.HistoryTurns,
+		chunkMaxSamples:      defaultChunkMaxSeconds * opts.SampleRate,
+		historyTurns:         defaultHistoryTurns,
 		promptTemplate:       cfg.Prompt,
 		language:             cfg.Language,
-		streamSSE:            cfg.Stream,
-		contextMode:          contextMode,
+		streamSSE:            defaultStreamSSE,
+		contextMode:          defaultContextMode,
 		minChunkPeak:         cfg.MinChunkPeak,
 		minChunkRMS:          cfg.MinChunkRMS,
 		extraSystemPrompt:    opts.ExtraSystemPrompt,
@@ -180,7 +222,7 @@ func startChatAudioSession(
 	s.liveSegments.Store(true)
 
 	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t context_mode=%s batch_until_release=%t continuation_rebatch=%t",
-		s.model, chunkMax, s.historyTurns, s.streamSSE, s.contextMode, s.batchUntilRelease, s.continuationRebatch)
+		s.model, defaultChunkMaxSeconds, s.historyTurns, s.streamSSE, s.contextMode, s.batchUntilRelease, s.continuationRebatch)
 
 	// "Connection ready" is synthetic for the chat-audio backend — there
 	// is no upfront handshake to await. The run goroutine fires
@@ -285,26 +327,14 @@ func (s *chatAudioSession) run(
 	} else if s.sampleRate != sileroSampleRate {
 		sessionlog.Warnf("chat-audio: silero requires 16kHz, got %d; falling back to chunk_max-only", s.sampleRate)
 	} else {
-		minSilence := silero.SilenceMS
-		if minSilence <= 0 {
-			minSilence = 500
-		}
-		minSpeech := silero.SpeechMS
-		if minSpeech <= 0 {
-			minSpeech = 150
-		}
-		minUtterance := silero.MinUtteranceMS
-		if minUtterance <= 0 {
-			minUtterance = 1000
-		}
-		v, err := NewSileroVAD(minSilence, minSpeech, minUtterance)
+		v, err := NewSileroVAD(defaultSileroSilenceMS, defaultSileroSpeechMS, defaultSileroMinUtteranceMS)
 		if err != nil {
 			sessionlog.Warnf("chat-audio: silero construction failed: %v", err)
 		} else {
 			defer v.Destroy()
 			vad = v
 			sessionlog.Infof("chat-audio: silero VAD active silence=%dms speech=%dms min_utterance=%dms",
-				minSilence, minSpeech, minUtterance)
+				defaultSileroSilenceMS, defaultSileroSpeechMS, defaultSileroMinUtteranceMS)
 		}
 	}
 
@@ -1189,9 +1219,6 @@ type BatchSegment struct {
 // On /health failure we fall back to 30 s — matches Gemma's per-clip
 // cap and is safe for any reasonable model.
 func (c *Client) resolveBatchBudget(ctx context.Context) (int, string) {
-	if pinned := c.cfg.BatchMaxAudioSeconds; pinned > 0 {
-		return pinned, "config"
-	}
 	const (
 		audioTokensPerSec = 6.25
 		audioFraction     = 0.40 // 40% of ctx for audio, 60% for prompt + labels + response
@@ -1325,7 +1352,7 @@ func (c *Client) transcribeBatchSub(ctx context.Context, endpoint string, index,
 	)
 	defer telemetry.EndSpan(span, nil)
 
-	systemPrompt := strings.ReplaceAll(c.cfg.BatchPrompt, "{language}", c.cfg.Language)
+	systemPrompt := strings.ReplaceAll(DefaultBatchPrompt, "{language}", c.cfg.Language)
 	parts := make([]map[string]any, 0, 2*len(segments))
 	var totalWAVBytes, totalSamples int
 	for i, seg := range segments {

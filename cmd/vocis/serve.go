@@ -82,7 +82,7 @@ func runServe() error {
 	sessionlog.Infof("loaded config: %s", path)
 	sessionlog.Infof("hotkey: %s", cfg.Hotkey)
 
-	ov, err := x11.NewOverlay(cfg.Overlay)
+	ov, err := x11.NewOverlay()
 	if err != nil {
 		return fmt.Errorf("init overlay: %w", err)
 	}
@@ -94,7 +94,7 @@ func runServe() error {
 	runErr := app.New(cfg, app.Deps{
 		Overlay:        ov,
 		Injector:       inject.New(cfg.Insertion, compositor, cfg.Hotkey),
-		Ducker:         audio.NewDucker(cfg.Recording.DuckVolume),
+		Ducker:         audio.NewDucker(audio.DefaultDuckVolume),
 		RegisterHotkey: registrar,
 		HotkeyBackend:  backend,
 	}).Run(ctx)

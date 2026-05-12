@@ -22,6 +22,41 @@ type chatStream interface {
 	Err() error
 }
 
+// Postprocess timing and floor constants. These used to live as
+// YAML knobs under `postprocess.*` (min_word_count, first_token_
+// timeout_seconds, total_timeout_seconds, temperature). The values
+// were never tuned in practice, so they're pinned here at the
+// consumer site to keep the YAML surface small.
+//
+// The timeout values are vars (not consts) so postprocess_test.go
+// can shrink them to keep the timeout-branch tests fast — that's the
+// one place a runtime override is justified, and there's no plan to
+// expose them as YAML knobs again.
+const (
+	// defaultMinWordCount skips the postprocess call entirely when
+	// the transcript has fewer words than this — short utterances
+	// (single commands, "yes", "go ahead") don't benefit from
+	// LLM cleanup and pay the round-trip cost for no gain.
+	defaultMinWordCount = 10
+	// defaultTemperature is the sampling temperature handed to the
+	// LLM for cleanup. Low enough to keep the output faithful to
+	// the input transcript without re-writing the user's words.
+	defaultTemperature = 0.2
+)
+
+var (
+	// defaultFirstTokenTimeoutSec is how long to wait for the LLM's
+	// first SSE delta before declaring the postprocess attempt
+	// failed and falling back to the raw transcript. Lemonade with
+	// a cold model can legitimately take 5-10 s.
+	defaultFirstTokenTimeoutSec = 10
+	// defaultTotalTimeoutSec is the hard cap on the postprocess
+	// request. If the full response hasn't arrived by then we give
+	// up and paste the raw transcript with a `postprocess_skipped`
+	// warning overlay.
+	defaultTotalTimeoutSec = 15
+)
+
 // chatCompletionStreamer creates streaming chat completions.
 type chatCompletionStreamer interface {
 	NewStreaming(ctx context.Context, body openaisdk.ChatCompletionNewParams, opts ...option.RequestOption) chatStream
@@ -72,17 +107,12 @@ func (c *Client) WarmPostProcess(ctx context.Context, model string) {
 	sessionlog.Debugf("postprocess warm %s ok", model)
 }
 
-// applySamplingParams populates body with the postprocess sampling
-// knobs from cfg. Only Temperature and TopP are exposed; richer
-// sampler controls (penalties, stop, min_p) were rarely-tuned and
-// got dropped to shrink the config surface.
-func applySamplingParams(body *openaisdk.ChatCompletionNewParams, cfg config.PostProcessConfig) {
-	if cfg.Temperature != nil {
-		body.Temperature = param.NewOpt(*cfg.Temperature)
-	}
-	if cfg.TopP != nil {
-		body.TopP = param.NewOpt(*cfg.TopP)
-	}
+// applySamplingParams populates body with the pinned sampling
+// defaults. Temperature was the only sampler knob that ever made
+// it out of `postprocess.*` config in the field; top_p / penalties
+// / min_p / stop got dropped during the config-surface cull.
+func applySamplingParams(body *openaisdk.ChatCompletionNewParams) {
+	body.Temperature = param.NewOpt(defaultTemperature)
 }
 
 type streamResult struct {
@@ -98,18 +128,18 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 		return PostProcessResult{Text: text}
 	}
 
-	if cfg.MinWordCount > 0 && len(strings.Fields(text)) < cfg.MinWordCount {
-		sessionlog.Infof("postprocess skipped words=%d min=%d", len(strings.Fields(text)), cfg.MinWordCount)
+	if defaultMinWordCount > 0 && len(strings.Fields(text)) < defaultMinWordCount {
+		sessionlog.Infof("postprocess skipped words=%d min=%d", len(strings.Fields(text)), defaultMinWordCount)
 		return PostProcessResult{Text: text}
 	}
 
-	totalTimeout := time.Duration(cfg.TotalTimeoutSec) * time.Second
-	firstTokenTimeout := time.Duration(cfg.FirstTokenTimeoutSec) * time.Second
+	totalTimeout := time.Duration(defaultTotalTimeoutSec) * time.Second
+	firstTokenTimeout := time.Duration(defaultFirstTokenTimeoutSec) * time.Second
 
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(
-		attribute.Int("postprocess.first_token_timeout_sec", cfg.FirstTokenTimeoutSec),
-		attribute.Int("postprocess.total_timeout_sec", cfg.TotalTimeoutSec),
+		attribute.Int("postprocess.first_token_timeout_sec", defaultFirstTokenTimeoutSec),
+		attribute.Int("postprocess.total_timeout_sec", defaultTotalTimeoutSec),
 	)
 
 	ctx, cancel := context.WithTimeout(ctx, totalTimeout)
@@ -144,7 +174,7 @@ func (c *Client) PostProcess(ctx context.Context, cfg config.PostProcessConfig, 
 				openaisdk.UserMessage(text),
 			},
 		}
-		applySamplingParams(&body, cfg)
+		applySamplingParams(&body)
 		stream := c.chatStreamer.NewStreaming(ctx, body)
 
 		var result strings.Builder

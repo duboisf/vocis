@@ -20,7 +20,25 @@ import (
 const (
 	minRecordingDuration = 100 * time.Millisecond
 	stopFlushDelay       = 120 * time.Millisecond
+
+	// SampleRate is the only sample rate the rest of the pipeline
+	// understands: Silero VAD is hard-wired to 16 kHz, and Lemonade's
+	// chat-audio path expects 16 kHz PCM. Used to be a YAML knob
+	// (`recording.sample_rate`); pinned here once the value never
+	// successfully diverged from this in practice.
+	SampleRate = 16000
+	// Channels is fixed at mono. Lemonade's chat-audio errors on
+	// non-mono input.
+	Channels = 1
+	// DefaultMaxDurationSeconds is the per-session ceiling. Used by
+	// app.go's force-stop timer; was `recording.max_duration_seconds`.
+	DefaultMaxDurationSeconds = 120
 )
+
+// The recording backend used to be a YAML knob (`recording.backend`,
+// "auto" | "pulse") but auto-detection already covered every case in
+// practice. The only backend implemented in this package is the
+// PulseAudio client below.
 
 var ErrRecordingTooShort = errors.New("recording too short")
 
@@ -76,8 +94,8 @@ func Check() error {
 
 func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Session, error) {
 	ctx, span := telemetry.StartSpan(ctx, "vocis.recorder.start",
-		attribute.Int("audio.sample_rate", cfg.SampleRate),
-		attribute.Int("audio.channels", cfg.Channels),
+		attribute.Int("audio.sample_rate", SampleRate),
+		attribute.Int("audio.channels", Channels),
 		attribute.String("audio.device", cfg.Device),
 	)
 	defer func() { telemetry.EndSpan(span, nil) }()
@@ -100,15 +118,15 @@ func (r *Recorder) Start(ctx context.Context, cfg config.RecordingConfig) (*Sess
 		pipe:       newSamplePipe(),
 		meter:      &levelMeter{},
 		startedAt:  time.Now(),
-		sampleRate: cfg.SampleRate,
-		channels:   cfg.Channels,
+		sampleRate: SampleRate,
+		channels:   Channels,
 	}
 
 	stream, err := client.NewRecord(
 		pulse.Int16Writer((&meteredWriter{
 			dst:      session.pipe,
 			meter:    session.meter,
-			channels: cfg.Channels,
+			channels: Channels,
 			frames:   &session.frames,
 		}).Write),
 		options...,
@@ -245,15 +263,16 @@ func (s *Session) closeResources() {
 
 func recordOptions(client *pulse.Client, cfg config.RecordingConfig) ([]pulse.RecordOption, error) {
 	options := []pulse.RecordOption{
-		pulse.RecordSampleRate(cfg.SampleRate),
+		pulse.RecordSampleRate(SampleRate),
 		pulse.RecordMediaName("vocis dictation"),
 		pulse.RecordLatency(0.05),
 	}
 
-	switch cfg.Channels {
-	case 1:
+	// Channels is pinned to 1 (mono) at the package level; no switch
+	// needed but kept here as a guard for any future override.
+	if Channels == 1 {
 		options = append(options, pulse.RecordMono)
-	case 2:
+	} else if Channels == 2 {
 		options = append(options, pulse.RecordStereo)
 	}
 

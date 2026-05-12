@@ -7,11 +7,10 @@ import (
 )
 
 // TestExampleYAMLMatchesDefaults parses config.example.yaml under the
-// new flattened shape and verifies every chat-audio knob lands on the
-// transcription struct at the same value Default() would produce.
-// Regression check for the chat_audio.* flatten — silently dropping
-// the nested block would leave the user with implicit defaults, which
-// would mask example-yaml drift.
+// post-cull flat shape and verifies every kept knob lands on the
+// Config struct at the same value Default() would produce. The example
+// is the canonical documentation for the YAML surface, so drift
+// between it and Default() is treated as a regression.
 func TestExampleYAMLMatchesDefaults(t *testing.T) {
 	t.Parallel()
 
@@ -36,14 +35,6 @@ func TestExampleYAMLMatchesDefaults(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 	def := Default()
-	if cfg.Transcription.ChunkMaxSeconds != def.Transcription.ChunkMaxSeconds {
-		t.Errorf("ChunkMaxSeconds: example=%v default=%v",
-			cfg.Transcription.ChunkMaxSeconds, def.Transcription.ChunkMaxSeconds)
-	}
-	if cfg.Transcription.HistoryTurns != def.Transcription.HistoryTurns {
-		t.Errorf("HistoryTurns: example=%v default=%v",
-			cfg.Transcription.HistoryTurns, def.Transcription.HistoryTurns)
-	}
 	if cfg.Transcription.MinChunkPeak != def.Transcription.MinChunkPeak {
 		t.Errorf("MinChunkPeak: example=%v default=%v",
 			cfg.Transcription.MinChunkPeak, def.Transcription.MinChunkPeak)
@@ -52,16 +43,12 @@ func TestExampleYAMLMatchesDefaults(t *testing.T) {
 		t.Errorf("MinChunkRMS: example=%v default=%v",
 			cfg.Transcription.MinChunkRMS, def.Transcription.MinChunkRMS)
 	}
-	if cfg.Transcription.Silero != def.Transcription.Silero {
-		t.Errorf("Silero: example=%+v default=%+v",
-			cfg.Transcription.Silero, def.Transcription.Silero)
+	if cfg.Transcription.Silero.OnnxruntimeLibrary != def.Transcription.Silero.OnnxruntimeLibrary {
+		t.Errorf("Silero.OnnxruntimeLibrary: example=%q default=%q",
+			cfg.Transcription.Silero.OnnxruntimeLibrary, def.Transcription.Silero.OnnxruntimeLibrary)
 	}
 	if cfg.Transcription.Language != def.Transcription.Language {
 		t.Errorf("Language: example=%q default=%q",
 			cfg.Transcription.Language, def.Transcription.Language)
-	}
-	if cfg.Transcription.ContextMode != def.Transcription.ContextMode {
-		t.Errorf("ContextMode: example=%q default=%q",
-			cfg.Transcription.ContextMode, def.Transcription.ContextMode)
 	}
 }

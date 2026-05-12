@@ -13,7 +13,6 @@ import (
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/font/opentype"
 
-	"vocis/internal/config"
 	"vocis/internal/sessionlog"
 )
 
@@ -50,25 +49,20 @@ type Frame struct {
 }
 
 // OverlayRenderer paints an overlay Frame into an *image.RGBA. It owns
-// the fonts and layout config so it can be shared across the X11 and
-// any future Wayland/native backend without re-loading resources.
+// the fonts so it can be shared across the X11 and any future
+// Wayland/native backend without re-loading resources. All layout /
+// copy values live in overlay_consts.go.
 type OverlayRenderer struct {
-	cfg             config.OverlayConfig
 	face            font.Face
 	smallFace       font.Face
 	glyphWidth      int
 	smallGlyphWidth int
 }
 
-func NewOverlayRenderer(cfg config.OverlayConfig) *OverlayRenderer {
-	fontSize := cfg.FontSize
-	if fontSize <= 0 {
-		fontSize = 13
-	}
-	face, gw := loadFont(cfg.Font, fontSize)
-	smallFace, sgw := loadFont(cfg.Font, fontSize-2)
+func NewOverlayRenderer() *OverlayRenderer {
+	face, gw := loadFont(OverlayFont, OverlayFontSize)
+	smallFace, sgw := loadFont(OverlayFont, OverlayFontSize-2)
 	return &OverlayRenderer{
-		cfg:             cfg,
 		face:            face,
 		smallFace:       smallFace,
 		glyphWidth:      gw,
@@ -79,24 +73,24 @@ func NewOverlayRenderer(cfg config.OverlayConfig) *OverlayRenderer {
 // BodyTextLimit returns the maximum characters per line of body text
 // that fit within the overlay width given the current font.
 func (r *OverlayRenderer) BodyTextLimit() int {
-	return TextLimit(r.cfg.Width, 20, r.glyphWidth)
+	return TextLimit(OverlayWidth, 20, r.glyphWidth)
 }
 
 // SubtitleTextLimit returns the character budget for a subtitle line.
 func (r *OverlayRenderer) SubtitleTextLimit() int {
-	return TextLimit(r.cfg.Width, 20, r.glyphWidth)
+	return TextLimit(OverlayWidth, 20, r.glyphWidth)
 }
 
 // NeededHeight returns the overlay height required to fit the given
 // body text, never shrinking below the configured minimum.
 func (r *OverlayRenderer) NeededHeight(body string) int {
 	lines := WrapLines(body, r.BodyTextLimit())
-	needed := r.cfg.Height
+	needed := OverlayHeight
 	if len(lines) > 1 {
 		needed = OverlayBodyStartY + len(lines)*OverlayLineHeight + OverlayBodyPadBot
 	}
-	if needed < r.cfg.Height {
-		needed = r.cfg.Height
+	if needed < OverlayHeight {
+		needed = OverlayHeight
 	}
 	return needed
 }
@@ -127,7 +121,7 @@ var (
 // Each paint step is a named method so this function reads as a
 // top-to-bottom table of contents of the overlay's visual structure.
 func (r *OverlayRenderer) Render(f Frame) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, r.cfg.Width, f.Height))
+	img := image.NewRGBA(image.Rect(0, 0, OverlayWidth, f.Height))
 	r.paintBackground(img)
 	r.paintAccentBar(img, f.Accent)
 	r.paintBranding(img)
@@ -148,8 +142,8 @@ func (r *OverlayRenderer) paintAccentBar(img *image.RGBA, accent color.RGBA) {
 }
 
 func (r *OverlayRenderer) paintBranding(img *image.RGBA) {
-	x := r.cfg.Width - len([]rune(r.cfg.Branding))*r.glyphWidth - overlayBrandingPad
-	WriteText(img, x, 24, r.cfg.Branding, overlayBrandingColor, r.smallFace)
+	x := OverlayWidth - len([]rune(OverlayBranding))*r.glyphWidth - overlayBrandingPad
+	WriteText(img, x, 24, OverlayBranding, overlayBrandingColor, r.smallFace)
 	// Thin separator under the branding row.
 	DrawRect(img, image.Rect(20, 22, 20+96, 24), overlaySeparatorColor)
 }
@@ -175,7 +169,7 @@ func (r *OverlayRenderer) paintTitle(img *image.RGBA, f Frame) {
 	pulse := 0.5 + 0.5*math.Sin(f.WavePhase*3)
 	hintColor := overlayHintColor
 	hintColor.A = uint8(140 + int(pulse*115))
-	WriteText(img, hintX, overlayTitleY, " "+r.cfg.Listening.SubmitHint, hintColor, r.face)
+	WriteText(img, hintX, overlayTitleY, " "+OverlayListeningSubmitHint, hintColor, r.face)
 }
 
 func (r *OverlayRenderer) paintSubtitle(img *image.RGBA, f Frame) {

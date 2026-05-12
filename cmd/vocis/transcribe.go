@@ -162,8 +162,10 @@ func runTranscribe() error {
 	final := result.Text
 	if transcribeUsePostprocess && cfg.PostProcess.Enabled {
 		fmt.Fprintln(os.Stderr, "[postprocess] running")
-		ppCtx, ppCancel := context.WithTimeout(context.Background(),
-			time.Duration(cfg.PostProcess.TotalTimeoutSec)*time.Second)
+		// PostProcess enforces its own pinned per-request timeouts;
+		// the wall-clock cap here is just a context fence so a
+		// runaway HTTP call can't hang the CLI.
+		ppCtx, ppCancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer ppCancel()
 		pp := client.PostProcess(ppCtx, cfg.PostProcess, final, func() {
 			fmt.Fprintln(os.Stderr, "[postprocess] first token")

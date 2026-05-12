@@ -113,18 +113,32 @@ When `vocis serve` runs:
 
 **Refreshed on every hotkey press (no restart needed):**
 
-- `transcription.*` — base_url, model, language, prompt_hint, request_timeout_seconds, hallucination_filters, plus every chunking/few-shot/batch knob (chunk_max_seconds, history_turns, prompt, stream, context_mode, min_chunk_peak, min_chunk_rms, batch_prompt, batch_max_audio_seconds, ctx_size, batch_until_release, continuation_rebatch, silero.*). The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
-- `recording.*` — device, sample_rate, channels, max_duration_seconds, duck_volume.
-- `postprocess.*` — enabled, model, **prompt**, min_word_count, timeouts, sampling knobs (temperature, top_p).
+- `transcription.*` — base_url, model, prompt, prompt_hint, language, hallucination_filters, min_chunk_peak, min_chunk_rms, ctx_size, batch_until_release, continuation_rebatch, silero.onnxruntime_library. The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
+- `recording.device`.
+- `postprocess.*` — enabled, model, prompt.
 - `log_window_title`.
 
 **Pinned at `vocis serve` startup (require restart to change):**
 
 - `hotkey`, `hotkey_mode` — registered with the OS once.
 - `insertion.*` — paste keys, terminal_classes, auto_submit, kitty_remote_control. The `Injector` is constructed once in `cmd/vocis/serve.go`.
-- `overlay.*` — window dimensions, opacity, font, all the overlay copy strings. The X11 overlay window is created once at startup.
 - `telemetry.*` — exporter is initialized once.
 - `speak.*` — only consulted by the separate `vocis speak` command, not by `serve`.
+
+**Tuning constants pinned as Go consts (rebuild required to change):**
+
+The bulk of the previous YAML surface — overlay dimensions/copy, the
+chat-audio protocol knobs (chunk_max_seconds, history_turns, stream,
+context_mode, batch_prompt, batch_max_audio_seconds,
+request_timeout_seconds), Silero hysteresis (silence_ms / speech_ms /
+min_utterance_ms in both `transcription.silero.*` and `recall.*`),
+postprocess timing (min_word_count, first_token_timeout_seconds,
+total_timeout_seconds, temperature), recorder shape (sample_rate=16000
+and channels=1 are required by Silero / chat-audio anyway,
+duck_volume, max_duration_seconds, backend) — all of those live as
+package-level consts at the consumer site now. The motivation was a
+config-surface cull: ~60 knobs had defaults that were never tuned in
+practice. To change one, edit the const and rebuild.
 
 **Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*` and `postprocess.*` blocks the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands load fresh config on each invocation.
 
@@ -133,7 +147,7 @@ When `vocis serve` runs:
 When the hotkey starts dictation:
 
 1. Config is reloaded from disk.
-2. Audio ducking lowers the default speaker volume (configurable via `recording.duck_volume`).
+2. Audio ducking lowers the default speaker volume (level pinned at `audio.DefaultDuckVolume`).
 3. [`internal/platform/x11/overlay.go`](/home/fred/git/vtt/internal/platform/x11/overlay.go) shows the overlay immediately with "○ Connecting..." status.
 4. The overlay repositions to the monitor where the mouse pointer is.
 5. [`internal/recorder/recorder.go`](/home/fred/git/vtt/internal/recorder/recorder.go) starts local microphone capture immediately.
@@ -209,7 +223,7 @@ The overlay centers on whichever monitor the mouse pointer is on, detected via X
 
 ## Overlay Text Configuration
 
-All overlay strings are configurable via the `overlay.*` section of the config file. Templates use named `{placeholders}` (e.g., `{window}`, `{shortcut}`, `{attempt}`, `{max}`, `{phase}`) expanded at runtime. Missing placeholders are left as-is. Validation warns on startup if expected placeholders are missing.
+Overlay strings live as Go consts in [`internal/ui/overlay_consts.go`](/home/fred/git/vtt/internal/ui/overlay_consts.go). Templates use named `{placeholders}` (e.g., `{window}`, `{shortcut}`, `{attempt}`, `{max}`, `{model}`) expanded at runtime via `config.ExpandTemplate`. Missing placeholders are left as-is. The previous `overlay.*` YAML block was retired — nobody changed the defaults in practice.
 
 ## Tracing
 

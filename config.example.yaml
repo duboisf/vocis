@@ -3,13 +3,12 @@ hotkey_mode: hold
 log_window_title: false
 
 transcription:
-  # vocis posts each VAD-bounded speech chunk to Lemonade's
-  # /chat/completions endpoint with the audio embedded as an
-  # `input_audio` content part. Pairs with Gemma audio variants
-  # (gemma4-it-e2b-FLM, gemma3n-e4b-it-FLM). Audio is capped at 30s per
-  # request; longer utterances chunk transparently with few-shot
-  # history threading context across boundaries.
+  # Where Lemonade's /chat/completions endpoint lives. vocis posts one
+  # /chat/completions request per VAD-bounded speech chunk with the
+  # audio embedded as an `input_audio` content part.
   base_url: http://localhost:13305/api/v1
+  # Any Lemonade model with a `chat` label that accepts audio inputs;
+  # gemma4-it-e2b-FLM is the validated default.
   model: gemma4-it-e2b-FLM
   prompt_hint: >-
     Transcribe naturally for a programmer. Remove filler words (um, uh, like,
@@ -18,12 +17,9 @@ transcription:
     Prefer technical terminology for software, CLI, cloud, and API concepts.
     Preserve obvious technical terms, acronyms, and capitalization when the
     audio supports them.
-  request_timeout_seconds: 45
   # Drop finals whose trimmed text exactly matches one of these
   # (case-insensitive). Whisper and Gemma-FLM routinely hallucinate
-  # stock phrases on silent or near-silent audio. Exact match only —
-  # substring filters would eat legitimate speech like the start of
-  # "Thank you for helping me with this."
+  # these stock phrases on silent or near-silent audio.
   hallucination_filters:
     - Thank you.
     - Thanks.
@@ -33,130 +29,63 @@ transcription:
     - Bye.
     - "you"
     - "."
-  # Upper bound on a single chunk's audio duration. Gemma 3n / 4 cap
-  # at 30s per request, so hold a 2s margin under that. Long monologues
-  # without a VAD-detected pause force-cut here and roll the remainder
-  # into the next chunk.
-  chunk_max_seconds: 28
-  # How many prior (user-audio, assistant-transcript) pairs to include
-  # as few-shot context on each request. 0 disables history. Each
-  # extra turn adds ~1.3 MB of base64 audio worst-case, so keep modest.
-  history_turns: 2
-  # Instruction sent alongside every audio chunk. {language} expands
-  # to transcription.language at request build time.
   prompt: |
     Transcribe the following speech segment in {language}. Follow these specific instructions for formatting the answer:
     * Only output the transcription, with no newlines.
     * When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three.
-  # Language hint substituted into prompt. Use "its original language"
-  # to let the model auto-detect, or force "en", "fr", etc.
   language: its original language
-  # SSE streaming for live overlay updates. Off uses one round-trip
-  # per chunk and shows the full chunk transcript only on completion.
-  stream: true
-  # context_mode: how prior chunks are threaded into a new request.
-  #   few_shot     - each prior chunk becomes a (user-audio,
-  #                  assistant-transcript) turn pair. The model sees
-  #                  its own transcripts verbatim, which keeps
-  #                  proper-noun spelling stable across chunks. Cost:
-  #                  re-uploads the prior audio bytes on every
-  #                  request.
-  #   inline_clips - prior chunks are appended as additional
-  #                  input_audio parts inside the same user message,
-  #                  alongside the current chunk. The model gets all
-  #                  audio at once and produces one transcript
-  #                  covering only the final clip (per the prompt
-  #                  instruction). Matches the multi-clip shape
-  #                  Google's Gemma docs show. Cost: model has to
-  #                  re-decode prior audio instead of trusting a
-  #                  prior transcript, so cross-chunk consistency is
-  #                  weaker.
-  context_mode: few_shot
-  # min_chunk_peak / min_chunk_rms: drop a chunk client-side when
-  # its peak (max-abs / 32768) or RMS (sqrt(mean(sample^2))/32768)
-  # falls below these thresholds, BEFORE the /chat/completions POST.
-  # Critical when Silero isn't installed: without VAD, a hotkey hold
-  # over silence sends the entire silent buffer to Gemma, which then
-  # hallucinates a long "I cannot transcribe..." response. Defaults
-  # match the recall daemon's segment filters and reject fan/room
-  # tone while keeping quiet speech. Set either to 0 to disable that
-  # arm of the check.
+  # Energy gate. Drops a chunk client-side when its peak (max-abs /
+  # 32768) or RMS (sqrt(mean(sample^2))/32768) falls below either
+  # threshold, BEFORE the /chat/completions POST. Defense in depth
+  # against silence sneaking past Silero VAD. Set either to 0 to
+  # disable that arm of the check.
   min_chunk_peak: 0.02
   min_chunk_rms: 0.005
-  # batch_until_release: when true, Silero still trims dead air between
-  # speech episodes, but each VAD-stopped flush gets stashed instead of
-  # POSTed. Only the trailing flush at hotkey release fires the request
-  # — as one multi-clip POST covering the whole utterance. Trade-off:
-  # no live overlay partials during dictation (one paste at the end).
-  # Wins: model sees the full utterance as one continuous thing so
-  # punctuation/casing don't break across mid-phrase pauses, and the
-  # few-shot history is moot for the single request.
+  # 0 (default) leaves Lemonade alone — uses whatever ctx_size the
+  # server was started with. A positive value triggers a POST to
+  # /api/v1/load at daemon startup to reload the model with that
+  # ctx_size. Larger ctx = larger batch budget; more NPU memory.
+  ctx_size: 0
+  # Send the full utterance as ONE multi-clip POST at hotkey release
+  # instead of one POST per VAD-detected pause. No live partials, one
+  # paste at the end. Mutually exclusive with continuation_rebatch.
   batch_until_release: false
-  # continuation_rebatch: keep per-pause POSTs, but when the previous
-  # chunk's transcript ended without terminal punctuation (./?/!/…),
-  # send the NEXT chunk as a multi-clip POST that prepends the prior
-  # audio. The model returns one unified transcript for both clips,
-  # which replaces (not appends to) the prior history entry. A
-  # replace-segment event tells the overlay + injector to retract the
-  # broken prior segment and substitute the fix (backspace + retype in
-  # the target window). Mutually exclusive with batch_until_release.
+  # Keep the per-pause POST cadence, but when the previous chunk's
+  # transcript ended without terminal punctuation, send the next
+  # chunk as a multi-clip POST that prepends the prior audio. The
+  # model returns one unified transcript covering both clips.
   continuation_rebatch: false
-  # silero: VAD hysteresis used by the chat-audio chunker. Each
-  # speech episode is opened when speech_ms of speech-classified
-  # audio is seen and closed after silence_ms of non-speech. Episodes
-  # shorter than min_utterance_ms are dropped to keep Gemma from
-  # hallucinating on sub-second clips.
   silero:
-    # Path to libonnxruntime.so. Supports $HOME and other env vars
-    # (expanded at runtime via os.ExpandEnv). Default matches the
-    # onnxruntime release-tarball layout when unpacked into ~/opt.
-    # Blank the field to fall back to the auto-discovery candidates
-    # (/usr/local/lib, /usr/lib, /usr/lib/x86_64-linux-gnu,
+    # Path to libonnxruntime.so. Supports $HOME / ${VAR} expansion.
+    # Default matches the onnxruntime release-tarball layout when
+    # unpacked into ~/opt. Blank to fall back to the auto-discovery
+    # candidates (/usr/local/lib, /usr/lib, /usr/lib/x86_64-linux-gnu,
     # $HOME/.local/lib). Install from
     # https://github.com/microsoft/onnxruntime/releases.
     onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
-    # silence_ms: required non-speech duration to close an episode.
-    silence_ms: 500
-    # speech_ms: required speech duration to open an episode.
-    speech_ms: 150
-    # min_utterance_ms: minimum accumulated speech an episode needs
-    # before it can be committed.
-    min_utterance_ms: 1000
-  # NOTE: when postprocess.enabled is true, vocis automatically folds
-  # postprocess.prompt into the chat-audio system message and skips
-  # the separate /chat/completions cleanup call. The same Gemma model
-  # is doing both transcription and cleanup, so the second round-trip
-  # would just add latency.
 
 recording:
-  backend: auto
+  # PulseAudio source ID. "default" picks the system default source.
+  # Run `pactl list short sources` to see candidates.
   device: default
-  sample_rate: 16000
-  channels: 1
-  max_duration_seconds: 120
-  duck_volume: 0.1
 
 insertion:
   mode: auto
   default_paste_key: ctrl+v
   terminal_paste_key: ctrl+shift+v
   restore_clipboard: true
-  # auto_submit: always press Enter after pasting the transcript.
-  # Useful when dictating into chat-style inputs that send on Enter.
-  # You can still toggle it off per-session by tapping the hotkey
-  # (which flips submit mode for that dictation).
+  # Always press Enter after pasting. Useful when dictating into
+  # chat-style inputs that send on Enter. You can still toggle it
+  # off per-session by tapping the hotkey.
   auto_submit: false
-  # kitty_remote_control: when the captured target is a kitty terminal,
-  # deliver the transcript via `kitty @ send-text` directly into the
-  # original tab/pane instead of focusing the OS window and synthesizing
-  # a paste shortcut. No focus theft, no clipboard pollution, lands in
-  # the original tab even after you switch tabs mid-dictation. Falls
-  # back to clipboard + warning when the original tab is gone, and to
-  # OS-window focus + paste when the kitty CLI is unreachable.
-  # Requires `allow_remote_control` (and ideally `listen_on`) in
-  # kitty.conf, or vocis launched from inside kitty so KITTY_LISTEN_ON
-  # is inherited.
+  # When the captured target is a kitty terminal, deliver the
+  # transcript via `kitty @ send-text` directly into the original
+  # tab/pane instead of focusing the OS window and synthesizing a
+  # paste shortcut. Falls back to clipboard + warning when the
+  # original tab is gone, and to OS-window focus + paste when the
+  # kitty CLI is unreachable.
   kitty_remote_control: true
+  kitty_verify_paste: true
   terminal_classes:
     - Alacritty
     - kitty
@@ -167,53 +96,6 @@ insertion:
     - gnome-terminal-server
     - code
     - Cursor
-
-overlay:
-  width: 620
-  height: 132
-  margin_top: 44
-  opacity: 0.94
-  auto_hide_millis: 1800
-  font: ""
-  font_size: 13
-  branding: Vocis
-  ready:
-    title: Ready
-    subtitle: Voice typing is armed
-  listening:
-    title: Listening
-    suffix: "— release to paste"
-    submit_hint: "⏎ submit"
-    connecting: "○ Connecting..."
-    reconnecting: "○ Reconnecting... (attempt {attempt}/{max})"
-    connected: "● Ready to type into {window}"
-    # Shown while vocis is force-loading the configured transcription
-    # model on the Lemonade backend (session-start preflight).
-    loading_model: "○ Loading {model}..."
-  finishing:
-    title: Finishing
-    cancel_hint: "— press {shortcut} to cancel"
-    wrapping_up: Wrapping up
-    # pp_wait / pp_stream are the postprocess phase labels appended to
-    # the wrapping-up text while the LLM is thinking — pp_wait shows
-    # until the first token arrives, then pp_stream until completion.
-    pp_wait: Wait
-    pp_stream: Stream
-    phase_done: done
-  success:
-    title: Typed
-    subtitle: Transcription inserted into your active app
-  error:
-    title: Error
-  warning:
-    title: Heads up
-    no_speech: No speech detected
-    cancelled: "Cancelled — transcription discarded"
-    postprocess_skipped: "Raw text pasted — cleanup was skipped due to a timeout or error"
-    # Shown when the original target window has been closed by the time
-    # we try to deliver the transcript. The text is written to the
-    # clipboard so it isn't lost; the user can paste it manually.
-    target_gone: "Target window closed — transcript copied to clipboard"
 
 postprocess:
   enabled: true
@@ -242,19 +124,6 @@ postprocess:
     Output: What time is it?
 
     Now clean the next input:
-  min_word_count: 10
-  # first_token_timeout_seconds: how long to wait for the LLM's first
-  # token before declaring the postprocess attempt failed and falling
-  # back to the raw transcript. Lemonade with a cold model can take
-  # 5-10 s.
-  first_token_timeout_seconds: 10
-  # total_timeout_seconds: hard cap on the postprocess request. If the
-  # full response hasn't arrived by then we give up and paste the raw
-  # transcript with a `postprocess_skipped` warning overlay.
-  total_timeout_seconds: 15
-  # Sampling knobs. Omit either to use the backend default.
-  temperature: 0.2
-  # top_p: 0.9
 
 telemetry:
   enabled: false
@@ -267,38 +136,20 @@ recall:
   retention_seconds: 604800   # 7 days
   max_segments: 2000
   socket_path: ""             # auto under $XDG_RUNTIME_DIR/vocis/recall.sock
-  min_silence_ms: 500
-  min_speech_ms: 150
-  min_utterance_ms: 500
-  preroll_ms: 300
-  max_segment_seconds: 30
-  min_segment_peak: 0.02
-  min_segment_rms: 0.005
   persist:
     mode: in_memory           # or "disk" to mirror segments to disk
     dir: $HOME/.local/state/vocis/recall
-  # batch_gap_ms: silence inserted between segments when
-  # `vocis recall last <duration>` concatenates the ring buffer for a
-  # single joint transcription. Prevents the ASR from welding the last
-  # word of one segment to the first word of the next.
-  batch_gap_ms: 300
-  # batch_max_seconds: safety cap on total concatenated audio duration
-  # for one `recall last` call. 3600 = 1 hour. Set 0 to disable.
-  batch_max_seconds: 3600
 
 # `vocis speak` — text-to-speech via Lemonade's OpenAI-compatible
 # /audio/speech endpoint (Kokoro TTS by default). Reads text from CLI
 # args or stdin and streams the resulting PCM through paplay.
 speak:
-  # base_url: leave empty to inherit transcription.base_url at load time —
-  # most users run a single Lemonade instance for both ASR and TTS.
+  # Leave empty to inherit transcription.base_url at load time — most
+  # users run a single Lemonade instance for both ASR and TTS.
   base_url: ""
-  # model: must be a Lemonade model with the `tts` label. As of Lemonade
+  # Must be a Lemonade model with the `tts` label. As of Lemonade
   # 10.2 the only option is kokoro-v1.
   model: kokoro-v1
-  # voice: passed through to Kokoro. Known-working voices include
-  # `shimmer`, `fable`, `af_heart`. Lemonade silently returns 200 with
-  # an empty body for unknown voices, so vocis surfaces a clear error
-  # instead of producing a zero-second WAV. Browse the Kokoro model
-  # card for the full voice list.
+  # Passed through to Kokoro. Known-working voices include `shimmer`,
+  # `fable`, `af_heart`.
   voice: shimmer

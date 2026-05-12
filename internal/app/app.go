@@ -17,6 +17,7 @@ import (
 	"vocis/internal/recorder"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
+	"vocis/internal/ui"
 )
 
 type App struct {
@@ -172,7 +173,7 @@ func (a *App) Run(ctx context.Context) error {
 		// new tunable just for the preflight path. Bail early on ctx
 		// cancellation so Ctrl-C still exits promptly.
 		select {
-		case <-time.After(time.Duration(a.cfg.Overlay.AutoHideMillis) * time.Millisecond):
+		case <-time.After(time.Duration(ui.OverlayAutoHideMillis) * time.Millisecond):
 		case <-ctx.Done():
 		}
 		return err
@@ -350,7 +351,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	preflightElapsed := time.Since(preflightStart)
 	prerolled := stopDrain()
 	if len(prerolled.chunks) > 0 {
-		prerollMS := prerolled.samples * 1000 / a.cfg.Recording.SampleRate
+		prerollMS := prerolled.samples * 1000 / recorder.SampleRate
 		sessionlog.Infof("preroll: captured %d chunks (%d samples, %dms) during model preflight (%s)",
 			len(prerolled.chunks), prerolled.samples, prerollMS, preflightElapsed.Round(10*time.Millisecond))
 		recordingSpan.AddEvent("preroll.captured",
@@ -431,8 +432,8 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 			len(extraSystemPrompt), state.combinedPostProcess)
 	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
-		SampleRate:        a.cfg.Recording.SampleRate,
-		Channels:          a.cfg.Recording.Channels,
+		SampleRate:        recorder.SampleRate,
+		Channels:          recorder.Channels,
 		Samples:           wrappedSamples,
 		ExtraSystemPrompt: extraSystemPrompt,
 		Callbacks: transcribe.ConnectCallbacks{
@@ -482,8 +483,8 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		go a.transcribe.WarmPostProcess(ctx, a.cfg.PostProcess.Model)
 	}
 
-	if a.cfg.Recording.MaxDurationSeconds > 0 {
-		go a.forceStopAfter(ctx, state.id, time.Duration(a.cfg.Recording.MaxDurationSeconds)*time.Second)
+	if recorder.DefaultMaxDurationSeconds > 0 {
+		go a.forceStopAfter(ctx, state.id, time.Duration(recorder.DefaultMaxDurationSeconds)*time.Second)
 	}
 }
 
@@ -722,7 +723,7 @@ func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, 
 			)
 			sessionlog.Warnf("target window gone — transcript on clipboard (%d chars)", len(text))
 			a.markDelivered()
-			a.overlay.ShowWarning(a.cfg.Overlay.Warning.TargetGone)
+			a.overlay.ShowWarning(ui.OverlayWarningTargetGone)
 			return nil
 		}
 		sessionlog.Errorf("insert transcript: %v", err)
@@ -755,7 +756,7 @@ func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, 
 	state.span.SetAttributes(attribute.Bool("submit_mode", state.submitMode))
 	if postProcessSkipped {
 		state.span.AddEvent("overlay.warning", trace.WithAttributes(attribute.String("reason", "postprocess_skipped")))
-		a.overlay.ShowWarning(a.cfg.Overlay.Warning.PostprocessSkipped)
+		a.overlay.ShowWarning(ui.OverlayWarningPostprocessSkipped)
 	} else {
 		state.span.AddEvent("overlay.success")
 		a.overlay.Hide()
@@ -781,7 +782,7 @@ func (a *App) runPostProcess(spanCtx context.Context, escapeCh <-chan struct{}, 
 		return text, false
 	}
 
-	a.overlay.SetFinishingPhase(a.cfg.Overlay.Finishing.PPWait)
+	a.overlay.SetFinishingPhase(ui.OverlayFinishingPPWait)
 	state.span.AddEvent("overlay.phase.wait")
 	ppSpanCtx, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
 		attribute.Int("input.length", len(text)),
@@ -792,7 +793,7 @@ func (a *App) runPostProcess(spanCtx context.Context, escapeCh <-chan struct{}, 
 	resultCh := make(chan transcribe.PostProcessResult, 1)
 	go func() {
 		resultCh <- a.transcribe.PostProcess(ppCtx, a.cfg.PostProcess, text, func() {
-			a.overlay.ExtendFinishingPhase(a.cfg.Overlay.Finishing.PPStream)
+			a.overlay.ExtendFinishingPhase(ui.OverlayFinishingPPStream)
 		})
 	}()
 
@@ -876,7 +877,7 @@ func (a *App) dismissInFlightOverlay() bool {
 		a.sessionCancel()
 	}
 	a.transcribing = false
-	a.overlay.ShowWarning(a.cfg.Overlay.Warning.Cancelled)
+	a.overlay.ShowWarning(ui.OverlayWarningCancelled)
 	sessionlog.Infof("transcription cancelled by user")
 	// Note: span is ended by the finishRecording defer, which will see the cancelled context.
 	return true
@@ -888,7 +889,7 @@ func (a *App) showCompletionError(err error) {
 		return
 	}
 	if isNoSpeechError(err) {
-		a.overlay.ShowWarning(a.cfg.Overlay.Warning.NoSpeech)
+		a.overlay.ShowWarning(ui.OverlayWarningNoSpeech)
 		return
 	}
 	a.overlay.ShowError(userFacingError(err))

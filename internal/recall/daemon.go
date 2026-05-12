@@ -23,6 +23,21 @@ import (
 	"vocis/internal/transcribe"
 )
 
+// VAD hysteresis and segment-rejection thresholds for the recall
+// daemon. Used to live under `recall.*` in YAML; pinned here once it
+// became clear nobody ever tuned these. Recall uses tighter values
+// than the chat-audio chunker (lower min_utterance, lower min_silence
+// — quick bursts of speech still get captured).
+const (
+	defaultMinSilenceMS     = 500
+	defaultMinSpeechMS      = 150
+	defaultMinUtteranceMS   = 500
+	defaultPrerollMS        = 300
+	defaultMaxSegmentSeconds = 30
+	defaultMinSegmentPeak   = 0.02
+	defaultMinSegmentRMS    = 0.005
+)
+
 // Daemon owns the recall lifecycle: recorder → Silero VAD → segment
 // ring buffer, plus a Unix-socket server that responds to list/
 // transcribe/drop/status/shutdown requests from the `vocis recall`
@@ -68,9 +83,9 @@ func NewDaemon(opts DaemonOpts) *Daemon {
 // cancelled, a shutdown request is received, or the recorder errors
 // out. Blocks until cleanup is done.
 func (d *Daemon) Run(ctx context.Context) error {
-	if d.cfg.Recording.SampleRate != 16000 {
-		return fmt.Errorf("recall requires recording.sample_rate=16000 (current: %d) — Silero VAD is hard-wired to 16 kHz",
-			d.cfg.Recording.SampleRate)
+	if recorder.SampleRate != 16000 {
+		return fmt.Errorf("recall requires the recorder pinned to 16 kHz (got %d) — Silero VAD is hard-wired to 16 kHz",
+			recorder.SampleRate)
 	}
 
 	if err := transcribe.InitSilero(d.cfg.Transcription.Silero.OnnxruntimeLibrary); err != nil {
@@ -166,9 +181,9 @@ func (d *Daemon) runCapture(ctx context.Context) error {
 	}()
 
 	vad, err := transcribe.NewSileroVAD(
-		d.cfg.Recall.MinSilenceMS,
-		d.cfg.Recall.MinSpeechMS,
-		d.cfg.Recall.MinUtteranceMS,
+		defaultMinSilenceMS,
+		defaultMinSpeechMS,
+		defaultMinUtteranceMS,
 	)
 	if err != nil {
 		return fmt.Errorf("build silero vad: %w", err)
@@ -176,16 +191,16 @@ func (d *Daemon) runCapture(ctx context.Context) error {
 	defer vad.Destroy()
 
 	sampleRate := recSession.SampleRate()
-	// Preroll holds the most-recent PrerollMS + MinSpeechMS of audio,
-	// so when VAD eventually declares SpeechStarted we still have the
-	// audio from slightly before the utterance began — Silero's
-	// hysteresis needs the speech to already be present by the time it
-	// reports the transition, so without preroll the segment would clip
-	// the onset of the first word.
-	prerollSamples := (d.cfg.Recall.PrerollMS + d.cfg.Recall.MinSpeechMS) * sampleRate / 1000
+	// Preroll holds the most-recent defaultPrerollMS + defaultMinSpeechMS
+	// of audio, so when VAD eventually declares SpeechStarted we still
+	// have the audio from slightly before the utterance began —
+	// Silero's hysteresis needs the speech to already be present by
+	// the time it reports the transition, so without preroll the
+	// segment would clip the onset of the first word.
+	prerollSamples := (defaultPrerollMS + defaultMinSpeechMS) * sampleRate / 1000
 	preroll := newRing16(prerollSamples)
 
-	maxSegmentSamples := d.cfg.Recall.MaxSegmentSeconds * sampleRate
+	maxSegmentSamples := defaultMaxSegmentSeconds * sampleRate
 
 	var active *Segment
 	var activePeak int16
@@ -311,10 +326,10 @@ func stampSegmentLevels(seg *Segment, peak int16, sumSq int64, sampleRate int) {
 // miss (the classic 24 s near-silence with one keyboard clack).
 func (d *Daemon) dropReasonFor(seg *Segment) string {
 	switch {
-	case seg.PeakLevel < d.cfg.Recall.MinSegmentPeak:
-		return fmt.Sprintf("peak=%.4f < min_peak=%.4f", seg.PeakLevel, d.cfg.Recall.MinSegmentPeak)
-	case seg.AvgLevel < d.cfg.Recall.MinSegmentRMS:
-		return fmt.Sprintf("rms=%.4f < min_rms=%.4f", seg.AvgLevel, d.cfg.Recall.MinSegmentRMS)
+	case seg.PeakLevel < defaultMinSegmentPeak:
+		return fmt.Sprintf("peak=%.4f < min_peak=%.4f", seg.PeakLevel, defaultMinSegmentPeak)
+	case seg.AvgLevel < defaultMinSegmentRMS:
+		return fmt.Sprintf("rms=%.4f < min_rms=%.4f", seg.AvgLevel, defaultMinSegmentRMS)
 	}
 	return ""
 }
@@ -330,8 +345,8 @@ func (d *Daemon) emitCaptureSpan(seg *Segment, id int64, sampleRate int, forceFl
 		attribute.Int("segment.sample_rate", sampleRate),
 		attribute.Float64("segment.peak_level", seg.PeakLevel),
 		attribute.Float64("segment.avg_level", seg.AvgLevel),
-		attribute.Float64("segment.min_peak_threshold", d.cfg.Recall.MinSegmentPeak),
-		attribute.Float64("segment.min_rms_threshold", d.cfg.Recall.MinSegmentRMS),
+		attribute.Float64("segment.min_peak_threshold", defaultMinSegmentPeak),
+		attribute.Float64("segment.min_rms_threshold", defaultMinSegmentRMS),
 		attribute.Bool("segment.force_flushed", forceFlushed),
 		attribute.Bool("segment.dropped_as_silence", dropReason != ""),
 		attribute.String("segment.drop_reason", dropReason),

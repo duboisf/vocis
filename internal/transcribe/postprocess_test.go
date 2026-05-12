@@ -16,12 +16,12 @@ import (
 
 // fakeChatStream implements chatStream for testing.
 type fakeChatStream struct {
-	mu      sync.Mutex
-	chunks  []openaisdk.ChatCompletionChunk
-	delays  []time.Duration // per-chunk delay; len may be shorter than chunks
-	pos     int
-	err     error
-	ctx     context.Context
+	mu     sync.Mutex
+	chunks []openaisdk.ChatCompletionChunk
+	delays []time.Duration // per-chunk delay; len may be shorter than chunks
+	pos    int
+	err    error
+	ctx    context.Context
 }
 
 func (f *fakeChatStream) Next() bool {
@@ -89,14 +89,16 @@ func newTestClient(streamer chatCompletionStreamer) *Client {
 	}
 }
 
+// enoughText returns a string with at least defaultMinWordCount words
+// so PostProcess doesn't short-circuit on the word-count floor. Used
+// by every test that wants the full streaming path to run.
+const enoughText = "this transcript has more than ten distinct words in it now"
+
 func enabledCfg() config.PostProcessConfig {
 	return config.PostProcessConfig{
-		Enabled:              true,
-		Model:                "test-model",
-		Prompt:               "clean up",
-		MinWordCount:         0,
-		FirstTokenTimeoutSec: 1,
-		TotalTimeoutSec:      5,
+		Enabled: true,
+		Model:   "test-model",
+		Prompt:  "clean up",
 	}
 }
 
@@ -104,7 +106,7 @@ func TestPostProcessHappyPath(t *testing.T) {
 	t.Parallel()
 
 	stream := &fakeChatStream{
-		ctx:    context.Background(),
+		ctx: context.Background(),
 		chunks: []openaisdk.ChatCompletionChunk{
 			makeChunk("Hello"),
 			makeChunk(", "),
@@ -113,7 +115,7 @@ func TestPostProcessHappyPath(t *testing.T) {
 	}
 
 	client := newTestClient(&fakeStreamer{stream: stream})
-	result := client.PostProcess(context.Background(), enabledCfg(), "uh hello um world", nil)
+	result := client.PostProcess(context.Background(), enabledCfg(), enoughText, nil)
 
 	if result.Text != "Hello, world!" {
 		t.Fatalf("text = %q, want %q", result.Text, "Hello, world!")
@@ -123,11 +125,25 @@ func TestPostProcessHappyPath(t *testing.T) {
 	}
 }
 
-func TestPostProcessFirstTokenTimeout(t *testing.T) {
-	t.Parallel()
+// withShortTimeouts temporarily overrides the package-level
+// postprocess timeouts so timeout-branch tests run in subsecond
+// time. Returned closure restores the originals.
+func withShortTimeouts() func() {
+	origFirst, origTotal := defaultFirstTokenTimeoutSec, defaultTotalTimeoutSec
+	defaultFirstTokenTimeoutSec = 1
+	defaultTotalTimeoutSec = 2
+	return func() {
+		defaultFirstTokenTimeoutSec = origFirst
+		defaultTotalTimeoutSec = origTotal
+	}
+}
 
-	cfg := enabledCfg()
-	cfg.FirstTokenTimeoutSec = 1
+// TestPostProcessFirstTokenTimeout intentionally delays the first
+// chunk longer than the (shortened) first-token timeout so the
+// timeout branch fires and the raw transcript is returned.
+func TestPostProcessFirstTokenTimeout(t *testing.T) {
+	restore := withShortTimeouts()
+	defer restore()
 
 	stream := &fakeChatStream{
 		ctx:    context.Background(),
@@ -136,12 +152,12 @@ func TestPostProcessFirstTokenTimeout(t *testing.T) {
 	}
 
 	client := newTestClient(&fakeStreamer{stream: stream})
-	result := client.PostProcess(context.Background(), cfg, "some text here", nil)
+	result := client.PostProcess(context.Background(), enabledCfg(), enoughText, nil)
 
 	if !result.Skipped {
 		t.Fatal("expected Skipped=true on first-token timeout")
 	}
-	if result.Text != "some text here" {
+	if result.Text != enoughText {
 		t.Fatalf("text = %q, want raw text", result.Text)
 	}
 }
@@ -156,12 +172,12 @@ func TestPostProcessStreamError(t *testing.T) {
 	}
 
 	client := newTestClient(&fakeStreamer{stream: stream})
-	result := client.PostProcess(context.Background(), enabledCfg(), "some input text", nil)
+	result := client.PostProcess(context.Background(), enabledCfg(), enoughText, nil)
 
 	if !result.Skipped {
 		t.Fatal("expected Skipped=true on stream error")
 	}
-	if result.Text != "some input text" {
+	if result.Text != enoughText {
 		t.Fatalf("text = %q, want raw text", result.Text)
 	}
 }
@@ -175,12 +191,12 @@ func TestPostProcessEmptyResponse(t *testing.T) {
 	}
 
 	client := newTestClient(&fakeStreamer{stream: stream})
-	result := client.PostProcess(context.Background(), enabledCfg(), "raw input", nil)
+	result := client.PostProcess(context.Background(), enabledCfg(), enoughText, nil)
 
 	if !result.Skipped {
 		t.Fatal("expected Skipped=true for empty response")
 	}
-	if result.Text != "raw input" {
+	if result.Text != enoughText {
 		t.Fatalf("text = %q, want raw text", result.Text)
 	}
 }
@@ -213,17 +229,16 @@ func TestPostProcessEmptyInput(t *testing.T) {
 	}
 }
 
+// TestPostProcessMinWordCount confirms the pinned floor still
+// short-circuits on a transcript under defaultMinWordCount words.
 func TestPostProcessMinWordCount(t *testing.T) {
 	t.Parallel()
 
-	cfg := enabledCfg()
-	cfg.MinWordCount = 5
-
 	client := newTestClient(nil)
-	result := client.PostProcess(context.Background(), cfg, "only three words", nil)
+	result := client.PostProcess(context.Background(), enabledCfg(), "only three words", nil)
 
 	if result.Text != "only three words" {
-		t.Fatalf("text = %q, want passthrough", result.Text)
+		t.Fatalf("text = %q, want passthrough below min word count", result.Text)
 	}
 }
 
@@ -238,7 +253,7 @@ func TestPostProcessFastCompletionBeforeFirstTokenSignal(t *testing.T) {
 	}
 
 	client := newTestClient(&fakeStreamer{stream: stream})
-	result := client.PostProcess(context.Background(), enabledCfg(), "raw text", nil)
+	result := client.PostProcess(context.Background(), enabledCfg(), enoughText, nil)
 
 	if result.Text != "cleaned" {
 		t.Fatalf("text = %q, want %q", result.Text, "cleaned")
@@ -261,7 +276,7 @@ func TestPostProcessCallsOnFirstToken(t *testing.T) {
 
 	var called atomic.Bool
 	client := newTestClient(&fakeStreamer{stream: stream})
-	result := client.PostProcess(context.Background(), enabledCfg(), "raw text", func() {
+	result := client.PostProcess(context.Background(), enabledCfg(), enoughText, func() {
 		called.Store(true)
 	})
 
@@ -273,35 +288,29 @@ func TestPostProcessCallsOnFirstToken(t *testing.T) {
 	}
 }
 
-func TestPostProcessAppliesSamplingParams(t *testing.T) {
+// TestPostProcessAppliesPinnedTemperature locks the pinned
+// defaultTemperature into the outgoing request body. TopP and the
+// other samplers are no longer plumbed through — the request is
+// expected to carry only Temperature.
+func TestPostProcessAppliesPinnedTemperature(t *testing.T) {
 	t.Parallel()
-
-	temp, topP := 0.25, 0.9
-	cfg := enabledCfg()
-	cfg.Temperature = &temp
-	cfg.TopP = &topP
 
 	streamer := &fakeStreamer{stream: &fakeChatStream{
 		ctx:    context.Background(),
 		chunks: []openaisdk.ChatCompletionChunk{makeChunk("ok")},
 	}}
 	client := newTestClient(streamer)
-	client.PostProcess(context.Background(), cfg, "some input text", nil)
+	client.PostProcess(context.Background(), enabledCfg(), enoughText, nil)
 
 	got := streamer.lastBody
-	if got.Temperature.Value != temp {
-		t.Errorf("temperature = %v, want %v", got.Temperature.Value, temp)
-	}
-	if got.TopP.Value != topP {
-		t.Errorf("top_p = %v, want %v", got.TopP.Value, topP)
+	if got.Temperature.Value != defaultTemperature {
+		t.Errorf("temperature = %v, want %v", got.Temperature.Value, defaultTemperature)
 	}
 }
 
 func TestPostProcessNoCallbackOnTimeout(t *testing.T) {
-	t.Parallel()
-
-	cfg := enabledCfg()
-	cfg.FirstTokenTimeoutSec = 1
+	restore := withShortTimeouts()
+	defer restore()
 
 	stream := &fakeChatStream{
 		ctx:    context.Background(),
@@ -311,7 +320,7 @@ func TestPostProcessNoCallbackOnTimeout(t *testing.T) {
 
 	var called atomic.Bool
 	client := newTestClient(&fakeStreamer{stream: stream})
-	client.PostProcess(context.Background(), cfg, "some text here", func() {
+	client.PostProcess(context.Background(), enabledCfg(), enoughText, func() {
 		called.Store(true)
 	})
 

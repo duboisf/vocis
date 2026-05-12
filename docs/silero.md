@@ -97,30 +97,28 @@ hysteresis fields reset on episode end.
 
 ## Hysteresis knobs
 
-Exposed differently in each call site because they mean different
-things:
+Pinned as Go consts in each consumer package (used to be YAML knobs
+under `transcription.silero.*` and `recall.*` — nobody tuned them in
+practice). The values differ between the two consumers because they
+serve different goals.
 
-### `serve` / client VAD (`streaming.*`)
+### `serve` chat-audio chunker (`internal/transcribe/chat_audio.go`)
 
-- `silence_duration_ms` → `minSilenceMs` (default **500**)
-- `prefix_padding_ms` → `minSpeechMs` (default **300**)
-- `min_utterance_ms` → `minUtteranceMs` (default **1000**)
+- `defaultSileroSilenceMS` = **500**
+- `defaultSileroSpeechMS` = **150**
+- `defaultSileroMinUtteranceMS` = **1000**
 
-Active when `streaming.manual_commit: true` and `streaming.client_vad: true`.
+### `recall` daemon (`internal/recall/daemon.go`)
 
-### `recall` daemon (`recall.*`)
-
-- `min_silence_ms` (default **500**)
-- `min_speech_ms` (default **150**)
-- `min_utterance_ms` (default **500**)
-- `preroll_ms` (default **300**) — extra audio kept *before* the
+- `defaultMinSilenceMS` = **500**
+- `defaultMinSpeechMS` = **150**
+- `defaultMinUtteranceMS` = **500**
+- `defaultPrerollMS` = **300** — extra audio kept *before* the
   declared speech-start so word onsets aren't clipped
 
-Recall uses slightly tighter `min_speech_ms` / `min_utterance_ms`
-than serve because it's always-on and we want to capture short
-utterances (not just intentional dictations). The preroll is recall-
-specific: serve relies on OpenAI's own prefix-padding on the server
-side.
+Recall uses a tighter `defaultMinUtteranceMS` than serve because it's
+always-on and short utterances are still worth capturing. The preroll
+is recall-specific.
 
 ## Single-threaded ONNX runtime
 
@@ -139,21 +137,18 @@ as speech (it's a 2 MB model classifying 32 ms windows — perfection
 isn't on the table). Recall layers two post-capture filters to catch
 what VAD misses:
 
-- `recall.min_segment_peak` (default **0.02**) — drops segments
-  whose peak absolute sample level is below the noise floor.
-- `recall.min_segment_rms` (default **0.005**) — drops segments
-  whose RMS energy (`sqrt(mean(sample²))/32768`) is too low. This is
-  the one that catches 24 s of silence with one keyboard clack:
-  peak is bumped up by the click, but RMS across the whole segment
-  stays tiny. Real quiet speech has RMS roughly 10× higher.
+- `defaultMinSegmentPeak` = **0.02** — drops segments whose peak
+  absolute sample level is below the noise floor.
+- `defaultMinSegmentRMS` = **0.005** — drops segments whose RMS
+  energy (`sqrt(mean(sample²))/32768`) is too low. This is the one
+  that catches 24 s of silence with one keyboard clack: peak is
+  bumped up by the click, but RMS across the whole segment stays
+  tiny. Real quiet speech has RMS roughly 10× higher.
 
 Both decisions are logged at INFO level and recorded on the
 `vocis.recall.capture` span as `segment.dropped_as_silence` /
-`segment.drop_reason`.
-
-Set either to `0` to disable. Set `min_segment_peak` higher (e.g.
-`0.05`) in noisy environments if you find real noise still leaking
-through VAD and the RMS filter.
+`segment.drop_reason`. The values are pinned in
+`internal/recall/daemon.go`; edit and rebuild to change them.
 
 ## Diagnosing stuck-in-speech segments
 
@@ -165,8 +160,9 @@ likelihood:
    / HVAC / distant voices sometimes score in the 0.35–0.5 band for
    long stretches. The ambiguous band holds state, so once you're
    in-speech, staying in-speech can still happen if the ambiguous
-   frames never dip below 0.35. Increase `recall.min_silence_ms`
-   to require a longer clean silence before closing.
+   frames never dip below 0.35. Increase `defaultMinSilenceMS` (in
+   `internal/recall/daemon.go`) to require a longer clean silence
+   before closing.
 
 2. **Hardware noise crossing 0.5.** Loud fans, noisy gain settings,
    phantom power issues. Silero scoring >0.5 on what you hear as
