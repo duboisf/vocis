@@ -30,7 +30,6 @@ func TestChatAudioLiveLemonade(t *testing.T) {
 	}
 
 	cfg := config.TranscriptionConfig{
-		Backend: config.BackendLemonadeChat,
 		BaseURL: "http://localhost:13305/api/v1",
 		Model:   "gemma4-it-e2b-FLM",
 		ChatAudio: config.ChatAudioConfig{
@@ -41,11 +40,6 @@ func TestChatAudioLiveLemonade(t *testing.T) {
 			Language: "en",
 			Stream:   true,
 		},
-	}
-	streaming := config.StreamingConfig{
-		// 8 kHz != silero's 16 kHz so VAD is skipped and the chunk
-		// goes through on the chunk_max_seconds path. Tests the wire
-		// shape without depending on libonnxruntime in the test env.
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{
@@ -65,7 +59,7 @@ func TestChatAudioLiveLemonade(t *testing.T) {
 	}
 
 	httpClient := &http.Client{Timeout: 60 * time.Second}
-	session, err := startChatAudioSession(context.Background(), cfg, streaming, httpClient, opts)
+	session, err := startChatAudioSession(context.Background(), cfg, httpClient, opts)
 	if err != nil {
 		t.Fatalf("startChatAudioSession: %v", err)
 	}
@@ -92,7 +86,6 @@ func TestChatAudioLiveLemonadeInlineClips(t *testing.T) {
 	}
 
 	cfg := config.TranscriptionConfig{
-		Backend: config.BackendLemonadeChat,
 		BaseURL: "http://localhost:13305/api/v1",
 		Model:   "gemma4-it-e2b-FLM",
 		ChatAudio: config.ChatAudioConfig{
@@ -120,7 +113,7 @@ func TestChatAudioLiveLemonadeInlineClips(t *testing.T) {
 	}
 
 	httpClient := &http.Client{Timeout: 60 * time.Second}
-	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, httpClient, opts)
+	session, err := startChatAudioSession(context.Background(), cfg, httpClient, opts)
 	if err != nil {
 		t.Fatalf("startChatAudioSession: %v", err)
 	}

@@ -29,14 +29,13 @@ var ErrInputAudioBufferCommitEmpty = errors.New("input audio buffer commit empty
 
 type Client struct {
 	cfg          config.TranscriptionConfig
-	streaming    config.StreamingConfig
 	client       openaisdk.Client
 	chatStreamer chatCompletionStreamer
 	httpClient   *http.Client
 	writeTimeout time.Duration
 }
 
-func New(cfg config.TranscriptionConfig, streaming config.StreamingConfig) *Client {
+func New(cfg config.TranscriptionConfig) *Client {
 	timeout := time.Duration(cfg.RequestLimit) * time.Second
 
 	baseURL := strings.TrimRight(cfg.BaseURL, "/")
@@ -64,7 +63,6 @@ func New(cfg config.TranscriptionConfig, streaming config.StreamingConfig) *Clie
 
 	return &Client{
 		cfg:          cfg,
-		streaming:    streaming,
 		client:       sdkClient,
 		chatStreamer: &sdkChatStreamer{completions: &sdkClient.Chat.Completions},
 		httpClient:   httpClient,
@@ -173,7 +171,7 @@ func (c *Client) StartDictation(ctx context.Context, opts DictationOpts) (Dictat
 	if opts.Channels <= 0 {
 		return nil, errors.New("recording.channels must be greater than zero")
 	}
-	return startChatAudioSession(ctx, c.cfg, c.streaming, c.httpClient, opts)
+	return startChatAudioSession(ctx, c.cfg, c.httpClient, opts)
 }
 
 // ---------------------------------------------------------------------------

@@ -60,7 +60,7 @@ func NewDaemon(opts DaemonOpts) *Daemon {
 		cfg:              opts.Config,
 		ring:             ring,
 		shutdown:         make(chan struct{}),
-		transcribeClient: transcribe.New(opts.Config.Transcription, opts.Config.Streaming),
+		transcribeClient: transcribe.New(opts.Config.Transcription),
 	}
 }
 
@@ -73,7 +73,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.cfg.Recording.SampleRate)
 	}
 
-	if err := transcribe.InitSilero(d.cfg.Streaming.OnnxruntimeLibrary); err != nil {
+	if err := transcribe.InitSilero(d.cfg.Transcription.ChatAudio.Silero.OnnxruntimeLibrary); err != nil {
 		return fmt.Errorf("init silero: %w", err)
 	}
 

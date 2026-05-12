@@ -400,7 +400,6 @@ func TestChatAudioSessionMultiClipForceCutBatching(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		Backend: config.BackendLemonadeChat,
 		BaseURL: server.URL + "/api/v1",
 		Model:   "gemma-test",
 		ChatAudio: config.ChatAudioConfig{
@@ -411,19 +410,14 @@ func TestChatAudioSessionMultiClipForceCutBatching(t *testing.T) {
 			Stream:          true,
 		},
 	}
-	streaming := config.StreamingConfig{
-		// Disable Silero in the test path — sileroSampleRate guard
-		// triggers when sampleRate doesn't match, falling back to
-		// chunk_max_seconds-only chunking, which is what we want here.
-	}
 	samples := make(chan []int16, 2)
 	opts := DictationOpts{
-		SampleRate: 8000, // deliberately != sileroSampleRate so VAD is skipped
+		SampleRate: 8000, // deliberately != sileroSampleRate so VAD is skipped (Silero unused)
 		Channels:   1,
 		Samples:    samples,
 	}
 	httpClient := &http.Client{Timeout: 5 * time.Second}
-	session, err := startChatAudioSession(context.Background(), cfg, streaming, httpClient, opts)
+	session, err := startChatAudioSession(context.Background(), cfg, httpClient, opts)
 	if err != nil {
 		t.Fatalf("startChatAudioSession: %v", err)
 	}
@@ -567,7 +561,6 @@ func TestChatAudioSessionContinuationRebatch(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		Backend: config.BackendLemonadeChat,
 		BaseURL: server.URL + "/api/v1",
 		Model:   "gemma-test",
 		ChatAudio: config.ChatAudioConfig{
@@ -586,7 +579,7 @@ func TestChatAudioSessionContinuationRebatch(t *testing.T) {
 		Samples:    samples,
 	}
 	httpClient := &http.Client{Timeout: 5 * time.Second}
-	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, httpClient, opts)
+	session, err := startChatAudioSession(context.Background(), cfg, httpClient, opts)
 	if err != nil {
 		t.Fatalf("startChatAudioSession: %v", err)
 	}
@@ -694,7 +687,6 @@ func TestChatAudioSessionContinuationRebatchPostFinalizeRetractsFromLive(t *test
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		Backend: config.BackendLemonadeChat,
 		BaseURL: server.URL + "/api/v1",
 		Model:   "gemma-test",
 		ChatAudio: config.ChatAudioConfig{
@@ -713,7 +705,7 @@ func TestChatAudioSessionContinuationRebatchPostFinalizeRetractsFromLive(t *test
 		Samples:    samples,
 	}
 	httpClient := &http.Client{Timeout: 5 * time.Second}
-	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, httpClient, opts)
+	session, err := startChatAudioSession(context.Background(), cfg, httpClient, opts)
 	if err != nil {
 		t.Fatalf("startChatAudioSession: %v", err)
 	}
@@ -780,7 +772,6 @@ func TestChatAudioSessionDropsSilentChunk(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		Backend: config.BackendLemonadeChat,
 		BaseURL: server.URL,
 		Model:   "gemma-test",
 		ChatAudio: config.ChatAudioConfig{
@@ -799,7 +790,7 @@ func TestChatAudioSessionDropsSilentChunk(t *testing.T) {
 		Channels:   1,
 		Samples:    samples,
 	}
-	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, &http.Client{Timeout: 5 * time.Second}, opts)
+	session, err := startChatAudioSession(context.Background(), cfg, &http.Client{Timeout: 5 * time.Second}, opts)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -830,7 +821,6 @@ func TestChatAudioSessionDropsHallucination(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		Backend: config.BackendLemonadeChat,
 		BaseURL: server.URL,
 		Model:   "gemma-test",
 		HallucinationFilters: []string{"Thank you."},
@@ -848,7 +838,7 @@ func TestChatAudioSessionDropsHallucination(t *testing.T) {
 		Channels:   1,
 		Samples:    samples,
 	}
-	session, err := startChatAudioSession(context.Background(), cfg, config.StreamingConfig{}, &http.Client{Timeout: 5 * time.Second}, opts)
+	session, err := startChatAudioSession(context.Background(), cfg, &http.Client{Timeout: 5 * time.Second}, opts)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}

@@ -23,23 +23,19 @@ sequenceDiagram
     App->>Recorder: Start capture
     Recorder-->>App: Audio samples channel
     App->>Injector: CaptureTarget (window ID)
-    App->>Lemonade: StartDictation (spawns pump)
+    App->>Lemonade: StartDictation (spawns Silero chunker + HTTP worker)
 
-    par Buffer audio while connecting
-        Recorder->>Lemonade: Audio chunks (buffered)
-    and Connect WebSocket
-        Lemonade->>Lemonade: connectAndBuffer (retry up to 3x)
-        Lemonade-->>App: OnConnected callback
-        App->>Overlay: SetConnected("● Ready to type into kitty")
-    end
-
-    Note over Lemonade: Flush buffered audio, stream live
+    Note over Lemonade: First audio chunk fires synthetic OnConnected
+    Lemonade-->>App: OnConnected callback
+    App->>Overlay: SetConnected("● Ready to type into kitty")
 
     loop While recording
-        Recorder->>Lemonade: Audio chunks (live)
-        Lemonade-->>App: Partial events
+        Recorder->>Lemonade: Audio chunks
+        Lemonade->>Lemonade: Silero VAD episodes
+        Lemonade->>Lemonade: POST /chat/completions (one per chunk)
+        Lemonade-->>App: SSE partial deltas
         App->>Overlay: SetListeningText (live preview)
-        Lemonade-->>App: Segment events (on VAD pause)
+        Lemonade-->>App: Segment events (on chunk completion)
         App->>App: Accumulate liveText + displayText
         App->>Overlay: Update overlay (one line per segment)
     end
@@ -56,15 +52,11 @@ sequenceDiagram
     App->>Overlay: GrabEscape
     App->>Recorder: Stop capture
 
-    Note over Lemonade: collectTrailing
+    Note over Lemonade: Finalize / collect_trailing
 
-    alt Server VAD already drained buffer
-        Lemonade->>Lemonade: Skip commit (BufferDrainedByServerVAD)
-    else
-        Lemonade->>Lemonade: AppendSilence (tail pad) + Commit
-    end
-    Lemonade->>Lemonade: waitForCompletion (drain finals until HasInflightWork=false or timeout)
-    Lemonade-->>App: Combined transcript (zero or more drained segments)
+    Lemonade->>Lemonade: Flush trailing audio (multi-clip if force-cuts pending)
+    Lemonade->>Lemonade: POST /chat/completions for trailing chunk
+    Lemonade-->>App: Trailing transcript joined to live segments
 
     App->>Overlay: SetFinishingText (full text with newlines)
 
@@ -121,10 +113,9 @@ When `vocis serve` runs:
 
 **Refreshed on every hotkey press (no restart needed):**
 
-- `transcription.*` — backend, base_url, realtime_url, model, language, prompt_hint, request_timeout_seconds, hallucination_filters, organization, project. The transcribe `Client` is rebuilt so a new API key/SDK option set takes effect.
+- `transcription.*` — base_url, model, language, prompt_hint, request_timeout_seconds, hallucination_filters, and the `chat_audio.*` subtree (including `chat_audio.silero.*`). The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
 - `recording.*` — device, sample_rate, channels, max_duration_seconds, duck_volume.
-- `streaming.*` — manual_commit, client_vad, threshold/silence_duration_ms/prefix_padding_ms, min_utterance_ms, wait_final_seconds, tail_silence_ms, noise_reduction, onnxruntime_library, show_partial_overlay.
-- `postprocess.*` — enabled, model, **prompt**, min_word_count, timeouts, sampling knobs (temperature, top_p, min_p, frequency/presence/repetition penalties, stop).
+- `postprocess.*` — enabled, model, **prompt**, min_word_count, timeouts, sampling knobs (temperature, top_p).
 - `log_window_title`.
 
 **Pinned at `vocis serve` startup (require restart to change):**
@@ -135,7 +126,7 @@ When `vocis serve` runs:
 - `telemetry.*` — exporter is initialized once.
 - `speak.*` — only consulted by the separate `vocis speak` command, not by `serve`.
 
-**Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*`, `streaming.*`, and `postprocess.*` blocks the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands load fresh config on each invocation.
+**Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*` and `postprocess.*` blocks the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands load fresh config on each invocation.
 
 ## Record Start
 
@@ -147,10 +138,9 @@ When the hotkey starts dictation:
 4. The overlay repositions to the monitor where the mouse pointer is.
 5. [`internal/recorder/recorder.go`](/home/fred/git/vtt/internal/recorder/recorder.go) starts local microphone capture immediately.
 6. The injector captures the active target window after capture has already started so focus can be restored later.
-7. [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go) starts a `DictationSession`.
-8. The `DictationSession` creates the realtime transcription session and connects the WebSocket. If the connect fails, it retries up to 3 times (2s timeout per attempt).
-9. Audio chunks that arrive before the WebSocket is ready are buffered in memory inside the dictation session (`connectAndBuffer`).
-10. Once the WebSocket is ready, the overlay updates to "● Ready to type into {window}" and buffered audio is flushed, then live audio continues streaming (`streamAudio`).
+7. [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go) starts a `chatAudioSession`.
+8. The session spawns two goroutines: an audio pump that runs Silero VAD on incoming samples, and an HTTP worker that serializes one `/chat/completions` POST per VAD-bounded (or chunk_max_seconds-bounded) chunk.
+9. The synthetic "connected" callback fires on the first audio chunk so the overlay can flip from "Connecting..." to "Ready to type into {window}".
 
 ### Submit Mode
 
@@ -166,10 +156,9 @@ When the hotkey stops dictation:
 2. The Escape key is temporarily grabbed for the finishing state.
 3. The overlay switches to the "Finishing" state with a heartbeat wave animation, showing the accumulated text and an elapsed-time counter that ticks up from 0 (e.g. `Wrapping up... (2.3s)`). There is no outer deadline on the finalize call — the counter runs until the transcription completes or the user cancels.
 4. The user can press the hotkey during this state to cancel the in-flight transcription. The overlay shows "Cancelled — transcription discarded". The dismissable window ends as soon as the paste lands (and submit Enter, if any, has fired): from that point onward, a hotkey press starts a fresh dictation rather than dismissing the just-completed one. This matters because the success-overlay fade-out takes ~320ms — without an explicit "delivery completed" marker, an eager user pressing the hotkey during the fade would otherwise hit the cancel path and see a stray "Cancelled" warning even though the transcript already landed.
-5. [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go) finalizes the `DictationSession` via `collectTrailing`:
-   - If the server VAD already drained the buffer (`PreCommitContext.BufferDrainedByServerVAD`), the explicit commit is skipped — it would just produce a no-op "buffer too small" round-trip.
-   - Otherwise, `stream.AppendSilence` pads the tail (so Whisper segments the last word) and `stream.Commit` flushes any remaining audio. `ErrInputAudioBufferCommitEmpty` is benign (server VAD raced our commit) and is swallowed.
-   - `waitForCompletion` then drains finals from `s.finals` in a loop until `Stream.HasInflightWork()` reports false (every server-VAD segment has its matching `transcription.completed` AND no streaming delta is buffered) or the proportional timeout fires. The drain handles the multi-segment case where Whisper has multiple turns pending at commit time — the previous single-shot wait dropped the second one.
+5. [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go) finalizes the `chatAudioSession`:
+   - `Finalize` flips the session out of live-segment mode, waits for the audio pump to drain, and the worker flushes a trailing chunk that POSTs to `/chat/completions` one last time (multi-clip when force-cut segments are pending).
+   - Trailing transcripts are joined to the already-emitted live segments. Continuation rebatch may emit a `replace_segment` event that retracts the previous live segment in favor of a unified two-clip transcript.
 6. The overlay updates to show the complete transcription text (segments + trailing) with newlines preserved. The finished "Wrapping up" phase is pushed onto a completed-phases list with its elapsed duration (e.g. `Wrapping up — done (2.3s)`) so the user can see how long finalization actually took.
 7. If post-processing is enabled and the text has enough words (`postprocess.min_word_count`):
    - The overlay shows a new `Wait...` phase counting up from 0. Internal first-token / total timeouts still apply inside the post-processing call — they are enforced but not displayed.
@@ -194,13 +183,13 @@ After transcription completes:
 
 ## Segmented Streaming
 
-Server VAD is always enabled. While the hotkey is held:
+Client-side Silero VAD decides chunk boundaries. While the hotkey is held:
 
-1. Lemonade server VAD detects pauses.
-2. Completed phrases are emitted as segment events from the dictation session.
+1. The chat-audio audio pump feeds 16 kHz mono PCM through Silero. A `speech_stopped` transition closes a chunk; long monologues without a pause force-cut at `chunk_max_seconds` and accumulate into a multi-clip batch.
+2. The HTTP worker POSTs each chunk to `/chat/completions` and emits SSE-derived partial deltas plus a segment event when the response completes.
 3. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) accumulates segment text in `recordingState.liveText` (for pasting) and `recordingState.displayText` (for the overlay, with newlines between segments).
 4. The overlay displays each segment on a separate line, growing vertically as text accumulates. Partial transcription text is prepended with the accumulated segments so previously completed text stays visible.
-5. On release, the accumulated text plus any trailing finalize text is combined and pasted into the target window as a single insertion.
+5. On release, the trailing chunk POSTs one last time, and the joined text is pasted into the target window as a single insertion.
 
 Segments are never typed into the target window during recording. This avoids corrupting the X11 keymap state with `xdotool keyup` while the user is still holding the hotkey.
 
@@ -240,11 +229,8 @@ When telemetry is enabled, the following OpenTelemetry spans are emitted per dic
     - `vocis.capture_target` — identify the focused window. `capture.source` = `xdotool` or `extension`; the extension path nests `vocis.gnome.get_focused_window` for the D-Bus call.
     - `vocis.recorder.start` — PulseAudio client init and stream creation
     - `vocis.recording.active` — the user speaking (from dictation start to release)
-    - `vocis.transcribe.connect` — WebSocket dial and session setup (may appear multiple times on retry). `transcribe.backend` = `lemonade` or `lemonade-chat`. Not emitted on the `lemonade-chat` backend, which has no upfront connection — it instead emits one `vocis.transcribe.chat_audio.chunk` span per VAD-bounded audio chunk, with `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, and `chunk.request_bytes` attributes. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing` instead of the WS-flavoured `commit`/`wait_final` spans.
+    - `vocis.transcribe.chat_audio.chunk` — one span per VAD-bounded audio chunk POSTed to `/chat/completions`. Attributes include `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, `chunk.request_bytes`, and the response text. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing`.
     - `vocis.recorder.stop` — stream stop and resource cleanup
-    - `vocis.transcribe.finalize` — post-recording finalization
-      - `vocis.transcribe.commit` — commit trailing audio buffer to the backend (skipped when server VAD already drained the buffer; `commit.empty_swallowed=true` when we raced VAD)
-      - `vocis.transcribe.wait_final` — drain-loop wait for in-flight transcriptions. `wait_final.exit_reason` (`no_inflight_work` / `timeout` / `error`), `wait_final.drained_segments`, `wait_final.{started,completed}_count_at_{entry,exit}`, `wait_final.commit_skipped_buffer_drained`, `wait_final.commit_empty_swallowed`. See `docs/debugging.md` for the full attribute list.
     - `vocis.postprocess` — LLM cleanup with two-phase streaming timeout
       - Attributes: `input.length`, `model`, `output.length`, `skipped`, `postprocess.first_token_timeout_sec`, `postprocess.total_timeout_sec`, `postprocess.error`
       - Events: `postprocess.streaming_request_sent`, `postprocess.first_token_received` (`elapsed`), `postprocess.first_token_timeout` (`timeout`), `postprocess.streaming_complete` (`elapsed`), `postprocess.empty_response`, `postprocess.cancelled_by_user`

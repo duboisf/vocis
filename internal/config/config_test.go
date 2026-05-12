@@ -141,14 +141,32 @@ func TestDecodeStrictEmptyInputIsOK(t *testing.T) {
 	}
 }
 
-// TestBackendRejectsUnknownValue confirms the only legal backend is
-// lemonade-chat (or the implicit default empty string).
-func TestBackendRejectsUnknownValue(t *testing.T) {
+// TestStripRetiredKeysDropsStreamingSection confirms that a config
+// still carrying the old `streaming:` section loads cleanly — the
+// section's contents (and the section itself) are silently stripped
+// before strict decoding so users can upgrade without editing.
+func TestStripRetiredKeysDropsStreamingSection(t *testing.T) {
 	t.Parallel()
 
-	cfg := Default()
-	cfg.Transcription.Backend = "lemonade"
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("expected error for retired backend value")
+	in := []byte(`hotkey: ctrl+shift+space
+transcription:
+  backend: lemonade-chat
+  model: gemma4-it-e2b-FLM
+streaming:
+  manual_commit: true
+  silence_duration_ms: 800
+  prefix_padding_ms: 300
+  onnxruntime_library: /tmp/libonnxruntime.so
+`)
+	out := stripRetiredKeys(in)
+	s := string(out)
+	if strings.Contains(s, "streaming:") {
+		t.Fatalf("streaming section still present after strip: %s", s)
+	}
+	if strings.Contains(s, "backend:") {
+		t.Fatalf("retired transcription.backend still present: %s", s)
+	}
+	if !strings.Contains(s, "model: gemma4-it-e2b-FLM") {
+		t.Fatalf("model key dropped: %s", s)
 	}
 }

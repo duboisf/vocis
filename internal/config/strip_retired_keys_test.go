@@ -33,7 +33,7 @@ transcription:
 func TestStripRetiredKeysIsNoopWhenAbsent(t *testing.T) {
 	in := []byte(`hotkey: a
 transcription:
-  backend: lemonade
+  model: gemma4-it-e2b-FLM
 `)
 	out := stripRetiredKeys(in)
 	if string(out) != string(in) {

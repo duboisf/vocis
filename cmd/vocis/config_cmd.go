@@ -181,9 +181,6 @@ func runConfigBackend() error {
 		return err
 	}
 
-	fmt.Printf("Current backend: %s\n", cfg.Transcription.Backend)
-
-	cfg.Transcription.Backend = config.BackendLemonadeChat
 	base, _, detected := detectLemonade()
 	cfg.Transcription.BaseURL = base
 	// Default the model to the user-tested Gemma 4 audio variant.
@@ -194,7 +191,7 @@ func runConfigBackend() error {
 	if detected {
 		status = "detected running Lemonade Server"
 	}
-	fmt.Printf("\nSet backend=lemonade-chat (%s)\n  base_url=%s\n  model=%s\n",
+	fmt.Printf("Probed Lemonade Server (%s)\n  base_url=%s\n  model=%s\n",
 		status, base, cfg.Transcription.Model)
 
 	if err := config.Save(path, cfg); err != nil {
@@ -251,13 +248,11 @@ func runConfigModels() error {
 		return err
 	}
 	if len(txModels) == 0 {
-		return fmt.Errorf("no transcription-capable models returned from backend %q", cfg.Transcription.Backend)
+		return errors.New("no transcription-capable models returned from Lemonade")
 	}
 	if len(ppModels) == 0 {
-		return fmt.Errorf("no chat-capable models returned from backend %q", cfg.Transcription.Backend)
+		return errors.New("no chat-capable models returned from Lemonade")
 	}
-
-	fmt.Printf("Backend: %s\n\n", cfg.Transcription.Backend)
 
 	fmt.Printf("Transcription model (current: %s)\n", cfg.Transcription.Model)
 	newTx, err := pickModel(txModels, cfg.Transcription.Model)

@@ -61,7 +61,6 @@ type Config struct {
 	LogWindowTitle bool                `yaml:"log_window_title"`
 	Transcription  TranscriptionConfig `yaml:"transcription"`
 	Recording      RecordingConfig     `yaml:"recording"`
-	Streaming      StreamingConfig     `yaml:"streaming"`
 	Insertion      InsertionConfig     `yaml:"insertion"`
 	Overlay        OverlayConfig       `yaml:"overlay"`
 	PostProcess    PostProcessConfig   `yaml:"postprocess"`
@@ -184,7 +183,6 @@ const (
 )
 
 type TranscriptionConfig struct {
-	Backend string `yaml:"backend"`
 	BaseURL string `yaml:"base_url"`
 	Model   string `yaml:"model"`
 	Language    string `yaml:"language"`
@@ -332,6 +330,36 @@ type ChatAudioConfig struct {
 	// one POST per utterance so there's nothing to rebatch). Off by
 	// default.
 	ContinuationRebatch bool `yaml:"continuation_rebatch"`
+	// Silero is the VAD hysteresis block used by the chat-audio
+	// chunker. The realtime-WS backend (gone since the previous
+	// commit) used to read these knobs from a top-level streaming:
+	// section; now that chat-audio is the only consumer, they live
+	// inline with the rest of its config.
+	Silero SileroConfig `yaml:"silero"`
+}
+
+// SileroConfig holds the Silero VAD hysteresis knobs the chat-audio
+// chunker uses to bound a speech episode. The semantic field names
+// (silence_ms / speech_ms) replace the OpenAI-realtime-leaking names
+// the old streaming: section used (silence_duration_ms /
+// prefix_padding_ms).
+type SileroConfig struct {
+	// OnnxruntimeLibrary is an optional absolute path to
+	// libonnxruntime.so. When empty, vocis auto-discovers the library
+	// from common install locations. Supports $HOME / ${VAR} expansion
+	// at runtime.
+	OnnxruntimeLibrary string `yaml:"onnxruntime_library"`
+	// SilenceMS is the minimum non-speech duration that closes a
+	// speech episode. Was streaming.silence_duration_ms. Default 500.
+	SilenceMS int `yaml:"silence_ms"`
+	// SpeechMS is the minimum speech duration that opens a speech
+	// episode. Was streaming.prefix_padding_ms. Default 150.
+	SpeechMS int `yaml:"speech_ms"`
+	// MinUtteranceMS is the minimum accumulated speech an episode
+	// needs before it can be committed. Shorter episodes are dropped
+	// to keep Gemma from hallucinating on sub-second clips. Default
+	// 1000.
+	MinUtteranceMS int `yaml:"min_utterance_ms"`
 }
 
 const (
@@ -339,9 +367,6 @@ const (
 	ChatAudioContextInlineClips = "inline_clips"
 )
 
-const (
-	BackendLemonadeChat = "lemonade-chat"
-)
 
 // DefaultChatAudioPrompt is the transcription instruction validated
 // against gemma4-it-e2b-FLM via Lemonade. The {language} token
@@ -374,27 +399,6 @@ type RecordingConfig struct {
 	DuckVolume         float64 `yaml:"duck_volume"`
 }
 
-// StreamingConfig holds the Silero VAD knobs used by the chat-audio
-// backend. The realtime-WebSocket fields it once carried have been
-// removed; commit 2 moves what remains into transcription.chat_audio.
-type StreamingConfig struct {
-	// PrefixPaddingMS is the minimum required speech duration before
-	// Silero declares "speech started". Maps to chat-audio's min-speech
-	// hysteresis.
-	PrefixPaddingMS int `yaml:"prefix_padding_ms"`
-	// SilenceDurationMS is the minimum required silence duration before
-	// Silero closes a speech episode. Maps to chat-audio's min-silence
-	// hysteresis.
-	SilenceDurationMS int `yaml:"silence_duration_ms"`
-	// MinUtteranceMS is the minimum accumulated speech duration an
-	// episode needs before it can be committed. Shorter episodes are
-	// dropped to avoid Gemma hallucinating on sub-second clips.
-	MinUtteranceMS int `yaml:"min_utterance_ms"`
-	// OnnxruntimeLibrary is an optional absolute path to
-	// libonnxruntime.so. When empty, vocis auto-discovers the library
-	// from common install locations (/usr/local/lib, /usr/lib, etc.).
-	OnnxruntimeLibrary string `yaml:"onnxruntime_library"`
-}
 
 type InsertionConfig struct {
 	Mode             string   `yaml:"mode"`
@@ -500,10 +504,6 @@ func Default() Config {
 		Hotkey:     "ctrl+shift+space",
 		HotkeyMode: "hold",
 		Transcription: TranscriptionConfig{
-			// Default to chat-audio with Gemma 4 audio: gemma4-it-e2b-FLM
-			// is the only transcription backend vocis ships today (the
-			// realtime-WebSocket backend was removed).
-			Backend:      BackendLemonadeChat,
 			BaseURL:      "http://localhost:13305/api/v1",
 			Model:        "gemma4-it-e2b-FLM",
 			PromptHint:   DefaultPromptHint,
@@ -534,13 +534,26 @@ func Default() Config {
 				// hum / room tone but keeps quiet speech.
 				MinChunkPeak: 0.02,
 				MinChunkRMS:  0.005,
-				BatchPrompt: DefaultBatchPrompt,
+				BatchPrompt:  DefaultBatchPrompt,
 				// 0 = auto: query Lemonade /api/v1/health for the loaded
 				// model's recipe_options.ctx_size and compute a safe
 				// audio-seconds budget from it (Gemma audio costs 6.25
 				// tokens/s per the USM encoder spec). Override with a
 				// positive number to pin the budget.
 				BatchMaxAudioSeconds: 0,
+				Silero: SileroConfig{
+					// $HOME/opt/onnxruntime/lib/... is where the
+					// onnxruntime release tarball lands when unpacked
+					// into ~/opt — the documented install location.
+					// resolveOnnxruntimeLibrary expands $HOME at runtime
+					// so this is portable across machines; users who
+					// installed system-wide can blank the field to fall
+					// back to the auto-discovery candidates.
+					OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
+					SilenceMS:          500,
+					SpeechMS:           150,
+					MinUtteranceMS:     1000,
+				},
 			},
 		},
 		Recording: RecordingConfig{
@@ -550,24 +563,6 @@ func Default() Config {
 			Channels:           1,
 			MaxDurationSeconds: 120,
 			DuckVolume:         0.1,
-		},
-		Streaming: StreamingConfig{
-			// Silero hysteresis knobs used by the chat-audio backend.
-			// These names (prefix_padding_ms / silence_duration_ms) are
-			// historical — the realtime-WS backend they originally
-			// targeted is gone. Commit 2 moves them under
-			// transcription.chat_audio.silero with clearer names.
-			PrefixPaddingMS:   150,
-			SilenceDurationMS: 500,
-			// $HOME/opt/onnxruntime/lib/... is where the onnxruntime
-			// release tarball lands when unpacked into ~/opt — the
-			// documented install location. resolveOnnxruntimeLibrary
-			// expands $HOME at runtime so this is portable across
-			// machines; users who installed system-wide (/usr/lib,
-			// /usr/local/lib) can blank the field to trigger the
-			// auto-discovery candidates instead.
-			OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
-			MinUtteranceMS:     1000,
 		},
 		Insertion: InsertionConfig{
 			Mode:             "auto",
@@ -778,6 +773,11 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"streaming.threshold", "post-WS-removal", "realtime WebSocket backend was removed; Silero hysteresis replaces the energy threshold"},
 	{"streaming.wait_final_seconds", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio has no post-commit wait"},
 	{"streaming.tail_silence_ms", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio does not pad a WS audio buffer"},
+	{"streaming.prefix_padding_ms", "streaming-fold", "moved to transcription.chat_audio.silero.speech_ms"},
+	{"streaming.silence_duration_ms", "streaming-fold", "moved to transcription.chat_audio.silero.silence_ms"},
+	{"streaming.min_utterance_ms", "streaming-fold", "moved to transcription.chat_audio.silero.min_utterance_ms"},
+	{"streaming.onnxruntime_library", "streaming-fold", "moved to transcription.chat_audio.silero.onnxruntime_library"},
+	{"transcription.backend", "post-WS-removal", "only one backend remains; transcription.backend is no longer read"},
 	{"yaml_indent", "config-cull", "self-output indentation is now hardcoded to 2"},
 	{"postprocess.min_p", "config-cull", "rarely-tuned sampler knob"},
 	{"postprocess.frequency_penalty", "config-cull", "rarely-tuned sampler knob"},
@@ -788,10 +788,20 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"recall.batch_max_seconds", "one-shot-batch", "`recall last` no longer concatenates PCM; total audio is now bounded by Gemma's context window"},
 }
 
+// retiredSections lists whole top-level YAML sections that vocis used
+// to consume and now no longer reads at all. Stripped wholesale after
+// per-key removal so an old config carrying e.g. `streaming:` with
+// any combination of subkeys is silently dropped instead of failing
+// the strict decoder.
+var retiredSections = []struct{ path, since, reason string }{
+	{"streaming", "streaming-fold", "streaming: was folded into transcription.chat_audio.silero (silence_ms / speech_ms / min_utterance_ms / onnxruntime_library)"},
+}
+
 // stripRetiredKeys parses the YAML, walks the retiredKeys list, and
 // returns a copy with any matches removed. Logs a one-time
 // deprecation notice per removed key so users notice their config is
-// drifting from current shape.
+// drifting from current shape. Whole sections from retiredSections
+// are then removed in a second pass.
 func stripRetiredKeys(data []byte) []byte {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -802,6 +812,12 @@ func stripRetiredKeys(data []byte) []byte {
 		if removeNestedKey(&doc, strings.Split(k.path, ".")) {
 			changed = true
 			sessionlog.Warnf("config: dropping retired key %q (removed %s — %s)", k.path, k.since, k.reason)
+		}
+	}
+	for _, s := range retiredSections {
+		if removeNestedKey(&doc, []string{s.path}) {
+			changed = true
+			sessionlog.Warnf("config: dropping retired section %q (removed %s — %s)", s.path, s.since, s.reason)
 		}
 	}
 	if !changed {
@@ -886,52 +902,53 @@ func (c Config) Validate() error {
 		return errors.New("transcription.model must not be empty")
 	}
 
-	switch c.Transcription.Backend {
-	case "", BackendLemonadeChat:
-	default:
-		return fmt.Errorf("transcription.backend must be %q", BackendLemonadeChat)
+	ca := c.Transcription.ChatAudio
+	if ca.ChunkMaxSeconds < 1 || ca.ChunkMaxSeconds > 30 {
+		return errors.New("transcription.chat_audio.chunk_max_seconds must be between 1 and 30")
 	}
-
-	if c.Transcription.Backend == BackendLemonadeChat {
-		ca := c.Transcription.ChatAudio
-		if ca.ChunkMaxSeconds < 1 || ca.ChunkMaxSeconds > 30 {
-			return errors.New("transcription.chat_audio.chunk_max_seconds must be between 1 and 30")
-		}
-		if ca.HistoryTurns < 0 || ca.HistoryTurns > 8 {
-			return errors.New("transcription.chat_audio.history_turns must be between 0 and 8")
-		}
-		if strings.TrimSpace(ca.Prompt) == "" {
-			return errors.New("transcription.chat_audio.prompt must not be empty")
-		}
-		if strings.TrimSpace(ca.Language) == "" {
-			return errors.New("transcription.chat_audio.language must not be empty")
-		}
-		switch ca.ContextMode {
-		case "", ChatAudioContextFewShot, ChatAudioContextInlineClips:
-		default:
-			return fmt.Errorf(
-				"transcription.chat_audio.context_mode must be %q or %q",
-				ChatAudioContextFewShot, ChatAudioContextInlineClips,
-			)
-		}
-		if ca.MinChunkPeak < 0 || ca.MinChunkPeak > 1 {
-			return errors.New("transcription.chat_audio.min_chunk_peak must be between 0 and 1")
-		}
-		if ca.MinChunkRMS < 0 || ca.MinChunkRMS > 1 {
-			return errors.New("transcription.chat_audio.min_chunk_rms must be between 0 and 1")
-		}
-		if strings.TrimSpace(ca.BatchPrompt) == "" {
-			return errors.New("transcription.chat_audio.batch_prompt must not be empty")
-		}
-		if ca.BatchMaxAudioSeconds < 0 || ca.BatchMaxAudioSeconds > 600 {
-			return errors.New("transcription.chat_audio.batch_max_audio_seconds must be between 0 and 600")
-		}
-		if ca.CtxSize < 0 || ca.CtxSize > 1048576 {
-			return errors.New("transcription.chat_audio.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
-		}
-		if ca.BatchUntilRelease && ca.ContinuationRebatch {
-			return errors.New("transcription.chat_audio.batch_until_release and continuation_rebatch are mutually exclusive (batch_until_release already sends one POST per utterance, so there's nothing to rebatch)")
-		}
+	if ca.HistoryTurns < 0 || ca.HistoryTurns > 8 {
+		return errors.New("transcription.chat_audio.history_turns must be between 0 and 8")
+	}
+	if strings.TrimSpace(ca.Prompt) == "" {
+		return errors.New("transcription.chat_audio.prompt must not be empty")
+	}
+	if strings.TrimSpace(ca.Language) == "" {
+		return errors.New("transcription.chat_audio.language must not be empty")
+	}
+	switch ca.ContextMode {
+	case "", ChatAudioContextFewShot, ChatAudioContextInlineClips:
+	default:
+		return fmt.Errorf(
+			"transcription.chat_audio.context_mode must be %q or %q",
+			ChatAudioContextFewShot, ChatAudioContextInlineClips,
+		)
+	}
+	if ca.MinChunkPeak < 0 || ca.MinChunkPeak > 1 {
+		return errors.New("transcription.chat_audio.min_chunk_peak must be between 0 and 1")
+	}
+	if ca.MinChunkRMS < 0 || ca.MinChunkRMS > 1 {
+		return errors.New("transcription.chat_audio.min_chunk_rms must be between 0 and 1")
+	}
+	if strings.TrimSpace(ca.BatchPrompt) == "" {
+		return errors.New("transcription.chat_audio.batch_prompt must not be empty")
+	}
+	if ca.BatchMaxAudioSeconds < 0 || ca.BatchMaxAudioSeconds > 600 {
+		return errors.New("transcription.chat_audio.batch_max_audio_seconds must be between 0 and 600")
+	}
+	if ca.CtxSize < 0 || ca.CtxSize > 1048576 {
+		return errors.New("transcription.chat_audio.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
+	}
+	if ca.BatchUntilRelease && ca.ContinuationRebatch {
+		return errors.New("transcription.chat_audio.batch_until_release and continuation_rebatch are mutually exclusive (batch_until_release already sends one POST per utterance, so there's nothing to rebatch)")
+	}
+	if ca.Silero.SilenceMS < 0 || ca.Silero.SilenceMS > 5000 {
+		return errors.New("transcription.chat_audio.silero.silence_ms must be between 0 and 5000")
+	}
+	if ca.Silero.SpeechMS < 0 || ca.Silero.SpeechMS > 2000 {
+		return errors.New("transcription.chat_audio.silero.speech_ms must be between 0 and 2000")
+	}
+	if ca.Silero.MinUtteranceMS < 0 || ca.Silero.MinUtteranceMS > 10000 {
+		return errors.New("transcription.chat_audio.silero.min_utterance_ms must be between 0 and 10000")
 	}
 
 	switch c.HotkeyMode {
@@ -968,17 +985,6 @@ func (c Config) Validate() error {
 		return fmt.Errorf("recording.backend must be auto or pulse")
 	}
 
-	if c.Streaming.PrefixPaddingMS < 0 || c.Streaming.PrefixPaddingMS > 2000 {
-		return errors.New("streaming.prefix_padding_ms must be between 0 and 2000")
-	}
-
-	if c.Streaming.SilenceDurationMS < 0 || c.Streaming.SilenceDurationMS > 5000 {
-		return errors.New("streaming.silence_duration_ms must be between 0 and 5000")
-	}
-
-	if c.Streaming.MinUtteranceMS < 0 || c.Streaming.MinUtteranceMS > 10000 {
-		return errors.New("streaming.min_utterance_ms must be between 0 and 10000")
-	}
 
 	if c.Overlay.Width < 200 || c.Overlay.Height < 80 {
 		return errors.New("overlay dimensions are too small")

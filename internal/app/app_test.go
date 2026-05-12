@@ -16,7 +16,6 @@ func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {
 	fakeOverlay := &overlayStub{}
 	app := &App{
 		cfg: config.Config{
-			Streaming: config.StreamingConfig{},
 		},
 		overlay: fakeOverlay,
 	}
@@ -50,7 +49,6 @@ func TestPartialAppendsBelowAccumulatedSegments(t *testing.T) {
 	fakeOverlay := &overlayStub{}
 	app := &App{
 		cfg: config.Config{
-			Streaming: config.StreamingConfig{},
 		},
 		overlay: fakeOverlay,
 	}
@@ -82,7 +80,6 @@ func TestPartialReplacesPreviousPartial(t *testing.T) {
 	fakeOverlay := &overlayStub{}
 	app := &App{
 		cfg: config.Config{
-			Streaming: config.StreamingConfig{},
 		},
 		overlay: fakeOverlay,
 	}
@@ -111,7 +108,6 @@ func TestSegmentClearsPartial(t *testing.T) {
 	fakeOverlay := &overlayStub{}
 	app := &App{
 		cfg: config.Config{
-			Streaming: config.StreamingConfig{},
 		},
 		overlay: fakeOverlay,
 	}
@@ -141,7 +137,6 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 	fakeOverlay := &overlayStub{}
 	app := &App{
 		cfg: config.Config{
-			Streaming: config.StreamingConfig{},
 		},
 		overlay: fakeOverlay,
 	}
@@ -171,7 +166,6 @@ func TestHandleDictationEventAccumulatesSegments(t *testing.T) {
 	app := &App{
 		cfg: config.Config{
 			HotkeyMode: "hold",
-			Streaming:  config.StreamingConfig{},
 		},
 		overlay: fakeOverlay,
 	}
@@ -204,8 +198,6 @@ func TestHandleUpDoesNothingWhenNotRecording(t *testing.T) {
 	app := &App{
 		cfg: config.Config{
 			HotkeyMode: "hold",
-			Streaming: config.StreamingConfig{
-				},
 		},
 		overlay: &overlayStub{},
 	}

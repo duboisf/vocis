@@ -10,22 +10,24 @@ Log levels: `TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`. Structured fields use key
 
 Every meaningful branch leaves a trail. New features and guards must log when they fire — if a user pastes their session log into a bug report, the transcript should show which code paths ran. Level guide:
 
-- `TRACE` — high-volume protocol events (every WS frame, audio tail pad). Cheap, verbose.
+- `TRACE` — high-volume protocol events (every SSE delta, every chat-audio request body). Cheap, verbose.
 - `DEBUG` — routine state transitions, one-shot protocol decisions, internal handoffs.
 - `INFO` — user-visible decisions (filtered hallucination, submit mode toggle, config reload, dictation started/stopped).
 - `WARN` — recoverable problems (postprocess timeout, empty transcript, unknown event type).
 - `ERROR` — fatal to the current operation (dial failed, commit refused with non-empty reason).
 
-If an event is filtered from the existing trace machinery (e.g. `dumpWSFrame` skipping outbound `input_audio_buffer.append` to keep the log readable), add an explicit log so the behavior stays visible.
+If an event is filtered from the existing trace machinery (e.g. the audio payload redaction in `redactedRequestJSON` to keep request-body dumps readable), add an explicit log so the behavior stays visible.
 
 ### Useful things to look for
 
-- `ws ←` / `ws →` — every inbound / outbound WS frame except audio append spam. Cumulative deltas, commits, VAD events all appear here.
+- `chat-audio: posting chunk clips=N wav=…B history=N req=…B` — one per `/chat/completions` POST. Confirms VAD/force-cut boundaries are firing as expected.
+- `chat-audio: chunk response %q` — the final transcript for that chunk.
+- `chat-audio: request body (audio redacted)` (DEBUG) — the exact JSON message structure (system prompt, history shape, multi-clip layout) with audio bytes replaced by `<wav N bytes>` placeholders.
+- `chat-audio: SSE delta` (TRACE) — every streamed delta from the model.
+- `chat-audio: force-cut at Ns` — a long monologue without a VAD pause hit `chunk_max_seconds`; the cut clip is stashed for the next natural flush.
+- `chat-audio: dropped silent clip peak=… rms=…` — energy gate filtered a clip before posting. Compare against `min_chunk_peak` / `min_chunk_rms`.
+- `chat-audio: continuation rebatch` — the previous chunk's transcript ended without terminal punctuation; this chunk was reposted with the prior audio prepended to produce a unified transcript.
 - `dropped hallucinated final:` — the hallucination filter caught a Whisper/Gemma stock phrase ("Thank you.", etc.). See `transcription.hallucination_filters`.
-- `tail silence pad:` — the pre-commit silence appended so the last word doesn't get eaten. See `streaming.tail_silence_ms`.
-- `realtime: session.updated payload=` — what the backend echoed back after our `session.update`. Shows which fields the server actually honored (Lemonade silently discards unknown keys like `prompt` and `noise_reduction`).
-- `realtime: delta event has empty text under 'delta' key` — a backend emitted a transcription delta with no text under the spec-standard field. Diagnostic for backend field-name mismatches.
-- `realtime: input_audio_buffer.committed` — server-side commit acknowledged. Combined with the fast-path decision in `collectTrailing`, lets you see whether a release-time commit was skipped.
 - `postprocess` — input/output text (DEBUG), timeouts, errors.
 - `finalization` — trailing transcript assembly, commit errors.
 - `duck` — audio volume ducking/restore.
@@ -38,7 +40,7 @@ If an event is filtered from the existing trace machinery (e.g. `dumpWSFrame` sk
 
 When `telemetry.enabled: true` in the config, OpenTelemetry spans are exported via OTLP/gRPC to `telemetry.endpoint` (default `localhost:4317`). Jaeger UI is at `http://localhost:16686`.
 
-Spans are buffered per-trace and flushed as one batch when the trace's root span ends (see `internal/telemetry/processor.go`). This is unlike the SDK's default `BatchSpanProcessor`, which flushes every 2 s and would cause Jaeger to log `"parent span ID=N is not in the trace; skipping clock skew adjustment"` warnings on every child of a long-lived root (`vocis.dictation`, `vocis.transcribe.session`, `vocis.transcribe.finalize`) — short children flush before their parent finishes, the collector's adjuster sees them parentless, and the warning is persisted on the child span. Ending a trace's root flushes the entire trace in one wire batch so Jaeger always sees the parent. Process exit must call `Shutdown` (already deferred by the entry-point) or in-flight traces are lost.
+Spans are buffered per-trace and flushed as one batch when the trace's root span ends (see `internal/telemetry/processor.go`). This is unlike the SDK's default `BatchSpanProcessor`, which flushes every 2 s and would cause Jaeger to log `"parent span ID=N is not in the trace; skipping clock skew adjustment"` warnings on every child of a long-lived root (`vocis.dictation`, `vocis.transcribe.finalize`) — short children flush before their parent finishes, the collector's adjuster sees them parentless, and the warning is persisted on the child span. Ending a trace's root flushes the entire trace in one wire batch so Jaeger always sees the parent. Process exit must call `Shutdown` (already deferred by the entry-point) or in-flight traces are lost.
 
 ### Fetching traces via the API
 
@@ -62,9 +64,9 @@ The JSON response contains all spans with their tags (attributes) and logs (even
 |------|-----------------|
 | `vocis.dictation` | Root span. `hotkey.backend` tells you whether the session used `x11` or `gnome-extension`. |
 | `vocis.capture_target` | `capture.source` = `xdotool` (X11 path) or `extension` (gnome path). If the extension path, look for the nested `vocis.gnome.get_focused_window` span with the D-Bus call timing/error. |
-| `vocis.transcribe.connect` | Connection time — slow means network or backend issues. `transcribe.backend` = `openai` or `lemonade`. |
 | `vocis.transcribe.finalize` | Total finalization time. The "Wrapping up" overlay phase counts up from 0 for as long as this span runs — there is no outer deadline, so a slow finalize will keep ticking rather than time out. |
-| `vocis.transcribe.wait_final` | Drain-loop wait for the backend to finish all in-flight transcriptions. Key attrs: `wait_final.exit_reason` (`no_inflight_work` / `timeout` / `error` / `stream_error_with_text`), `wait_final.drained_segments` (how many trailing transcripts the loop pulled), `wait_final.elapsed_ms`, `wait_final.text_chars`, `wait_final.{started,completed}_count_at_{entry,exit}` (server-VAD speech_started vs transcription.completed counts), `wait_final.commit_skipped_buffer_drained` (server VAD already drained — no commit sent), `wait_final.commit_empty_swallowed` (commit raced server VAD; benign "buffer empty" error swallowed). Also `wait_final.first_event_type` / `first_event_ms` / `first_delta_text` for first-token latency. Inline events: `realtime.delta` (once per delta), `realtime.completed`, `realtime.failed`, each with `since_commit_ms`. |
+| `vocis.transcribe.chat_audio.chunk` | One per `/chat/completions` POST. Attributes: `chunk.clip_count`, `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, `chunk.history_sent_turns`, `chunk.request_bytes`, `chunk.response_text`. |
+| `vocis.transcribe.chat_audio.collect_trailing` | The Finalize-time wait for the worker to drain any trailing chunk. |
 | `vocis.postprocess` | `skipped` attribute, `first_token_timeout` vs `first_token_received` events, `elapsed` timings. Inline events: `postprocess.input` (with `input.text`) and `postprocess.output` (with `output.text` + `skipped`/`reason` when PP fell back). Text is truncated to 500 chars. |
 | `vocis.inject` | Paste vs type, terminal detection, target window. |
 

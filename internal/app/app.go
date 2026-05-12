@@ -142,7 +142,7 @@ func (a *App) Run(ctx context.Context) error {
 	sessionlog.Infof("starting vocis session")
 
 	a.recorder = recorder.New()
-	a.transcribe = transcribe.New(a.cfg.Transcription, a.cfg.Streaming)
+	a.transcribe = transcribe.New(a.cfg.Transcription)
 
 	// Defer overlay close before the Lemonade preflight so that path
 	// can use ShowError below — without this, a failed preflight would
@@ -289,10 +289,9 @@ func (a *App) reloadConfig() {
 	}
 	a.cfg.Transcription = cfg.Transcription
 	a.cfg.Recording = cfg.Recording
-	a.cfg.Streaming = cfg.Streaming
 	a.cfg.PostProcess = cfg.PostProcess
 	a.cfg.LogWindowTitle = cfg.LogWindowTitle
-	a.transcribe = transcribe.New(a.cfg.Transcription, a.cfg.Streaming)
+	a.transcribe = transcribe.New(a.cfg.Transcription)
 	sessionlog.Infof("config reloaded: %s", path)
 }
 

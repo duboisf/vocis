@@ -3,13 +3,12 @@ hotkey_mode: hold
 log_window_title: false
 
 transcription:
-  # backend: only "lemonade-chat" is supported. It posts each VAD-bounded
-  # speech chunk to Lemonade's /chat/completions endpoint with the audio
-  # embedded as an `input_audio` content part. Pairs with Gemma audio
-  # variants (gemma4-it-e2b-FLM, gemma3n-e4b-it-FLM). Audio is capped at
-  # 30s per request; longer utterances chunk transparently with few-shot
+  # vocis posts each VAD-bounded speech chunk to Lemonade's
+  # /chat/completions endpoint with the audio embedded as an
+  # `input_audio` content part. Pairs with Gemma audio variants
+  # (gemma4-it-e2b-FLM, gemma3n-e4b-it-FLM). Audio is capped at 30s per
+  # request; longer utterances chunk transparently with few-shot
   # history threading context across boundaries.
-  backend: lemonade-chat
   base_url: http://localhost:13305/api/v1
   model: gemma4-it-e2b-FLM
   language: en
@@ -110,6 +109,27 @@ transcription:
     # broken prior segment and substitute the fix (backspace + retype in
     # the target window). Mutually exclusive with batch_until_release.
     continuation_rebatch: false
+    # silero: VAD hysteresis used by the chat-audio chunker. Each
+    # speech episode is opened when speech_ms of speech-classified
+    # audio is seen and closed after silence_ms of non-speech. Episodes
+    # shorter than min_utterance_ms are dropped to keep Gemma from
+    # hallucinating on sub-second clips.
+    silero:
+      # Path to libonnxruntime.so. Supports $HOME and other env vars
+      # (expanded at runtime via os.ExpandEnv). Default matches the
+      # onnxruntime release-tarball layout when unpacked into ~/opt.
+      # Blank the field to fall back to the auto-discovery candidates
+      # (/usr/local/lib, /usr/lib, /usr/lib/x86_64-linux-gnu,
+      # $HOME/.local/lib). Install from
+      # https://github.com/microsoft/onnxruntime/releases.
+      onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
+      # silence_ms: required non-speech duration to close an episode.
+      silence_ms: 500
+      # speech_ms: required speech duration to open an episode.
+      speech_ms: 150
+      # min_utterance_ms: minimum accumulated speech an episode needs
+      # before it can be committed.
+      min_utterance_ms: 1000
     # NOTE: when postprocess.enabled is true, vocis automatically folds
     # postprocess.prompt into the chat-audio system message and skips
     # the separate /chat/completions cleanup call. The same Gemma model
@@ -123,30 +143,6 @@ recording:
   channels: 1
   max_duration_seconds: 120
   duck_volume: 0.1
-
-streaming:
-  # Silero VAD knobs used by the chat-audio backend to bound each
-  # speech episode before posting to /chat/completions. Commit 2 moves
-  # these under transcription.chat_audio.silero with clearer names.
-  #
-  # prefix_padding_ms: minimum speech duration before Silero opens an
-  # episode (default 150).
-  # silence_duration_ms: minimum non-speech duration before Silero
-  # closes one (default 500).
-  prefix_padding_ms: 150
-  silence_duration_ms: 500
-  # min_utterance_ms: minimum accumulated speech an episode needs
-  # before it can be committed. Shorter clips are dropped so Gemma
-  # doesn't hallucinate on sub-second audio. Default 1000.
-  min_utterance_ms: 1000
-  # onnxruntime_library: path to libonnxruntime.so. Supports $HOME
-  # and other env vars (expanded at runtime via os.ExpandEnv).
-  # Default matches the onnxruntime release-tarball layout when
-  # unpacked into ~/opt. Blank the field to fall back to the
-  # auto-discovery candidates (/usr/local/lib, /usr/lib,
-  # /usr/lib/x86_64-linux-gnu, $HOME/.local/lib). Install from
-  # https://github.com/microsoft/onnxruntime/releases.
-  onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
 
 insertion:
   mode: auto

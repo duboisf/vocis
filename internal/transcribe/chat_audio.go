@@ -129,7 +129,6 @@ type chatTurn struct {
 func startChatAudioSession(
 	ctx context.Context,
 	cfg config.TranscriptionConfig,
-	streaming config.StreamingConfig,
 	httpClient *http.Client,
 	opts DictationOpts,
 ) (*chatAudioSession, error) {
@@ -193,7 +192,7 @@ func startChatAudioSession(
 	// ShowListening. OnConnecting is skipped entirely — there's no real
 	// connecting phase to surface, and the default Listening subtitle
 	// shows "Connecting" until OnConnected swaps it.
-	go s.run(pumpCtx, opts.Samples, streaming, opts.Callbacks)
+	go s.run(pumpCtx, opts.Samples, cfg.ChatAudio.Silero, opts.Callbacks)
 	go s.worker(pumpCtx)
 	return s, nil
 }
@@ -277,24 +276,24 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 func (s *chatAudioSession) run(
 	ctx context.Context,
 	samples <-chan []int16,
-	streaming config.StreamingConfig,
+	silero config.SileroConfig,
 	callbacks ConnectCallbacks,
 ) {
 	var vad *SileroVAD
-	if err := initSilero(streaming.OnnxruntimeLibrary); err != nil {
+	if err := initSilero(silero.OnnxruntimeLibrary); err != nil {
 		sessionlog.Warnf("chat-audio: silero init failed, falling back to chunk_max-only chunking: %v", err)
 	} else if s.sampleRate != sileroSampleRate {
 		sessionlog.Warnf("chat-audio: silero requires 16kHz, got %d; falling back to chunk_max-only", s.sampleRate)
 	} else {
-		minSilence := streaming.SilenceDurationMS
+		minSilence := silero.SilenceMS
 		if minSilence <= 0 {
 			minSilence = 500
 		}
-		minSpeech := streaming.PrefixPaddingMS
+		minSpeech := silero.SpeechMS
 		if minSpeech <= 0 {
 			minSpeech = 150
 		}
-		minUtterance := streaming.MinUtteranceMS
+		minUtterance := silero.MinUtteranceMS
 		if minUtterance <= 0 {
 			minUtterance = 1000
 		}

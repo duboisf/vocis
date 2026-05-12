@@ -64,7 +64,7 @@ func runTranscribe() error {
 		return fmt.Errorf("start recorder: %w", err)
 	}
 
-	client := transcribe.New(cfg.Transcription, cfg.Streaming)
+	client := transcribe.New(cfg.Transcription)
 	dictation, err := client.StartDictation(recordingCtx, transcribe.DictationOpts{
 		SampleRate: recSession.SampleRate(),
 		Channels:   recSession.Channels(),

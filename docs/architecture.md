@@ -11,7 +11,7 @@ internal/app/       ← orchestration via interfaces (no platform imports)
     ↓
 internal/hotkey/    ← state machine, parsing (platform-agnostic)
 internal/ui/        ← drawing, text, easing (platform-agnostic)
-internal/transcribe/    ← transcription (Lemonade WS + Lemonade chat-audio) + post-processing
+internal/transcribe/    ← transcription (Lemonade chat-audio) + post-processing
 internal/recorder/  ← PulseAudio capture
 internal/audio/     ← volume ducking
     ↓
@@ -40,10 +40,8 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - [`internal/config/config.go`](/home/fred/git/vtt/internal/config/config.go): default config, validation, load/save, template expansion for overlay text.
 - [`internal/recorder/recorder.go`](/home/fred/git/vtt/internal/recorder/recorder.go): in-process PulseAudio/PipeWire microphone capture and live sample stream.
 - [`internal/recall/`](/home/fred/git/vtt/internal/recall/): Wokis Recall daemon. `segment.go` holds the bounded ring buffer, `daemon.go` runs recorder + Silero VAD and exposes a Unix-socket control protocol, `client.go` is the pick/status/stop client, `protocol.go` defines the request/response JSON shapes, `selection.go` parses the picker's range syntax (`3-5`, `3-`, `all`, etc.), `persist.go` provides an optional `FilePersister` that mirrors each segment to `<dir>/seg-<id>.json` so the ring survives daemon restarts, `batch.go` handles `recall last <duration>` — sends every in-window segment as its own labelled `input_audio` part in a single `/chat/completions` POST and asks the model (via `chat_audio.batch_prompt`) for one line per segment prefixed with the capture timestamp. Segments are stored as raw 16 kHz int16 PCM; transcription is lazy — done only when the `pick` or `last` client requests it. Persistence is opt-in via `recall.persist.mode=disk` (default is `in_memory`) and writes to `recall.persist.dir` (default `$XDG_STATE_HOME/vocis/recall`).
-- [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go): realtime transcription orchestration — connect with retries, buffered audio handoff, turn assembly, finalization. Backend-agnostic; differences live behind `Transport`.
-- [`internal/transcribe/transport.go`](/home/fred/git/vtt/internal/transcribe/transport.go): `Transport` interface (Dial, SessionUpdate, SampleRate) — abstracts backend-specific connect, payload shape, and PCM rate.
-- [`internal/transcribe/transport_lemonade.go`](/home/fred/git/vtt/internal/transcribe/transport_lemonade.go): Lemonade Server realtime WS transport — no auth, 16 kHz PCM, flat `session.model` payload, model passed via `?model=` query.
-- [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go): `lemonade-chat` backend for Gemma audio variants — non-WS path. Bypasses the `Transport` interface entirely. Reads samples → Silero VAD → per-chunk WAV → POST to `/chat/completions` with the audio embedded as an `input_audio` content part. SSE deltas drive live overlay partials. Maintains a rolling few-shot history of prior `(audio, transcript)` pairs so context survives the documented 30s per-call cap. Implements the `Dictation` interface so `app` and `recall` consume it identically to the realtime-WS path.
+- [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go): thin shell — holds the `Client` struct, the public `Dictation` interface, the shared event types, hallucination filter helpers, and segment-text formatters. The real work lives in `chat_audio.go`.
+- [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go): the chat-audio dictation session — the only transcription backend vocis ships. Reads samples → Silero VAD → per-chunk WAV → POST to `/chat/completions` with the audio embedded as an `input_audio` content part. SSE deltas drive live overlay partials. Maintains a rolling few-shot history of prior `(audio, transcript)` pairs so context survives the documented 30s per-call cap. Implements the `Dictation` interface so `app` and `recall` consume it identically.
 - [`internal/transcribe/silero.go`](/home/fred/git/vtt/internal/transcribe/silero.go): Silero VAD wrapper — embedded ONNX model, onnxruntime_go session (pinned single-threaded), two-threshold hysteresis (0.5 speech / 0.35 silence with an ambiguous hold band). Used by both client-VAD during serve and segment boundaries in recall. See [docs/silero.md](/home/fred/git/vtt/docs/silero.md) for the full design.
 - [`internal/transcribe/postprocess.go`](/home/fred/git/vtt/internal/transcribe/postprocess.go): LLM post-processing to clean up filler words and hesitations via Lemonade's OpenAI-compatible `/chat/completions`.
 - [`internal/tts/lemonade.go`](/home/fred/git/vtt/internal/tts/lemonade.go): Lemonade Kokoro TTS client — POSTs to `/audio/speech` with `response_format=pcm` and parses the PCM16 LE stream + sample rate out of the `audio/l16;rate=N` content-type. `wav.go` writes a 24 kHz mono PCM16 WAV header for the `vocis speak --out` path. Used by `cmd/vocis/speak.go` only.
@@ -66,7 +64,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - `hotkey.State` receives raw press/release events from any backend
 - `ui.*` provides drawing primitives to any overlay backend
 - `platform/x11/*` implements `OverlayUI`, `InjectorClient`, and `HotkeySource` for X11
-- `transcribe.DictationSession` owns realtime stream readiness, connect retries, turn assembly
+- `transcribe.startChatAudioSession` owns Silero chunking, per-chunk `/chat/completions` POSTs, few-shot history, and the trailing-finalize collector
 - `transcribe.PostProcess` handles LLM cleanup with timeout and fallback
 
 ## Useful rule of thumb
