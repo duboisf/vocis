@@ -141,6 +141,39 @@ func TestDecodeStrictEmptyInputIsOK(t *testing.T) {
 	}
 }
 
+// TestRejectDeprecatedKeysRejectsNestedChatAudio pins the migration
+// error for configs that still nest knobs under
+// `transcription.chat_audio:`. The fields were all hoisted up to
+// `transcription:` directly; silently dropping the nested block would
+// lose every user-set value, so the load path errors out instead.
+func TestRejectDeprecatedKeysRejectsNestedChatAudio(t *testing.T) {
+	t.Parallel()
+
+	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  model: gemma4-it-e2b-FLM\n  chat_audio:\n    chunk_max_seconds: 28\n")
+	err := rejectDeprecatedKeys("/tmp/example.yaml", data)
+	if err == nil {
+		t.Fatal("expected error for deprecated transcription.chat_audio block")
+	}
+	if !strings.Contains(err.Error(), "chat_audio") {
+		t.Fatalf("error %q should mention chat_audio", err)
+	}
+	if !strings.Contains(err.Error(), "hoist") && !strings.Contains(err.Error(), "transcription:") {
+		t.Fatalf("error %q should hint at the migration", err)
+	}
+}
+
+// TestRejectDeprecatedKeysAllowsFlatTranscription confirms that a
+// transcription block with the new flat shape (no chat_audio: child)
+// passes the deprecation check cleanly.
+func TestRejectDeprecatedKeysAllowsFlatTranscription(t *testing.T) {
+	t.Parallel()
+
+	data := []byte("hotkey: ctrl+shift+space\ntranscription:\n  model: gemma4-it-e2b-FLM\n  chunk_max_seconds: 28\n  silero:\n    silence_ms: 500\n")
+	if err := rejectDeprecatedKeys("/tmp/example.yaml", data); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 // TestStripRetiredKeysDropsStreamingSection confirms that a config
 // still carrying the old `streaming:` section loads cleanly — the
 // section's contents (and the section itself) are silently stripped

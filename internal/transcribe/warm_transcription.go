@@ -127,7 +127,7 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 	if err := EnsureModelCtxSizeFromConfig(ctx, cfg); err != nil {
 		return err
 	}
-	if cfg.Transcription.ChatAudio.CtxSize > 0 && txModel != "" {
+	if cfg.Transcription.CtxSize > 0 && txModel != "" {
 		// Re-fetch health so the IsLoaded check below sees the
 		// post-reload state.
 		if fresh, err := FetchLemonadeHealth(ctx, baseURL); err == nil {

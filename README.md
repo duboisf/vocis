@@ -230,7 +230,7 @@ is wrapped in a WAV and sent as one POST with the audio embedded as an
 transcript)` pairs threads context across the documented 30-second
 per-call cap. SSE streaming drives live overlay partials.
 
-Tunable knobs live under `transcription.chat_audio:` —
+Tunable knobs live directly under `transcription:` —
 `chunk_max_seconds`, `history_turns`, `prompt`, `language`, `stream`.
 Run `vocis config backend` and pick option 2 to flip; it also rewrites
 `model` to `gemma4-it-e2b-FLM` automatically.

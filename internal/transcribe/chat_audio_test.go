@@ -400,15 +400,13 @@ func TestChatAudioSessionMultiClipForceCutBatching(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		BaseURL: server.URL + "/api/v1",
-		Model:   "gemma-test",
-		ChatAudio: config.ChatAudioConfig{
-			ChunkMaxSeconds: 10,
-			HistoryTurns:    2,
-			Prompt:          "Transcribe in {language}.",
-			Language:        "en",
-			Stream:          true,
-		},
+		BaseURL:         server.URL + "/api/v1",
+		Model:           "gemma-test",
+		ChunkMaxSeconds: 10,
+		HistoryTurns:    2,
+		Prompt:          "Transcribe in {language}.",
+		Language:        "en",
+		Stream:          true,
 	}
 	samples := make(chan []int16, 2)
 	opts := DictationOpts{
@@ -561,16 +559,14 @@ func TestChatAudioSessionContinuationRebatch(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		BaseURL: server.URL + "/api/v1",
-		Model:   "gemma-test",
-		ChatAudio: config.ChatAudioConfig{
-			ChunkMaxSeconds:     10,
-			HistoryTurns:        2,
-			Prompt:              "Transcribe in {language}.",
-			Language:            "en",
-			Stream:              true,
-			ContinuationRebatch: true,
-		},
+		BaseURL:             server.URL + "/api/v1",
+		Model:               "gemma-test",
+		ChunkMaxSeconds:     10,
+		HistoryTurns:        2,
+		Prompt:              "Transcribe in {language}.",
+		Language:            "en",
+		Stream:              true,
+		ContinuationRebatch: true,
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{
@@ -687,16 +683,14 @@ func TestChatAudioSessionContinuationRebatchPostFinalizeRetractsFromLive(t *test
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		BaseURL: server.URL + "/api/v1",
-		Model:   "gemma-test",
-		ChatAudio: config.ChatAudioConfig{
-			ChunkMaxSeconds:     10,
-			HistoryTurns:        2,
-			Prompt:              "Transcribe.",
-			Language:            "en",
-			Stream:              true,
-			ContinuationRebatch: true,
-		},
+		BaseURL:             server.URL + "/api/v1",
+		Model:               "gemma-test",
+		ChunkMaxSeconds:     10,
+		HistoryTurns:        2,
+		Prompt:              "Transcribe.",
+		Language:            "en",
+		Stream:              true,
+		ContinuationRebatch: true,
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{
@@ -772,17 +766,15 @@ func TestChatAudioSessionDropsSilentChunk(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		BaseURL: server.URL,
-		Model:   "gemma-test",
-		ChatAudio: config.ChatAudioConfig{
-			ChunkMaxSeconds: 10,
-			HistoryTurns:    1,
-			Prompt:          "Transcribe.",
-			Language:        "en",
-			Stream:          true,
-			MinChunkPeak:    0.02,
-			MinChunkRMS:     0.005,
-		},
+		BaseURL:         server.URL,
+		Model:           "gemma-test",
+		ChunkMaxSeconds: 10,
+		HistoryTurns:    1,
+		Prompt:          "Transcribe.",
+		Language:        "en",
+		Stream:          true,
+		MinChunkPeak:    0.02,
+		MinChunkRMS:     0.005,
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{
@@ -821,16 +813,14 @@ func TestChatAudioSessionDropsHallucination(t *testing.T) {
 	defer server.Close()
 
 	cfg := config.TranscriptionConfig{
-		BaseURL: server.URL,
-		Model:   "gemma-test",
+		BaseURL:              server.URL,
+		Model:                "gemma-test",
 		HallucinationFilters: []string{"Thank you."},
-		ChatAudio: config.ChatAudioConfig{
-			ChunkMaxSeconds: 10,
-			HistoryTurns:    1,
-			Prompt:          "Transcribe.",
-			Language:        "en",
-			Stream:          true,
-		},
+		ChunkMaxSeconds:      10,
+		HistoryTurns:         1,
+		Prompt:               "Transcribe.",
+		Language:             "en",
+		Stream:               true,
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{

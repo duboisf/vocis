@@ -58,8 +58,8 @@ type recordingState struct {
 	span           trace.Span
 	spanCtx        context.Context
 	activeSpan     trace.Span
-	// combinedPostProcess is true when chat_audio.combine_postprocess
-	// is enabled and postprocess is otherwise on. The chat-audio system
+	// combinedPostProcess is true when postprocess is enabled — the
+	// chat-audio session folds the cleanup prompt into its own system
 	// prompt has folded the cleanup rules in already, so the trailing
 	// PostProcess call is skipped to avoid a redundant round-trip.
 	combinedPostProcess bool
@@ -412,7 +412,7 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	state.combinedPostProcess = a.cfg.PostProcess.Enabled
 
 	// Build the chat-audio extra system content from user config only.
-	// chat_audio.prompt is the lead (set inside the chat-audio session
+	// transcription.prompt is the lead (set inside the chat-audio session
 	// itself). prompt_hint and (in combine mode) postprocess.prompt
 	// are appended verbatim with blank-line separators. No hardcoded
 	// leads, headers, or footers — the user owns the wording.

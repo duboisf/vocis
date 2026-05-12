@@ -113,7 +113,7 @@ When `vocis serve` runs:
 
 **Refreshed on every hotkey press (no restart needed):**
 
-- `transcription.*` — base_url, model, language, prompt_hint, request_timeout_seconds, hallucination_filters, and the `chat_audio.*` subtree (including `chat_audio.silero.*`). The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
+- `transcription.*` — base_url, model, language, prompt_hint, request_timeout_seconds, hallucination_filters, plus every chunking/few-shot/batch knob (chunk_max_seconds, history_turns, prompt, stream, context_mode, min_chunk_peak, min_chunk_rms, batch_prompt, batch_max_audio_seconds, ctx_size, batch_until_release, continuation_rebatch, silero.*). The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
 - `recording.*` — device, sample_rate, channels, max_duration_seconds, duck_volume.
 - `postprocess.*` — enabled, model, **prompt**, min_word_count, timeouts, sampling knobs (temperature, top_p).
 - `log_window_title`.

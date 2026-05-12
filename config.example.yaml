@@ -11,7 +11,6 @@ transcription:
   # history threading context across boundaries.
   base_url: http://localhost:13305/api/v1
   model: gemma4-it-e2b-FLM
-  language: en
   prompt_hint: >-
     Transcribe naturally for a programmer. Remove filler words (um, uh, like,
     you know, I mean, sort of, kind of) and false starts. Clean up hesitations
@@ -34,107 +33,100 @@ transcription:
     - Bye.
     - "you"
     - "."
-  # chat_audio: knobs for the lemonade-chat backend. Ignored on the
-  # other backends. The chat-audio path is fundamentally request/response
-  # rather than streaming-WS — speech is segmented client-side via Silero
-  # VAD, each segment is wrapped in a WAV and sent as one POST to
-  # /chat/completions, and a few-shot history of prior (audio, transcript)
-  # pairs threads context across the documented 30s per-call cap.
-  chat_audio:
-    # Upper bound on a single chunk's audio duration. Gemma 3n / 4 cap
-    # at 30s per request, so hold a 2s margin under that. Long monologues
-    # without a VAD-detected pause force-cut here and roll the remainder
-    # into the next chunk.
-    chunk_max_seconds: 28
-    # How many prior (user-audio, assistant-transcript) pairs to include
-    # as few-shot context on each request. 0 disables history. Each
-    # extra turn adds ~1.3 MB of base64 audio worst-case, so keep modest.
-    history_turns: 2
-    # Instruction sent alongside every audio chunk. {language} expands
-    # to chat_audio.language at request build time.
-    prompt: |
-      Transcribe the following speech segment in {language}. Follow these specific instructions for formatting the answer:
-      * Only output the transcription, with no newlines.
-      * When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three.
-    # Language hint substituted into prompt. Use "its original language"
-    # to let the model auto-detect, or force "en", "fr", etc.
-    language: its original language
-    # SSE streaming for live overlay updates. Off uses one round-trip
-    # per chunk and shows the full chunk transcript only on completion.
-    stream: true
-    # context_mode: how prior chunks are threaded into a new request.
-    #   few_shot     - each prior chunk becomes a (user-audio,
-    #                  assistant-transcript) turn pair. The model sees
-    #                  its own transcripts verbatim, which keeps
-    #                  proper-noun spelling stable across chunks. Cost:
-    #                  re-uploads the prior audio bytes on every
-    #                  request.
-    #   inline_clips - prior chunks are appended as additional
-    #                  input_audio parts inside the same user message,
-    #                  alongside the current chunk. The model gets all
-    #                  audio at once and produces one transcript
-    #                  covering only the final clip (per the prompt
-    #                  instruction). Matches the multi-clip shape
-    #                  Google's Gemma docs show. Cost: model has to
-    #                  re-decode prior audio instead of trusting a
-    #                  prior transcript, so cross-chunk consistency is
-    #                  weaker.
-    context_mode: few_shot
-    # min_chunk_peak / min_chunk_rms: drop a chunk client-side when
-    # its peak (max-abs / 32768) or RMS (sqrt(mean(sample^2))/32768)
-    # falls below these thresholds, BEFORE the /chat/completions POST.
-    # Critical when Silero isn't installed: without VAD, a hotkey hold
-    # over silence sends the entire silent buffer to Gemma, which then
-    # hallucinates a long "I cannot transcribe..." response. Defaults
-    # match the recall daemon's segment filters and reject fan/room
-    # tone while keeping quiet speech. Set either to 0 to disable that
-    # arm of the check.
-    min_chunk_peak: 0.02
-    min_chunk_rms: 0.005
-    # batch_until_release: when true, Silero still trims dead air between
-    # speech episodes, but each VAD-stopped flush gets stashed instead of
-    # POSTed. Only the trailing flush at hotkey release fires the request
-    # — as one multi-clip POST covering the whole utterance. Trade-off:
-    # no live overlay partials during dictation (one paste at the end).
-    # Wins: model sees the full utterance as one continuous thing so
-    # punctuation/casing don't break across mid-phrase pauses, and the
-    # few-shot history is moot for the single request.
-    batch_until_release: false
-    # continuation_rebatch: keep per-pause POSTs, but when the previous
-    # chunk's transcript ended without terminal punctuation (./?/!/…),
-    # send the NEXT chunk as a multi-clip POST that prepends the prior
-    # audio. The model returns one unified transcript for both clips,
-    # which replaces (not appends to) the prior history entry. A
-    # replace-segment event tells the overlay + injector to retract the
-    # broken prior segment and substitute the fix (backspace + retype in
-    # the target window). Mutually exclusive with batch_until_release.
-    continuation_rebatch: false
-    # silero: VAD hysteresis used by the chat-audio chunker. Each
-    # speech episode is opened when speech_ms of speech-classified
-    # audio is seen and closed after silence_ms of non-speech. Episodes
-    # shorter than min_utterance_ms are dropped to keep Gemma from
-    # hallucinating on sub-second clips.
-    silero:
-      # Path to libonnxruntime.so. Supports $HOME and other env vars
-      # (expanded at runtime via os.ExpandEnv). Default matches the
-      # onnxruntime release-tarball layout when unpacked into ~/opt.
-      # Blank the field to fall back to the auto-discovery candidates
-      # (/usr/local/lib, /usr/lib, /usr/lib/x86_64-linux-gnu,
-      # $HOME/.local/lib). Install from
-      # https://github.com/microsoft/onnxruntime/releases.
-      onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
-      # silence_ms: required non-speech duration to close an episode.
-      silence_ms: 500
-      # speech_ms: required speech duration to open an episode.
-      speech_ms: 150
-      # min_utterance_ms: minimum accumulated speech an episode needs
-      # before it can be committed.
-      min_utterance_ms: 1000
-    # NOTE: when postprocess.enabled is true, vocis automatically folds
-    # postprocess.prompt into the chat-audio system message and skips
-    # the separate /chat/completions cleanup call. The same Gemma model
-    # is doing both transcription and cleanup, so the second round-trip
-    # would just add latency.
+  # Upper bound on a single chunk's audio duration. Gemma 3n / 4 cap
+  # at 30s per request, so hold a 2s margin under that. Long monologues
+  # without a VAD-detected pause force-cut here and roll the remainder
+  # into the next chunk.
+  chunk_max_seconds: 28
+  # How many prior (user-audio, assistant-transcript) pairs to include
+  # as few-shot context on each request. 0 disables history. Each
+  # extra turn adds ~1.3 MB of base64 audio worst-case, so keep modest.
+  history_turns: 2
+  # Instruction sent alongside every audio chunk. {language} expands
+  # to transcription.language at request build time.
+  prompt: |
+    Transcribe the following speech segment in {language}. Follow these specific instructions for formatting the answer:
+    * Only output the transcription, with no newlines.
+    * When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three.
+  # Language hint substituted into prompt. Use "its original language"
+  # to let the model auto-detect, or force "en", "fr", etc.
+  language: its original language
+  # SSE streaming for live overlay updates. Off uses one round-trip
+  # per chunk and shows the full chunk transcript only on completion.
+  stream: true
+  # context_mode: how prior chunks are threaded into a new request.
+  #   few_shot     - each prior chunk becomes a (user-audio,
+  #                  assistant-transcript) turn pair. The model sees
+  #                  its own transcripts verbatim, which keeps
+  #                  proper-noun spelling stable across chunks. Cost:
+  #                  re-uploads the prior audio bytes on every
+  #                  request.
+  #   inline_clips - prior chunks are appended as additional
+  #                  input_audio parts inside the same user message,
+  #                  alongside the current chunk. The model gets all
+  #                  audio at once and produces one transcript
+  #                  covering only the final clip (per the prompt
+  #                  instruction). Matches the multi-clip shape
+  #                  Google's Gemma docs show. Cost: model has to
+  #                  re-decode prior audio instead of trusting a
+  #                  prior transcript, so cross-chunk consistency is
+  #                  weaker.
+  context_mode: few_shot
+  # min_chunk_peak / min_chunk_rms: drop a chunk client-side when
+  # its peak (max-abs / 32768) or RMS (sqrt(mean(sample^2))/32768)
+  # falls below these thresholds, BEFORE the /chat/completions POST.
+  # Critical when Silero isn't installed: without VAD, a hotkey hold
+  # over silence sends the entire silent buffer to Gemma, which then
+  # hallucinates a long "I cannot transcribe..." response. Defaults
+  # match the recall daemon's segment filters and reject fan/room
+  # tone while keeping quiet speech. Set either to 0 to disable that
+  # arm of the check.
+  min_chunk_peak: 0.02
+  min_chunk_rms: 0.005
+  # batch_until_release: when true, Silero still trims dead air between
+  # speech episodes, but each VAD-stopped flush gets stashed instead of
+  # POSTed. Only the trailing flush at hotkey release fires the request
+  # — as one multi-clip POST covering the whole utterance. Trade-off:
+  # no live overlay partials during dictation (one paste at the end).
+  # Wins: model sees the full utterance as one continuous thing so
+  # punctuation/casing don't break across mid-phrase pauses, and the
+  # few-shot history is moot for the single request.
+  batch_until_release: false
+  # continuation_rebatch: keep per-pause POSTs, but when the previous
+  # chunk's transcript ended without terminal punctuation (./?/!/…),
+  # send the NEXT chunk as a multi-clip POST that prepends the prior
+  # audio. The model returns one unified transcript for both clips,
+  # which replaces (not appends to) the prior history entry. A
+  # replace-segment event tells the overlay + injector to retract the
+  # broken prior segment and substitute the fix (backspace + retype in
+  # the target window). Mutually exclusive with batch_until_release.
+  continuation_rebatch: false
+  # silero: VAD hysteresis used by the chat-audio chunker. Each
+  # speech episode is opened when speech_ms of speech-classified
+  # audio is seen and closed after silence_ms of non-speech. Episodes
+  # shorter than min_utterance_ms are dropped to keep Gemma from
+  # hallucinating on sub-second clips.
+  silero:
+    # Path to libonnxruntime.so. Supports $HOME and other env vars
+    # (expanded at runtime via os.ExpandEnv). Default matches the
+    # onnxruntime release-tarball layout when unpacked into ~/opt.
+    # Blank the field to fall back to the auto-discovery candidates
+    # (/usr/local/lib, /usr/lib, /usr/lib/x86_64-linux-gnu,
+    # $HOME/.local/lib). Install from
+    # https://github.com/microsoft/onnxruntime/releases.
+    onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
+    # silence_ms: required non-speech duration to close an episode.
+    silence_ms: 500
+    # speech_ms: required speech duration to open an episode.
+    speech_ms: 150
+    # min_utterance_ms: minimum accumulated speech an episode needs
+    # before it can be committed.
+    min_utterance_ms: 1000
+  # NOTE: when postprocess.enabled is true, vocis automatically folds
+  # postprocess.prompt into the chat-audio system message and skips
+  # the separate /chat/completions cleanup call. The same Gemma model
+  # is doing both transcription and cleanup, so the second round-trip
+  # would just add latency.
 
 recording:
   backend: auto

@@ -30,16 +30,14 @@ func TestChatAudioLiveLemonade(t *testing.T) {
 	}
 
 	cfg := config.TranscriptionConfig{
-		BaseURL: "http://localhost:13305/api/v1",
-		Model:   "gemma4-it-e2b-FLM",
-		ChatAudio: config.ChatAudioConfig{
-			ChunkMaxSeconds: 28,
-			HistoryTurns:    1,
-			Prompt: "Transcribe the following speech segment in {language}. " +
-				"Only output the transcription, with no newlines.",
-			Language: "en",
-			Stream:   true,
-		},
+		BaseURL:         "http://localhost:13305/api/v1",
+		Model:           "gemma4-it-e2b-FLM",
+		ChunkMaxSeconds: 28,
+		HistoryTurns:    1,
+		Prompt: "Transcribe the following speech segment in {language}. " +
+			"Only output the transcription, with no newlines.",
+		Language: "en",
+		Stream:   true,
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{
@@ -86,17 +84,15 @@ func TestChatAudioLiveLemonadeInlineClips(t *testing.T) {
 	}
 
 	cfg := config.TranscriptionConfig{
-		BaseURL: "http://localhost:13305/api/v1",
-		Model:   "gemma4-it-e2b-FLM",
-		ChatAudio: config.ChatAudioConfig{
-			ChunkMaxSeconds: 2, // force a 2-chunk run from 4s of audio
-			HistoryTurns:    1,
-			Prompt: "Transcribe the following speech segment in {language}. " +
-				"Only output the transcription, with no newlines.",
-			Language:    "en",
-			Stream:      true,
-			ContextMode: config.ChatAudioContextInlineClips,
-		},
+		BaseURL:         "http://localhost:13305/api/v1",
+		Model:           "gemma4-it-e2b-FLM",
+		ChunkMaxSeconds: 2, // force a 2-chunk run from 4s of audio
+		HistoryTurns:    1,
+		Prompt: "Transcribe the following speech segment in {language}. " +
+			"Only output the transcription, with no newlines.",
+		Language:    "en",
+		Stream:      true,
+		ContextMode: config.ChatAudioContextInlineClips,
 	}
 	samples := make(chan []int16, 1)
 	opts := DictationOpts{

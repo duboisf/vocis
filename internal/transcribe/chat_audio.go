@@ -144,11 +144,11 @@ func startChatAudioSession(
 	if err != nil {
 		return nil, err
 	}
-	chunkMax := cfg.ChatAudio.ChunkMaxSeconds
+	chunkMax := cfg.ChunkMaxSeconds
 	if chunkMax <= 0 {
 		chunkMax = 28
 	}
-	contextMode := cfg.ChatAudio.ContextMode
+	contextMode := cfg.ContextMode
 	if contextMode == "" {
 		contextMode = config.ChatAudioContextFewShot
 	}
@@ -158,16 +158,16 @@ func startChatAudioSession(
 		endpoint:             endpoint,
 		model:                cfg.Model,
 		chunkMaxSamples:      chunkMax * opts.SampleRate,
-		historyTurns:         cfg.ChatAudio.HistoryTurns,
-		promptTemplate:       cfg.ChatAudio.Prompt,
-		language:             cfg.ChatAudio.Language,
-		streamSSE:            cfg.ChatAudio.Stream,
+		historyTurns:         cfg.HistoryTurns,
+		promptTemplate:       cfg.Prompt,
+		language:             cfg.Language,
+		streamSSE:            cfg.Stream,
 		contextMode:          contextMode,
-		minChunkPeak:         cfg.ChatAudio.MinChunkPeak,
-		minChunkRMS:          cfg.ChatAudio.MinChunkRMS,
+		minChunkPeak:         cfg.MinChunkPeak,
+		minChunkRMS:          cfg.MinChunkRMS,
 		extraSystemPrompt:    opts.ExtraSystemPrompt,
-		batchUntilRelease:    cfg.ChatAudio.BatchUntilRelease,
-		continuationRebatch:  cfg.ChatAudio.ContinuationRebatch,
+		batchUntilRelease:    cfg.BatchUntilRelease,
+		continuationRebatch:  cfg.ContinuationRebatch,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		events:               make(chan DictationEvent, 16),
@@ -192,7 +192,7 @@ func startChatAudioSession(
 	// ShowListening. OnConnecting is skipped entirely — there's no real
 	// connecting phase to surface, and the default Listening subtitle
 	// shows "Connecting" until OnConnected swaps it.
-	go s.run(pumpCtx, opts.Samples, cfg.ChatAudio.Silero, opts.Callbacks)
+	go s.run(pumpCtx, opts.Samples, cfg.Silero, opts.Callbacks)
 	go s.worker(pumpCtx)
 	return s, nil
 }
@@ -1172,7 +1172,7 @@ type BatchSegment struct {
 
 // resolveBatchBudget returns the per-request audio-duration cap (in
 // seconds) and a label describing where the value came from. When the
-// user has pinned ChatAudio.BatchMaxAudioSeconds, that value is used
+// user has pinned transcription.BatchMaxAudioSeconds, that value is used
 // verbatim. When it's 0, we query Lemonade /api/v1/health for the
 // loaded model's recipe_options.ctx_size and compute a safe budget:
 //
@@ -1189,7 +1189,7 @@ type BatchSegment struct {
 // On /health failure we fall back to 30 s — matches Gemma's per-clip
 // cap and is safe for any reasonable model.
 func (c *Client) resolveBatchBudget(ctx context.Context) (int, string) {
-	if pinned := c.cfg.ChatAudio.BatchMaxAudioSeconds; pinned > 0 {
+	if pinned := c.cfg.BatchMaxAudioSeconds; pinned > 0 {
 		return pinned, "config"
 	}
 	const (
@@ -1325,7 +1325,7 @@ func (c *Client) transcribeBatchSub(ctx context.Context, endpoint string, index,
 	)
 	defer telemetry.EndSpan(span, nil)
 
-	systemPrompt := strings.ReplaceAll(c.cfg.ChatAudio.BatchPrompt, "{language}", c.cfg.ChatAudio.Language)
+	systemPrompt := strings.ReplaceAll(c.cfg.BatchPrompt, "{language}", c.cfg.Language)
 	parts := make([]map[string]any, 0, 2*len(segments))
 	var totalWAVBytes, totalSamples int
 	for i, seg := range segments {

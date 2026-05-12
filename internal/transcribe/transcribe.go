@@ -139,7 +139,7 @@ type DictationOpts struct {
 	// ExtraSystemPrompt, when non-empty, is appended to the chat-audio
 	// session's system message with a blank-line separator. Used by
 	// the serve path to append prompt_hint and (in combine-postprocess
-	// mode) postprocess.prompt to the user's chat_audio.prompt lead.
+	// mode) postprocess.prompt to the user's transcription.prompt lead.
 	ExtraSystemPrompt string
 }
 

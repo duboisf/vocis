@@ -132,7 +132,7 @@ func (m LemonadeModelEntry) HasLabel(label string) bool {
 	return false
 }
 
-// EnsureModelCtxSizeFromConfig reads ChatAudio.CtxSize from cfg and
+// EnsureModelCtxSizeFromConfig reads transcription.CtxSize from cfg and
 // pins the model's ctx_size via Lemonade /api/v1/load when set. The
 // no-config-set case is a no-op so callers can invoke this
 // unconditionally during startup. Applies a 2-minute deadline (NPU
@@ -144,7 +144,7 @@ func (m LemonadeModelEntry) HasLabel(label string) bool {
 // timeout, the same skip-when-empty-model behavior, and the same
 // error-wrapping across entrypoints.
 func EnsureModelCtxSizeFromConfig(ctx context.Context, cfg config.Config) error {
-	cx := cfg.Transcription.ChatAudio.CtxSize
+	cx := cfg.Transcription.CtxSize
 	if cx <= 0 {
 		return nil
 	}

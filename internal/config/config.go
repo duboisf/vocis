@@ -182,11 +182,14 @@ const (
 	RecallPersistDisk   = "disk"
 )
 
+// TranscriptionConfig holds every transcription knob. With only one
+// backend (lemonade-chat) left, the chunker/few-shot/Silero/batch
+// knobs that used to live under `transcription.chat_audio.*` were
+// hoisted onto this struct directly.
 type TranscriptionConfig struct {
-	BaseURL string `yaml:"base_url"`
-	Model   string `yaml:"model"`
-	Language    string `yaml:"language"`
-	PromptHint  string `yaml:"prompt_hint"`
+	BaseURL    string `yaml:"base_url"`
+	Model      string `yaml:"model"`
+	PromptHint string `yaml:"prompt_hint"`
 	// RequestLimit is the HTTP request timeout (seconds) applied to the
 	// transcription SDK client. Gates postprocess `/chat/completions`
 	// and any other REST calls. Set to 0 to disable the timeout
@@ -200,22 +203,6 @@ type TranscriptionConfig struct {
 	// "Thanks for watching." — on silence or very quiet audio. Exact
 	// match only; a substring filter would eat legitimate speech.
 	HallucinationFilters []string `yaml:"hallucination_filters"`
-	// ChatAudio holds the knobs for the lemonade-chat backend, which
-	// transcribes by POSTing WAV-wrapped audio chunks to an OpenAI-
-	// compatible /chat/completions endpoint with the audio embedded
-	// as an `input_audio` content part. Unused for the lemonade
-	// (realtime WS) backend.
-	ChatAudio ChatAudioConfig `yaml:"chat_audio"`
-}
-
-// ChatAudioConfig drives the lemonade-chat backend. The audio path is
-// fundamentally different from the realtime WebSocket transports — it
-// chunks speech with Silero VAD, wraps each chunk in a WAV header,
-// and sends one /chat/completions request per chunk. Each request
-// carries a few-shot history of prior (audio, transcript) pairs so
-// the model keeps cross-chunk context (matters for proper nouns,
-// code-switching, and natural turn boundaries beyond the 30s cap).
-type ChatAudioConfig struct {
 	// ChunkMaxSeconds is the upper bound on a single chunk's audio
 	// duration, in seconds. Gemma 3n / 4 cap audio at 30s per request,
 	// so we hold a safety margin under that. A long monologue without
@@ -518,42 +505,40 @@ func Default() Config {
 				"you",
 				".",
 			},
-			ChatAudio: ChatAudioConfig{
-				// 28s holds a 2s margin under the documented 30s cap so
-				// rounding/header overhead can't trip the limit.
-				ChunkMaxSeconds: 28,
-				// 2 prior turns matches the user-tested payload. Adds
-				// ~2.6 MB worst-case base64 to a request body — large
-				// but well under any sane HTTP body limit.
-				HistoryTurns: 2,
-				Prompt:       DefaultChatAudioPrompt,
-				Language:     "its original language",
-				Stream:       true,
-				ContextMode:  ChatAudioContextFewShot,
-				// Energy gate matching recall's defaults. Rejects fan
-				// hum / room tone but keeps quiet speech.
-				MinChunkPeak: 0.02,
-				MinChunkRMS:  0.005,
-				BatchPrompt:  DefaultBatchPrompt,
-				// 0 = auto: query Lemonade /api/v1/health for the loaded
-				// model's recipe_options.ctx_size and compute a safe
-				// audio-seconds budget from it (Gemma audio costs 6.25
-				// tokens/s per the USM encoder spec). Override with a
-				// positive number to pin the budget.
-				BatchMaxAudioSeconds: 0,
-				Silero: SileroConfig{
-					// $HOME/opt/onnxruntime/lib/... is where the
-					// onnxruntime release tarball lands when unpacked
-					// into ~/opt — the documented install location.
-					// resolveOnnxruntimeLibrary expands $HOME at runtime
-					// so this is portable across machines; users who
-					// installed system-wide can blank the field to fall
-					// back to the auto-discovery candidates.
-					OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
-					SilenceMS:          500,
-					SpeechMS:           150,
-					MinUtteranceMS:     1000,
-				},
+			// 28s holds a 2s margin under the documented 30s cap so
+			// rounding/header overhead can't trip the limit.
+			ChunkMaxSeconds: 28,
+			// 2 prior turns matches the user-tested payload. Adds
+			// ~2.6 MB worst-case base64 to a request body — large
+			// but well under any sane HTTP body limit.
+			HistoryTurns: 2,
+			Prompt:       DefaultChatAudioPrompt,
+			Language:     "its original language",
+			Stream:       true,
+			ContextMode:  ChatAudioContextFewShot,
+			// Energy gate matching recall's defaults. Rejects fan
+			// hum / room tone but keeps quiet speech.
+			MinChunkPeak: 0.02,
+			MinChunkRMS:  0.005,
+			BatchPrompt:  DefaultBatchPrompt,
+			// 0 = auto: query Lemonade /api/v1/health for the loaded
+			// model's recipe_options.ctx_size and compute a safe
+			// audio-seconds budget from it (Gemma audio costs 6.25
+			// tokens/s per the USM encoder spec). Override with a
+			// positive number to pin the budget.
+			BatchMaxAudioSeconds: 0,
+			Silero: SileroConfig{
+				// $HOME/opt/onnxruntime/lib/... is where the
+				// onnxruntime release tarball lands when unpacked
+				// into ~/opt — the documented install location.
+				// resolveOnnxruntimeLibrary expands $HOME at runtime
+				// so this is portable across machines; users who
+				// installed system-wide can blank the field to fall
+				// back to the auto-discovery candidates.
+				OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
+				SilenceMS:          500,
+				SpeechMS:           150,
+				MinUtteranceMS:     1000,
 			},
 		},
 		Recording: RecordingConfig{
@@ -773,10 +758,10 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"streaming.threshold", "post-WS-removal", "realtime WebSocket backend was removed; Silero hysteresis replaces the energy threshold"},
 	{"streaming.wait_final_seconds", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio has no post-commit wait"},
 	{"streaming.tail_silence_ms", "post-WS-removal", "realtime WebSocket backend was removed; chat-audio does not pad a WS audio buffer"},
-	{"streaming.prefix_padding_ms", "streaming-fold", "moved to transcription.chat_audio.silero.speech_ms"},
-	{"streaming.silence_duration_ms", "streaming-fold", "moved to transcription.chat_audio.silero.silence_ms"},
-	{"streaming.min_utterance_ms", "streaming-fold", "moved to transcription.chat_audio.silero.min_utterance_ms"},
-	{"streaming.onnxruntime_library", "streaming-fold", "moved to transcription.chat_audio.silero.onnxruntime_library"},
+	{"streaming.prefix_padding_ms", "streaming-fold", "moved to transcription.silero.speech_ms"},
+	{"streaming.silence_duration_ms", "streaming-fold", "moved to transcription.silero.silence_ms"},
+	{"streaming.min_utterance_ms", "streaming-fold", "moved to transcription.silero.min_utterance_ms"},
+	{"streaming.onnxruntime_library", "streaming-fold", "moved to transcription.silero.onnxruntime_library"},
 	{"transcription.backend", "post-WS-removal", "only one backend remains; transcription.backend is no longer read"},
 	{"yaml_indent", "config-cull", "self-output indentation is now hardcoded to 2"},
 	{"postprocess.min_p", "config-cull", "rarely-tuned sampler knob"},
@@ -788,20 +773,29 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"recall.batch_max_seconds", "one-shot-batch", "`recall last` no longer concatenates PCM; total audio is now bounded by Gemma's context window"},
 }
 
-// retiredSections lists whole top-level YAML sections that vocis used
-// to consume and now no longer reads at all. Stripped wholesale after
-// per-key removal so an old config carrying e.g. `streaming:` with
-// any combination of subkeys is silently dropped instead of failing
-// the strict decoder.
+// retiredSections lists whole YAML sections (top-level or nested via
+// dotted path) that vocis used to consume and now no longer reads at
+// all. Stripped wholesale after per-key removal so an old config
+// carrying e.g. `streaming:` with any combination of subkeys is
+// silently dropped instead of failing the strict decoder.
+//
+// `transcription.chat_audio` here is special-cased: dropping the whole
+// nested block would silently lose every chat-audio knob the user had
+// configured, so loadFailsOnRetiredNested below errors out with a
+// migration message instead. The entry stays in this slice for
+// documentation/discoverability — actual handling lives in that helper.
 var retiredSections = []struct{ path, since, reason string }{
-	{"streaming", "streaming-fold", "streaming: was folded into transcription.chat_audio.silero (silence_ms / speech_ms / min_utterance_ms / onnxruntime_library)"},
+	{"streaming", "streaming-fold", "streaming: was folded into transcription.silero (silence_ms / speech_ms / min_utterance_ms / onnxruntime_library)"},
+	{"transcription.chat_audio", "chat-audio-flatten", "every field on transcription.chat_audio.* was hoisted to transcription.* directly (chunk_max_seconds, history_turns, prompt, language, stream, context_mode, min_chunk_peak, min_chunk_rms, batch_prompt, batch_max_audio_seconds, ctx_size, batch_until_release, continuation_rebatch, silero)"},
 }
 
 // stripRetiredKeys parses the YAML, walks the retiredKeys list, and
 // returns a copy with any matches removed. Logs a one-time
 // deprecation notice per removed key so users notice their config is
 // drifting from current shape. Whole sections from retiredSections
-// are then removed in a second pass.
+// are then removed in a second pass. retiredSections supports
+// dotted paths (e.g. "transcription.chat_audio") so nested blocks
+// can be retired the same way as top-level ones.
 func stripRetiredKeys(data []byte) []byte {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -815,7 +809,7 @@ func stripRetiredKeys(data []byte) []byte {
 		}
 	}
 	for _, s := range retiredSections {
-		if removeNestedKey(&doc, []string{s.path}) {
+		if removeNestedKey(&doc, strings.Split(s.path, ".")) {
 			changed = true
 			sessionlog.Warnf("config: dropping retired section %q (removed %s — %s)", s.path, s.since, s.reason)
 		}
@@ -862,6 +856,12 @@ func removeNestedKey(node *yaml.Node, path []string) bool {
 // pre-rename top-level keys. Strict by design: silently accepting the
 // old shape splits users across two spellings and hides the fact that
 // the section no longer describes OpenAI specifically.
+//
+// Also catches `transcription.chat_audio:` — every chat-audio knob
+// was hoisted up to transcription.* directly, and silently dropping
+// the nested block (the default retiredSections behavior) would lose
+// the user's tunings. Surface a clear migration message instead so
+// users see exactly what to change.
 func rejectDeprecatedKeys(path string, data []byte) error {
 	var raw map[string]yaml.Node
 	if err := yaml.Unmarshal(data, &raw); err != nil {
@@ -875,6 +875,21 @@ func rejectDeprecatedKeys(path string, data []byte) error {
 				"Rename the section in your config and try again.",
 			path,
 		)
+	}
+	if transcription, ok := raw["transcription"]; ok && transcription.Kind == yaml.MappingNode {
+		for i := 0; i < len(transcription.Content); i += 2 {
+			if transcription.Content[i].Value == "chat_audio" {
+				return fmt.Errorf(
+					"%s: nested `transcription.chat_audio:` block was retired — every field "+
+						"(chunk_max_seconds, history_turns, prompt, language, stream, context_mode, "+
+						"min_chunk_peak, min_chunk_rms, batch_prompt, batch_max_audio_seconds, ctx_size, "+
+						"batch_until_release, continuation_rebatch, silero) is now a direct property "+
+						"of `transcription:`. Hoist the keys up one level (remove the `chat_audio:` "+
+						"indentation) and try again.",
+					path,
+				)
+			}
+		}
 	}
 	return nil
 }
@@ -902,53 +917,52 @@ func (c Config) Validate() error {
 		return errors.New("transcription.model must not be empty")
 	}
 
-	ca := c.Transcription.ChatAudio
-	if ca.ChunkMaxSeconds < 1 || ca.ChunkMaxSeconds > 30 {
-		return errors.New("transcription.chat_audio.chunk_max_seconds must be between 1 and 30")
+	if c.Transcription.ChunkMaxSeconds < 1 || c.Transcription.ChunkMaxSeconds > 30 {
+		return errors.New("transcription.chunk_max_seconds must be between 1 and 30")
 	}
-	if ca.HistoryTurns < 0 || ca.HistoryTurns > 8 {
-		return errors.New("transcription.chat_audio.history_turns must be between 0 and 8")
+	if c.Transcription.HistoryTurns < 0 || c.Transcription.HistoryTurns > 8 {
+		return errors.New("transcription.history_turns must be between 0 and 8")
 	}
-	if strings.TrimSpace(ca.Prompt) == "" {
-		return errors.New("transcription.chat_audio.prompt must not be empty")
+	if strings.TrimSpace(c.Transcription.Prompt) == "" {
+		return errors.New("transcription.prompt must not be empty")
 	}
-	if strings.TrimSpace(ca.Language) == "" {
-		return errors.New("transcription.chat_audio.language must not be empty")
+	if strings.TrimSpace(c.Transcription.Language) == "" {
+		return errors.New("transcription.language must not be empty")
 	}
-	switch ca.ContextMode {
+	switch c.Transcription.ContextMode {
 	case "", ChatAudioContextFewShot, ChatAudioContextInlineClips:
 	default:
 		return fmt.Errorf(
-			"transcription.chat_audio.context_mode must be %q or %q",
+			"transcription.context_mode must be %q or %q",
 			ChatAudioContextFewShot, ChatAudioContextInlineClips,
 		)
 	}
-	if ca.MinChunkPeak < 0 || ca.MinChunkPeak > 1 {
-		return errors.New("transcription.chat_audio.min_chunk_peak must be between 0 and 1")
+	if c.Transcription.MinChunkPeak < 0 || c.Transcription.MinChunkPeak > 1 {
+		return errors.New("transcription.min_chunk_peak must be between 0 and 1")
 	}
-	if ca.MinChunkRMS < 0 || ca.MinChunkRMS > 1 {
-		return errors.New("transcription.chat_audio.min_chunk_rms must be between 0 and 1")
+	if c.Transcription.MinChunkRMS < 0 || c.Transcription.MinChunkRMS > 1 {
+		return errors.New("transcription.min_chunk_rms must be between 0 and 1")
 	}
-	if strings.TrimSpace(ca.BatchPrompt) == "" {
-		return errors.New("transcription.chat_audio.batch_prompt must not be empty")
+	if strings.TrimSpace(c.Transcription.BatchPrompt) == "" {
+		return errors.New("transcription.batch_prompt must not be empty")
 	}
-	if ca.BatchMaxAudioSeconds < 0 || ca.BatchMaxAudioSeconds > 600 {
-		return errors.New("transcription.chat_audio.batch_max_audio_seconds must be between 0 and 600")
+	if c.Transcription.BatchMaxAudioSeconds < 0 || c.Transcription.BatchMaxAudioSeconds > 600 {
+		return errors.New("transcription.batch_max_audio_seconds must be between 0 and 600")
 	}
-	if ca.CtxSize < 0 || ca.CtxSize > 1048576 {
-		return errors.New("transcription.chat_audio.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
+	if c.Transcription.CtxSize < 0 || c.Transcription.CtxSize > 1048576 {
+		return errors.New("transcription.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
 	}
-	if ca.BatchUntilRelease && ca.ContinuationRebatch {
-		return errors.New("transcription.chat_audio.batch_until_release and continuation_rebatch are mutually exclusive (batch_until_release already sends one POST per utterance, so there's nothing to rebatch)")
+	if c.Transcription.BatchUntilRelease && c.Transcription.ContinuationRebatch {
+		return errors.New("transcription.batch_until_release and continuation_rebatch are mutually exclusive (batch_until_release already sends one POST per utterance, so there's nothing to rebatch)")
 	}
-	if ca.Silero.SilenceMS < 0 || ca.Silero.SilenceMS > 5000 {
-		return errors.New("transcription.chat_audio.silero.silence_ms must be between 0 and 5000")
+	if c.Transcription.Silero.SilenceMS < 0 || c.Transcription.Silero.SilenceMS > 5000 {
+		return errors.New("transcription.silero.silence_ms must be between 0 and 5000")
 	}
-	if ca.Silero.SpeechMS < 0 || ca.Silero.SpeechMS > 2000 {
-		return errors.New("transcription.chat_audio.silero.speech_ms must be between 0 and 2000")
+	if c.Transcription.Silero.SpeechMS < 0 || c.Transcription.Silero.SpeechMS > 2000 {
+		return errors.New("transcription.silero.speech_ms must be between 0 and 2000")
 	}
-	if ca.Silero.MinUtteranceMS < 0 || ca.Silero.MinUtteranceMS > 10000 {
-		return errors.New("transcription.chat_audio.silero.min_utterance_ms must be between 0 and 10000")
+	if c.Transcription.Silero.MinUtteranceMS < 0 || c.Transcription.Silero.MinUtteranceMS > 10000 {
+		return errors.New("transcription.silero.min_utterance_ms must be between 0 and 10000")
 	}
 
 	switch c.HotkeyMode {

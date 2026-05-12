@@ -73,7 +73,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			d.cfg.Recording.SampleRate)
 	}
 
-	if err := transcribe.InitSilero(d.cfg.Transcription.ChatAudio.Silero.OnnxruntimeLibrary); err != nil {
+	if err := transcribe.InitSilero(d.cfg.Transcription.Silero.OnnxruntimeLibrary); err != nil {
 		return fmt.Errorf("init silero: %w", err)
 	}
 

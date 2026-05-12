@@ -166,7 +166,7 @@ func (d *Daemon) runDictation(
 // transcribeBatch fetches each segment by ID and sends them as ONE
 // /chat/completions request with each segment as a labelled
 // input_audio part. The model returns one line per segment in the
-// form `HH:MM:SS\t<transcript>` per `chat_audio.batch_prompt`. The
+// form `HH:MM:SS\t<transcript>` per `transcription.batch_prompt`. The
 // joint response is returned; individual segments' caches are NOT
 // updated — a batch result is a different artifact from per-segment
 // transcriptions, so clobbering per-segment caches would be wrong.
