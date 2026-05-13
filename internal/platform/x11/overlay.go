@@ -861,7 +861,10 @@ func (o *Overlay) animateListeningTextRetraction(token uint64, current, target s
 		if prev < targetLen {
 			prev = targetLen
 		}
-		time.Sleep(28 * time.Millisecond)
+		// Slower than the forward typing animation (28ms/word) — deletion
+		// is meant to be visible as its own beat before the new transcript
+		// starts streaming in.
+		time.Sleep(75 * time.Millisecond)
 
 		o.mu.Lock()
 		if token != o.partialToken || o.animating || !o.visible || o.state.title != ui.OverlayListeningTitle {
