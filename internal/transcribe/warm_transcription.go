@@ -120,18 +120,28 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 	}
 
 	txModel := strings.TrimSpace(cfg.Transcription.Model)
-	// Pin Lemonade's ctx_size before the background warm. If the
-	// model is loaded with the wrong size, EnsureModelCtxSizeFromConfig
-	// reloads it synchronously so the warm path doesn't race with
-	// another reload. No-op when ctx_size is 0.
-	if err := EnsureModelCtxSizeFromConfig(ctx, cfg); err != nil {
-		return err
-	}
-	if cfg.Transcription.CtxSize > 0 && txModel != "" {
-		// Re-fetch health so the IsLoaded check below sees the
-		// post-reload state.
-		if fresh, err := FetchLemonadeHealth(ctx, baseURL); err == nil {
-			health = fresh
+	desiredCtx := cfg.Transcription.CtxSize
+
+	// Pin Lemonade's ctx_size inline so we reuse the /health snapshot we
+	// just fetched — calling EnsureModelCtxSize{,FromConfig} here would
+	// re-fetch /health and, on the no-reload path, force a third re-fetch
+	// below for no good reason. Only when an actual /load fires do we
+	// need a fresh snapshot.
+	if desiredCtx > 0 && txModel != "" {
+		if health.ModelCtxSizeMatches(txModel, desiredCtx) {
+			sessionlog.Infof("chat-audio: ctx_size pin: model %q already loaded with ctx_size=%d, no reload needed",
+				txModel, desiredCtx)
+		} else {
+			sessionlog.Infof("chat-audio: ctx_size pin: reloading model %q with ctx_size=%d via /api/v1/load", txModel, desiredCtx)
+			loadCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			loadErr := postLemonadeLoad(loadCtx, baseURL, txModel, desiredCtx)
+			cancel()
+			if loadErr != nil {
+				return fmt.Errorf("ensure ctx_size=%d: %w", desiredCtx, loadErr)
+			}
+			if fresh, err := FetchLemonadeHealth(ctx, baseURL); err == nil {
+				health = fresh
+			}
 		}
 	}
 	if txModel != "" && !health.IsLoaded(txModel) {

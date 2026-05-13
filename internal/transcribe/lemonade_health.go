@@ -75,6 +75,19 @@ func (h LemonadeHealth) IsLoaded(modelName string) bool {
 	return false
 }
 
+// ModelCtxSizeMatches reports whether the named model is currently
+// resident with the desired ctx_size already applied. Lets callers that
+// already have a /health snapshot skip the extra round-trip
+// EnsureModelCtxSize would otherwise make.
+func (h LemonadeHealth) ModelCtxSizeMatches(modelName string, desired int) bool {
+	for _, m := range h.Loaded {
+		if m.Name == modelName && m.RecipeOptions.CtxSize == desired {
+			return true
+		}
+	}
+	return false
+}
+
 // LoadedNames returns the names of currently-resident models, useful
 // for error messages that show what the user could pick from.
 func (h LemonadeHealth) LoadedNames() []string {
@@ -187,14 +200,11 @@ func EnsureModelCtxSize(ctx context.Context, baseURL, modelName string, desired 
 		sessionlog.Warnf("chat-audio: ctx_size pin: /health probe failed (%v) — proceeding without enforcing ctx_size=%d", err, desired)
 		return nil
 	}
-	for _, m := range health.Loaded {
-		if m.Name == modelName && m.RecipeOptions.CtxSize == desired {
-			sessionlog.Infof("chat-audio: ctx_size pin: model %q already loaded with ctx_size=%d, no reload needed",
-				modelName, desired)
-			return nil
-		}
+	if health.ModelCtxSizeMatches(modelName, desired) {
+		sessionlog.Infof("chat-audio: ctx_size pin: model %q already loaded with ctx_size=%d, no reload needed",
+			modelName, desired)
+		return nil
 	}
-
 	sessionlog.Infof("chat-audio: ctx_size pin: reloading model %q with ctx_size=%d via /api/v1/load", modelName, desired)
 	return postLemonadeLoad(ctx, baseURL, modelName, desired)
 }
