@@ -159,6 +159,110 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 	}
 }
 
+// TestBeginReplacePreRetractsBeforeReplaceSegment locks down the
+// continuation-rebatch flow: when the chat-audio backend announces a
+// rebatch with BeginReplace, the prior segment must be stripped from
+// liveText/displayText IMMEDIATELY (before any partials of the unified
+// transcript stream in) so the overlay can animate the deletion in
+// parallel with the model round-trip. The matching ReplaceSegment then
+// adds the new text without retracting again.
+func TestBeginReplacePreRetractsBeforeReplaceSegment(t *testing.T) {
+	t.Parallel()
+
+	fakeOverlay := &overlayStub{}
+	app := &App{cfg: config.Config{}, overlay: fakeOverlay}
+	state := &recordingState{
+		target:      platform.Target{WindowClass: "Gedit"},
+		liveText:    " Hello",
+		displayText: "Hello",
+	}
+
+	// BeginReplace fires before the rebatched POST returns.
+	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+		Type:    transcribe.DictationEventBeginReplace,
+		PrevLen: len([]rune(" Hello")),
+	})
+
+	if state.liveText != "" {
+		t.Fatalf("liveText after BeginReplace = %q, want empty", state.liveText)
+	}
+	if state.displayText != "" {
+		t.Fatalf("displayText after BeginReplace = %q, want empty", state.displayText)
+	}
+	if !state.replacePending {
+		t.Fatal("replacePending should be true after BeginReplace")
+	}
+	if fakeOverlay.listeningText != "" {
+		t.Fatalf("overlay listeningText after BeginReplace = %q, want empty", fakeOverlay.listeningText)
+	}
+
+	// Partials stream in while retraction animates — they update overlay
+	// preview but must not double up on the old text since it was retracted.
+	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+		Type: transcribe.DictationEventPartial,
+		Text: "Hello world",
+	})
+	if fakeOverlay.listeningText != "Hello world" {
+		t.Fatalf("partial preview = %q, want %q (no leftover prior segment)", fakeOverlay.listeningText, "Hello world")
+	}
+
+	// ReplaceSegment delivers the unified transcript. It must NOT retract
+	// again (BeginReplace already did), just append.
+	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+		Type:    transcribe.DictationEventReplaceSegment,
+		Text:    " Hello world.",
+		PrevLen: len([]rune(" Hello")),
+	})
+	if state.liveText != " Hello world." {
+		t.Fatalf("liveText after ReplaceSegment = %q, want %q", state.liveText, " Hello world.")
+	}
+	if state.displayText != "Hello world." {
+		t.Fatalf("displayText after ReplaceSegment = %q, want %q", state.displayText, "Hello world.")
+	}
+	if state.replacePending {
+		t.Fatal("replacePending should be cleared after ReplaceSegment")
+	}
+}
+
+// TestCancelReplaceRestoresPriorSegment verifies the failure path: if
+// the rebatched POST errors after BeginReplace was fired, the prior
+// segment must come back into liveText/displayText so the user doesn't
+// see a hole in the overlay until the next chunk replaces it cleanly.
+func TestCancelReplaceRestoresPriorSegment(t *testing.T) {
+	t.Parallel()
+
+	fakeOverlay := &overlayStub{}
+	app := &App{cfg: config.Config{}, overlay: fakeOverlay}
+	state := &recordingState{
+		target:      platform.Target{WindowClass: "Gedit"},
+		liveText:    " Hello",
+		displayText: "Hello",
+	}
+
+	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+		Type:    transcribe.DictationEventBeginReplace,
+		PrevLen: len([]rune(" Hello")),
+	})
+	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+		Type:    transcribe.DictationEventCancelReplace,
+		Text:    " Hello",
+		PrevLen: len([]rune(" Hello")),
+	})
+
+	if state.liveText != " Hello" {
+		t.Fatalf("liveText after CancelReplace = %q, want %q", state.liveText, " Hello")
+	}
+	if state.displayText != "Hello" {
+		t.Fatalf("displayText after CancelReplace = %q, want %q", state.displayText, "Hello")
+	}
+	if state.replacePending {
+		t.Fatal("replacePending should be cleared after CancelReplace")
+	}
+	if fakeOverlay.listeningText != "Hello" {
+		t.Fatalf("overlay listeningText after CancelReplace = %q, want %q", fakeOverlay.listeningText, "Hello")
+	}
+}
+
 func TestHandleDictationEventAccumulatesSegments(t *testing.T) {
 	t.Parallel()
 

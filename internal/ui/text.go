@@ -108,6 +108,18 @@ func ShouldAnimatePartial(current, target string) bool {
 	return strings.HasPrefix(target, current)
 }
 
+// ShouldAnimateRetraction returns true when the new target is a strict
+// prefix of the currently-displayed text, indicating words should animate
+// away from the tail. Used by the continuation-rebatch deletion of the
+// prior segment so the user sees the old text shrink word-by-word before
+// the unified transcript streams in.
+func ShouldAnimateRetraction(current, target string) bool {
+	if current == "" || current == target {
+		return false
+	}
+	return strings.HasPrefix(current, target)
+}
+
 // NextWordBoundary finds the next word boundary in runes starting from start.
 func NextWordBoundary(runes []rune, start int) int {
 	i := start
@@ -118,4 +130,29 @@ func NextWordBoundary(runes []rune, start int) int {
 		i++
 	}
 	return i
+}
+
+// PrevWordBoundary finds the start of the previous word ending at end.
+// Walks left over trailing whitespace, then back over the last word, then
+// strips the separator (space or newline) that preceded the word so the
+// returned prefix doesn't end in a stray separator. Returns 0 if end <= 0.
+func PrevWordBoundary(runes []rune, end int) int {
+	if end <= 0 {
+		return 0
+	}
+	i := end
+	for i > 0 && isWordSeparator(runes[i-1]) {
+		i--
+	}
+	for i > 0 && !isWordSeparator(runes[i-1]) {
+		i--
+	}
+	for i > 0 && isWordSeparator(runes[i-1]) {
+		i--
+	}
+	return i
+}
+
+func isWordSeparator(r rune) bool {
+	return r == ' ' || r == '\n' || r == '\t'
 }

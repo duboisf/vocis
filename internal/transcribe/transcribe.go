@@ -76,6 +76,22 @@ type DictationEventType string
 const (
 	DictationEventPartial DictationEventType = "partial"
 	DictationEventSegment DictationEventType = "segment"
+	// DictationEventBeginReplace announces that the next chunk is a
+	// continuation rebatch and the prior emitted segment is about to be
+	// replaced. PrevLen is the rune count of the prior segment's text
+	// as it was previously emitted. Fired BEFORE the rebatched POST so
+	// the overlay can retract the prior segment (and animate the
+	// deletion) before any streaming partial of the unified transcript
+	// renders on top of the old text. A matching ReplaceSegment then
+	// supplies the new text once the model returns. If the rebatched
+	// POST fails, a CancelReplace restores the prior segment.
+	DictationEventBeginReplace DictationEventType = "begin_replace"
+	// DictationEventCancelReplace rolls back a prior BeginReplace
+	// after the rebatched chunk failed (HTTP error, hallucination
+	// filter, etc). Text carries the prior segment's formatted text so
+	// the caller can re-add it to its displayed buffer; PrevLen is the
+	// same rune count BeginReplace was sent with.
+	DictationEventCancelReplace DictationEventType = "cancel_replace"
 	// DictationEventReplaceSegment retracts the immediately-previous
 	// segment and substitutes Text in its place. PrevLen is the rune
 	// count of the prior segment's text as it was previously emitted

@@ -503,6 +503,8 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			// in for single-clip chunks (a multi-clip force-cut batch
 			// is its own utterance scope and doesn't get rebatched).
 			rebatch := false
+			var rebatchPrevLen int
+			var rebatchPriorFormatted string
 			if s.continuationRebatch && len(liveClips) == 1 && len(s.history) > 0 {
 				prior := s.history[len(s.history)-1]
 				if !endsWithTerminalPunctuation(prior.transcript) && len(prior.pcm) > 0 {
@@ -510,11 +512,37 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 						truncate(prior.transcript, 60), len(prior.pcm)*1000/s.sampleRate)
 					liveClips = [][]int16{prior.pcm, liveClips[0]}
 					rebatch = true
+					rebatchPrevLen = utf8.RuneCountInString(s.lastEmittedFormatted)
+					rebatchPriorFormatted = s.lastEmittedFormatted
+					// Announce the upcoming replacement so the overlay can
+					// retract (and animate the deletion of) the prior
+					// segment BEFORE the new transcript's SSE partials start
+					// rendering on top of it. Only meaningful in the live
+					// phase — post-Finalize the prior segment hasn't been
+					// emitted to the consumer yet (it's still queued).
+					if s.liveSegments.Load() && rebatchPrevLen > 0 {
+						sessionlog.Infof("chat-audio: continuation rebatch — emitting begin_replace prev_runes=%d", rebatchPrevLen)
+						select {
+						case s.events <- DictationEvent{Type: DictationEventBeginReplace, PrevLen: rebatchPrevLen}:
+						default:
+						}
+					}
 				}
 			}
 			text, err := s.transcribeChunk(ctx, liveClips)
 			if err != nil {
 				sessionlog.Errorf("chat-audio: chunk transcription failed: %v", err)
+				if rebatch && s.liveSegments.Load() && rebatchPrevLen > 0 {
+					// Restore the prior segment that we asked the overlay
+					// to retract — without this, a failed rebatch leaves
+					// the overlay short by one segment until the next
+					// successful chunk replaces it.
+					sessionlog.Infof("chat-audio: continuation rebatch failed — emitting cancel_replace to restore prior segment (prev_runes=%d)", rebatchPrevLen)
+					select {
+					case s.events <- DictationEvent{Type: DictationEventCancelReplace, Text: rebatchPriorFormatted, PrevLen: rebatchPrevLen}:
+					default:
+					}
+				}
 				if !s.liveSegments.Load() {
 					select {
 					case s.finals <- finalResult{err: err}:

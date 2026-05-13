@@ -37,6 +37,12 @@ type Overlay struct {
 	liveBody     string
 	wavePhase    float64
 	partialToken uint64
+	// retracting is set while animateListeningTextRetraction is walking
+	// the displayed text backwards (continuation-rebatch deletion of the
+	// prior segment). While true, SetListeningText updates liveBody but
+	// skips drawing so the retraction can complete uninterrupted; the
+	// retraction goroutine catches up to liveBody when it finishes.
+	retracting bool
 	height       int
 	targetHeight int
 	resizeToken  uint64
@@ -220,6 +226,19 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 
 	o.state.subtitle = subtitle
 	if o.animating {
+		return
+	}
+	if o.retracting {
+		// A retraction is in flight (continuation rebatch deletion). The
+		// updated liveBody we just wrote will be picked up by the
+		// retraction goroutine when it finishes.
+		return
+	}
+	if ui.ShouldAnimateRetraction(currentText, targetText) {
+		o.partialToken++
+		token := o.partialToken
+		o.retracting = true
+		go o.animateListeningTextRetraction(token, currentText, targetText)
 		return
 	}
 	if ui.ShouldAnimatePartial(currentText, targetText) {
@@ -812,6 +831,67 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 
 		currentLen = next
 	}
+}
+
+// animateListeningTextRetraction walks the displayed listening text
+// backwards word-by-word until it reaches target (which must be a prefix
+// of current). Used by the continuation-rebatch flow so the user sees the
+// prior segment delete in step with the model's round-trip rather than
+// being snap-replaced after the new transcript finishes streaming.
+//
+// While running, SetListeningText callers see o.retracting=true and only
+// update o.liveBody (no drawing). Once the retraction reaches the target,
+// this goroutine catches up to whatever liveBody accumulated (the SSE
+// partials that arrived during the deletion) by snapping to it, then
+// kicks the normal forward animation if more text is still streaming in.
+func (o *Overlay) animateListeningTextRetraction(token uint64, current, target string) {
+	defer func() {
+		o.mu.Lock()
+		o.retracting = false
+		o.mu.Unlock()
+	}()
+
+	currentRunes := []rune(current)
+	targetRunes := []rune(target)
+	targetLen := len(targetRunes)
+	currentLen := len(currentRunes)
+
+	for currentLen > targetLen {
+		prev := ui.PrevWordBoundary(currentRunes, currentLen)
+		if prev < targetLen {
+			prev = targetLen
+		}
+		time.Sleep(28 * time.Millisecond)
+
+		o.mu.Lock()
+		if token != o.partialToken || o.animating || !o.visible || o.state.title != ui.OverlayListeningTitle {
+			o.mu.Unlock()
+			return
+		}
+		o.state.body = ui.ListeningBody(string(currentRunes[:prev]))
+		o.drawLocked()
+		o.mu.Unlock()
+
+		currentLen = prev
+	}
+
+	// Retraction done. liveBody holds the latest target — likely the
+	// retraction endpoint, but partials that arrived mid-retraction may
+	// have grown it. Snap to liveBody so the catch-up is instantaneous,
+	// then let the next SetListeningText call drive the forward
+	// animation.
+	o.mu.Lock()
+	if token != o.partialToken || !o.visible || o.state.title != ui.OverlayListeningTitle {
+		o.mu.Unlock()
+		return
+	}
+	currentDisplayed := ui.DisplayedListeningText(o.state.body)
+	accumulated := ui.DisplayedListeningText(o.liveBody)
+	if accumulated != currentDisplayed {
+		o.state.body = o.liveBody
+		o.drawLocked()
+	}
+	o.mu.Unlock()
 }
 
 func (o *Overlay) captureFrameLocked() *image.RGBA {

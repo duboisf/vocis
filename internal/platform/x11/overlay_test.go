@@ -45,6 +45,60 @@ func TestShouldAnimatePartialOnlyWhenTextExtends(t *testing.T) {
 	}
 }
 
+func TestShouldAnimateRetraction(t *testing.T) {
+	t.Parallel()
+
+	if !ui.ShouldAnimateRetraction("hello world", "hello") {
+		t.Fatal("expected retraction when target is a strict prefix of current")
+	}
+	if !ui.ShouldAnimateRetraction("hello world", "") {
+		t.Fatal("expected retraction when target is empty and current has text")
+	}
+	if !ui.ShouldAnimateRetraction("first\nsecond", "first") {
+		t.Fatal("expected retraction across newline-separated segments")
+	}
+	if ui.ShouldAnimateRetraction("", "anything") {
+		t.Fatal("nothing to retract from an empty current")
+	}
+	if ui.ShouldAnimateRetraction("hello", "hello") {
+		t.Fatal("no retraction needed when text is unchanged")
+	}
+	if ui.ShouldAnimateRetraction("hello", "hello world") {
+		t.Fatal("growth is not a retraction")
+	}
+	if ui.ShouldAnimateRetraction("hello world", "goodbye") {
+		t.Fatal("unrelated text is not a retraction")
+	}
+}
+
+func TestPrevWordBoundary(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		end  int
+		want string
+	}{
+		{"single word", "hello", 5, ""},
+		{"two words trims separator", "hello world", 11, "hello"},
+		{"three words", "one two three", 13, "one two"},
+		{"across newline strips separator", "first\nsecond", 12, "first"},
+		{"trailing space then word", "hello world ", 12, "hello"},
+		{"start at zero", "hello", 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			runes := []rune(c.in)
+			got := ui.PrevWordBoundary(runes, c.end)
+			if string(runes[:got]) != c.want {
+				t.Fatalf("PrevWordBoundary(%q, %d) = %d (=%q), want %q",
+					c.in, c.end, got, string(runes[:got]), c.want)
+			}
+		})
+	}
+}
+
 func TestDisplayedListeningTextTreatsHelperAsEmpty(t *testing.T) {
 	t.Parallel()
 

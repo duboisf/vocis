@@ -64,6 +64,12 @@ type recordingState struct {
 	// prompt has folded the cleanup rules in already, so the trailing
 	// PostProcess call is skipped to avoid a redundant round-trip.
 	combinedPostProcess bool
+	// replacePending tracks an outstanding continuation rebatch: set
+	// when BeginReplace pre-retracted the prior segment from
+	// liveText/displayText, cleared when the matching ReplaceSegment
+	// (success) or CancelReplace (failure) lands. Keeps ReplaceSegment
+	// from retracting a second time.
+	replacePending bool
 }
 
 type OverlayUI interface {
@@ -1002,24 +1008,75 @@ func (a *App) handleDictationEvent(
 		sessionlog.Infof("stream segment accumulated: %d chars total", len(state.liveText))
 		return nil
 
-	case transcribe.DictationEventReplaceSegment:
-		// Continuation rebatch: retract the prior segment from the
-		// accumulated text and substitute the unified transcript. The
-		// target window isn't pasted into until Finalize completes, so
-		// this is purely an in-memory swap of liveText / displayText —
-		// no injector backspace required.
+	case transcribe.DictationEventBeginReplace:
+		// Continuation rebatch announced: retract the prior segment NOW
+		// (before the POST's SSE partials arrive) so the overlay can
+		// animate the deletion in parallel with the model round-trip.
+		// The matching ReplaceSegment will add the new text once the
+		// model returns; a CancelReplace puts the prior text back if
+		// the rebatched POST fails.
 		if event.PrevLen > 0 {
 			runes := []rune(state.liveText)
 			if event.PrevLen <= len(runes) {
 				state.liveText = string(runes[:len(runes)-event.PrevLen])
+			} else {
+				state.liveText = ""
 			}
-			// displayText separates segments with "\n"; drop the trailing line.
 			if i := strings.LastIndex(state.displayText, "\n"); i >= 0 {
 				state.displayText = state.displayText[:i]
 			} else {
 				state.displayText = ""
 			}
 		}
+		state.currentPartial = ""
+		state.replacePending = true
+		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
+		a.overlay.SetFinishingText(state.displayText)
+		sessionlog.Infof("stream segment begin-replace: prev_runes=%d, %d chars remaining",
+			event.PrevLen, len(state.liveText))
+		return nil
+
+	case transcribe.DictationEventCancelReplace:
+		// Rebatched POST failed — restore the prior segment we just
+		// retracted in BeginReplace so the overlay doesn't show a hole
+		// until the next chunk lands.
+		if !state.replacePending {
+			return nil
+		}
+		state.replacePending = false
+		state.liveText += event.Text
+		restored := strings.TrimSpace(event.Text)
+		if restored != "" {
+			if state.displayText != "" {
+				state.displayText += "\n"
+			}
+			state.displayText += restored
+		}
+		state.currentPartial = ""
+		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
+		a.overlay.SetFinishingText(state.displayText)
+		sessionlog.Infof("stream segment cancel-replace: restored prior segment (%d runes)", event.PrevLen)
+		return nil
+
+	case transcribe.DictationEventReplaceSegment:
+		// Continuation rebatch: substitute the unified transcript for
+		// the prior segment. BeginReplace already retracted the old
+		// text from liveText/displayText, so we skip the retract step
+		// unless that pre-emptive event never landed (post-Finalize
+		// paths go through the finals queue, not events, but a defense-
+		// in-depth retract here keeps the in-memory buffers correct).
+		if !state.replacePending && event.PrevLen > 0 {
+			runes := []rune(state.liveText)
+			if event.PrevLen <= len(runes) {
+				state.liveText = string(runes[:len(runes)-event.PrevLen])
+			}
+			if i := strings.LastIndex(state.displayText, "\n"); i >= 0 {
+				state.displayText = state.displayText[:i]
+			} else {
+				state.displayText = ""
+			}
+		}
+		state.replacePending = false
 		text := strings.TrimSpace(event.Text)
 		state.liveText += event.Text
 		if text != "" {
