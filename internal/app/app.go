@@ -11,6 +11,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"vocis/internal/audiocapture"
 	"vocis/internal/config"
 	"vocis/internal/transcribe"
 	"vocis/internal/platform"
@@ -150,6 +151,13 @@ func (a *App) Run(ctx context.Context) error {
 
 	a.recorder = recorder.New()
 	a.transcribe = transcribe.New(a.cfg.Transcription)
+
+	// Audio capture GC sweeps the per-session WAV dir on a fixed
+	// cadence. The writer itself is opened lazily per dictation by the
+	// chat-audio session (which is also where the config lives — under
+	// transcription.audio_capture). GC ties to the app's long-lived
+	// context so it stops cleanly on shutdown.
+	audiocapture.StartGC(ctx, a.cfg.Transcription.AudioCapture)
 
 	// Defer overlay close before the Lemonade preflight so that path
 	// can use ShowError below — without this, a failed preflight would

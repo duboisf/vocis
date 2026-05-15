@@ -34,7 +34,35 @@ If an event is filtered from the existing trace machinery (e.g. the audio payloa
 - `hotkey` — fallback decisions, registration failures.
 - `submit mode:` — Enter-after-paste decision. See `insertion.auto_submit`.
 - `kitty capture state:` / `kitty post-send state:` — pre/post `kitty @ ls` snapshot of the targeted window's title, foreground process, focus, alt-screen, and at-prompt flags. Compare the two when triaging "transcript landed in the wrong window."
+- `audio capture: wrote <path> bytes=N` (INFO) — one per POSTed chunk. Pair with the matching `chat-audio: posting chunk clips=…` line to find the WAV that was sent to the model. See "Audio capture (chunk replay)" below.
+- `audio capture: gc deleted N files older than …` (INFO) / `gc swept dir=… (0 stale)` (DEBUG) — periodic prune of the audio dir.
 - `kitty verify-paste id=N screen.len=…` (DEBUG) and `kitty verify-paste id=N: payload head … NOT visible …` (WARN) — post-send `kitty @ get-text --extent screen` probe. The WARN means `send-text` returned 0 but the program in the window appears to have swallowed the bytes (alt-screen TUI in an odd input mode, claude mid-stream, shell with bracketed-paste off). Disable with `insertion.kitty_verify_paste: false`.
+
+## Audio capture (chunk replay)
+
+Every chunk POSTed to `/chat/completions` is mirrored to
+`~/.local/state/vocis/audio/` as a WAV file (or `$XDG_STATE_HOME/vocis/audio`
+when that env var is set). Use this when a transcript looks wrong and
+you want to hear what the model actually received.
+
+Filenames are `<session-ts>-chunkNNN-<reason>.wav` where:
+- `session-ts` matches the timestamp prefix of the matching session log
+  in `~/.local/state/vocis/sessions/`.
+- `NNN` is a monotonic per-session counter (so chunk001 is the first
+  POST of that dictation session, etc.).
+- `reason` is the flush trigger (`vad_stopped`, `samples_closed`,
+  `force_cut_batch`), suffixed with `-rebatch` when continuation_rebatch
+  prepended prior audio and `-trailing` when this was the last chunk
+  after the samples channel closed.
+
+Each write also leaves an `INFO  audio capture: wrote <path> bytes=N`
+line in the session log so you can grep either side to find the other.
+
+A long-lived goroutine sweeps the dir every
+`transcription.audio_capture.gc_interval_seconds` (default 600s) and
+deletes any WAV whose mtime is older than
+`transcription.audio_capture.ttl_seconds` (default 3600s). Disable the
+whole feature with `transcription.audio_capture.enabled: false`.
 
 ## Tracing (Jaeger)
 

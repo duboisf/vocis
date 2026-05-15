@@ -19,6 +19,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 
+	"vocis/internal/audiocapture"
 	"vocis/internal/config"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
@@ -125,6 +126,11 @@ type chatAudioSession struct {
 
 	hallucinationFilters map[string]bool
 
+	// audioCapture mirrors each POSTed chunk WAV to disk for replay.
+	// Owned by the session; opened from cfg.AudioCapture at startup.
+	// A nil-pointer call is a safe no-op when the feature is disabled.
+	audioCapture *audiocapture.Writer
+
 	events   chan DictationEvent
 	pumpDone chan error
 	finals   chan finalResult
@@ -159,7 +165,12 @@ type chatAudioSession struct {
 // in one user message per Google's docs, so the model sees the full
 // utterance context in one round-trip.
 type chatChunk struct {
-	clips    [][]int16
+	clips [][]int16
+	// reason is the flush trigger that produced this chunk (e.g.
+	// vad_stopped, samples_closed, force_cut_batch). Propagated to the
+	// audio-capture filename so a replayed WAV identifies the source
+	// path that emitted it.
+	reason   string
 	trailing bool
 }
 
@@ -194,6 +205,14 @@ func startChatAudioSession(
 	if err != nil {
 		return nil, err
 	}
+	// Open the audio-capture writer for this dictation session. Errors
+	// degrade to a no-op writer rather than failing the dictation —
+	// capture is a debug-replay aid, not a correctness path.
+	writer, err := audiocapture.NewWriter(cfg.AudioCapture)
+	if err != nil {
+		sessionlog.Warnf("chat-audio: audio capture disabled — %v", err)
+		writer = nil
+	}
 	pumpCtx, cancel := context.WithCancel(ctx)
 	s := &chatAudioSession{
 		httpClient:           httpClient,
@@ -212,6 +231,7 @@ func startChatAudioSession(
 		continuationRebatch:  cfg.ContinuationRebatch,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
+		audioCapture:         writer,
 		events:               make(chan DictationEvent, 16),
 		pumpDone:             make(chan error, 1),
 		finals:               make(chan finalResult, 8),
@@ -361,7 +381,7 @@ func (s *chatAudioSession) run(
 			if trailing {
 				// No audio at all — still send the sentinel so
 				// the worker closes finals.
-				s.chunksCh <- chatChunk{trailing: true}
+				s.chunksCh <- chatChunk{reason: reason, trailing: true}
 			}
 			return
 		}
@@ -381,7 +401,7 @@ func (s *chatAudioSession) run(
 		}
 		sessionlog.Debugf("chat-audio: flush chunk reason=%s clips=%d total_samples=%d (~%dms) trailing=%t",
 			reason, len(clips), totalSamples, totalSamples*1000/s.sampleRate, trailing)
-		s.chunksCh <- chatChunk{clips: clips, trailing: trailing}
+		s.chunksCh <- chatChunk{clips: clips, reason: reason, trailing: trailing}
 	}
 	// flushAtCap slices off exactly chunkMaxSamples from buf and
 	// appends it to pendingForceCuts. The cut clip waits for the next
@@ -528,6 +548,25 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 						}
 					}
 				}
+			}
+			// Mirror this chunk's WAV to disk BEFORE the POST so a
+			// failed/cancelled request still leaves replayable audio
+			// on disk. Tag the filename with the flush reason (and
+			// "-rebatch" when continuation_rebatch prepended prior
+			// audio) so it lines up with the chat-audio log.
+			if s.audioCapture != nil {
+				captureReason := chunk.reason
+				if captureReason == "" {
+					captureReason = "unknown"
+				}
+				if rebatch {
+					captureReason = captureReason + "-rebatch"
+				}
+				if chunk.trailing {
+					captureReason = captureReason + "-trailing"
+				}
+				captureWAV := encodePCM16WAV(concatClips(liveClips), s.sampleRate)
+				s.audioCapture.WriteChunk(captureReason, captureWAV)
 			}
 			text, err := s.transcribeChunk(ctx, liveClips)
 			if err != nil {

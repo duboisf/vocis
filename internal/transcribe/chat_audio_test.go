@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -483,6 +485,84 @@ func TestChatAudioSessionMultiClipForceCutBatching(t *testing.T) {
 		if m["role"] == "assistant" {
 			t.Fatalf("multi-clip request unexpectedly has assistant turn: %v", m)
 		}
+	}
+}
+
+// TestChatAudioSessionWritesAudioCaptureWAV verifies that the chat-
+// audio session natively mirrors each POSTed chunk to disk under
+// $XDG_STATE_HOME/vocis/audio/ — the audio_capture writer is opened
+// by startChatAudioSession itself from cfg.AudioCapture, no external
+// plumbing needed.
+func TestChatAudioSessionWritesAudioCaptureWAV(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", tmp)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi.\"}}]}\n\n")
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	cfg := config.TranscriptionConfig{
+		BaseURL:  server.URL + "/api/v1",
+		Model:    "gemma-test",
+		Prompt:   "Transcribe in {language}.",
+		Language: "en",
+		AudioCapture: config.AudioCaptureConfig{
+			Enabled:           true,
+			TTLSeconds:        3600,
+			GCIntervalSeconds: 600,
+		},
+	}
+	samples := make(chan []int16, 1)
+	opts := DictationOpts{
+		SampleRate: 8000, // != sileroSampleRate so VAD is skipped
+		Channels:   1,
+		Samples:    samples,
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	session, err := startChatAudioSession(context.Background(), cfg, httpClient, opts)
+	if err != nil {
+		t.Fatalf("startChatAudioSession: %v", err)
+	}
+
+	samples <- make([]int16, opts.SampleRate) // 1s of audio
+	close(samples)
+
+	finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := session.Finalize(finalCtx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	audioDir := filepath.Join(tmp, "vocis", "audio")
+	entries, err := os.ReadDir(audioDir)
+	if err != nil {
+		t.Fatalf("read audio dir %s: %v", audioDir, err)
+	}
+	if len(entries) != 1 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("audio dir entries=%d want 1; got %v", len(entries), names)
+	}
+	name := entries[0].Name()
+	if !strings.Contains(name, "samples_closed") || !strings.Contains(name, "trailing") {
+		t.Errorf("filename %q should encode samples_closed-trailing reason", name)
+	}
+	if !strings.HasSuffix(name, ".wav") {
+		t.Errorf("filename %q should end in .wav", name)
+	}
+	data, err := os.ReadFile(filepath.Join(audioDir, name))
+	if err != nil {
+		t.Fatalf("read wav: %v", err)
+	}
+	if len(data) < 44 || string(data[:4]) != "RIFF" {
+		t.Errorf("file %s is not a valid WAV (len=%d head=%q)", name, len(data), data[:min(8, len(data))])
 	}
 }
 

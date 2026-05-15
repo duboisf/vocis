@@ -63,6 +63,15 @@ transcription:
     # $HOME/.local/lib). Install from
     # https://github.com/microsoft/onnxruntime/releases.
     onnxruntime_library: $HOME/opt/onnxruntime/lib/libonnxruntime.so
+  # Mirror every chunk POSTed to /chat/completions to
+  # ~/.local/state/vocis/audio/ as a WAV so you can replay exactly
+  # what the model saw when a bug shows up after the fact. A
+  # background goroutine deletes WAVs older than ttl_seconds on a
+  # fixed cadence.
+  audio_capture:
+    enabled: true
+    ttl_seconds: 3600          # 1 hour — delete WAVs older than this
+    gc_interval_seconds: 600   # 10 minutes between GC sweeps
 
 recording:
   # PulseAudio source ID. "default" picks the system default source.

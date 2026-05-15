@@ -76,6 +76,26 @@ type Config struct {
 	Speak          SpeakConfig         `yaml:"speak"`
 }
 
+// AudioCaptureConfig controls per-chunk audio archiving for after-the-
+// fact bug replay. Every chunk POSTed to /chat/completions is mirrored
+// to ~/.local/state/vocis/audio/ as a WAV file so the user can replay
+// exactly what the model saw. A background goroutine prunes files
+// older than TTLSeconds on a fixed interval. Lives nested under
+// transcription because it captures the transcription POST stream;
+// it isn't a top-level concern of the app.
+type AudioCaptureConfig struct {
+	// Enabled toggles the entire feature. Default true — disk cost is
+	// bounded by TTLSeconds × typical chunk rate, and the replay value
+	// is high when triaging "why did the model emit X for that audio?"
+	Enabled bool `yaml:"enabled"`
+	// TTLSeconds is how long a chunk WAV stays on disk before the GC
+	// goroutine deletes it. Default 3600 (1 hour).
+	TTLSeconds int `yaml:"ttl_seconds"`
+	// GCIntervalSeconds is how often the GC goroutine wakes up to
+	// sweep stale files. Default 600 (10 minutes).
+	GCIntervalSeconds int `yaml:"gc_interval_seconds"`
+}
+
 // PostProcessConfig is the user-facing knobs for the optional LLM
 // cleanup pass after a dictation. Timeouts, the min-word-count
 // floor, and the sampling knobs were pinned as consts in
@@ -238,6 +258,13 @@ type TranscriptionConfig struct {
 	// values (silence_ms / speech_ms / min_utterance_ms) are pinned
 	// in internal/transcribe — they were never tuned in the field.
 	Silero SileroConfig `yaml:"silero"`
+	// AudioCapture mirrors every chunk POSTed to /chat/completions
+	// to a per-user state dir so a transcript bug can be triaged by
+	// replaying the exact audio the model saw. A background GC
+	// goroutine prunes files older than TTLSeconds. Nested under
+	// transcription because it captures the transcription POST
+	// stream specifically (it isn't a global recording feature).
+	AudioCapture AudioCaptureConfig `yaml:"audio_capture"`
 }
 
 // SileroConfig is just the onnxruntime library path now. The
@@ -334,6 +361,11 @@ func Default() Config {
 				// installed system-wide can blank the field to fall
 				// back to the auto-discovery candidates.
 				OnnxruntimeLibrary: "$HOME/opt/onnxruntime/lib/libonnxruntime.so",
+			},
+			AudioCapture: AudioCaptureConfig{
+				Enabled:           true,
+				TTLSeconds:        3600,
+				GCIntervalSeconds: 600,
 			},
 		},
 		Recording: RecordingConfig{
@@ -730,6 +762,20 @@ func (c Config) Validate() error {
 	}
 	if c.Recall.Persist.Mode == RecallPersistDisk && strings.TrimSpace(c.Recall.Persist.Dir) == "" {
 		return errors.New("recall.persist.mode=disk requires recall.persist.dir to be set")
+	}
+
+	if c.Transcription.AudioCapture.Enabled {
+		if c.Transcription.AudioCapture.TTLSeconds <= 0 {
+			return errors.New("transcription.audio_capture.ttl_seconds must be > 0 when enabled")
+		}
+		if c.Transcription.AudioCapture.GCIntervalSeconds <= 0 {
+			return errors.New("transcription.audio_capture.gc_interval_seconds must be > 0 when enabled")
+		}
+		// 7-day ceiling on TTL — generous for bug replay but bounds the
+		// disk footprint at ~few-GB scale even on a heavy dictation day.
+		if c.Transcription.AudioCapture.TTLSeconds > 7*86400 {
+			return errors.New("transcription.audio_capture.ttl_seconds must be <= 604800 (7 days)")
+		}
 	}
 
 	if strings.TrimSpace(c.Speak.Model) == "" {
