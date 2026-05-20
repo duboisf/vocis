@@ -254,6 +254,17 @@ type TranscriptionConfig struct {
 	// one POST per utterance so there's nothing to rebatch). Off by
 	// default.
 	ContinuationRebatch bool `yaml:"continuation_rebatch"`
+	// RebatchMaxSeconds caps the combined audio duration (prior clip +
+	// current clip) of a continuation_rebatch POST. Gemma 3n / 4 cap
+	// audio at 30 s per request and silently drop everything past that
+	// window, so an unbounded rebatch chain on a long pause-free
+	// monologue would lose the freshly-spoken tail. When prepending the
+	// prior audio would exceed this bound, the rebatch is skipped and
+	// the current chunk posts as a fresh segment instead (the prior
+	// unfinished segment stays as-is). Default 28 s holds a 2 s margin
+	// under Gemma's cap, matching the chunk_max_seconds force-cut. Only
+	// consulted when ContinuationRebatch is on.
+	RebatchMaxSeconds int `yaml:"rebatch_max_seconds"`
 	// Silero is the path to the onnxruntime library. The hysteresis
 	// values (silence_ms / speech_ms / min_utterance_ms) are pinned
 	// in internal/transcribe — they were never tuned in the field.
@@ -346,8 +357,9 @@ func Default() Config {
 				"you",
 				".",
 			},
-			Prompt:   DefaultChatAudioPrompt,
-			Language: "its original language",
+			Prompt:            DefaultChatAudioPrompt,
+			Language:          "its original language",
+			RebatchMaxSeconds: 28,
 			// Energy gate matching recall's defaults. Rejects fan
 			// hum / room tone but keeps quiet speech.
 			MinChunkPeak: 0.02,

@@ -55,6 +55,15 @@ transcription:
   # chunk as a multi-clip POST that prepends the prior audio. The
   # model returns one unified transcript covering both clips.
   continuation_rebatch: false
+  # Cap on the combined audio (prior + current clip) of a
+  # continuation_rebatch POST. Gemma 3n/4 cap audio at 30 s per
+  # request and silently drop everything past that window, so an
+  # unbounded rebatch chain on a long pause-free monologue would lose
+  # the freshly-spoken tail. When prepending the prior audio would
+  # exceed this bound, the rebatch is skipped and the current chunk
+  # posts as a fresh segment instead. 28 s holds a 2 s margin under
+  # Gemma's cap.
+  rebatch_max_seconds: 28
   silero:
     # Path to libonnxruntime.so. Supports $HOME / ${VAR} expansion.
     # Default matches the onnxruntime release-tarball layout when

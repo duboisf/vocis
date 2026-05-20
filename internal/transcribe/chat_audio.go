@@ -55,8 +55,8 @@ const (
 	// used by the chat-audio chunker. Pinned here because nobody
 	// ever tuned them in practice — the values match the OpenAI-
 	// realtime defaults the original code shipped with.
-	defaultSileroSilenceMS     = 500
-	defaultSileroSpeechMS      = 150
+	defaultSileroSilenceMS      = 500
+	defaultSileroSpeechMS       = 150
 	defaultSileroMinUtteranceMS = 1000
 )
 
@@ -109,6 +109,11 @@ type chatAudioSession struct {
 	extraSystemPrompt   string
 	batchUntilRelease   bool
 	continuationRebatch bool
+	// rebatchMaxSamples caps the combined (prior + current) clip length
+	// a continuation rebatch may POST. Beyond it, Gemma's 30 s audio
+	// window would drop the tail, so the rebatch is skipped. Derived
+	// from cfg.RebatchMaxSeconds * sampleRate at startup.
+	rebatchMaxSamples int
 
 	// lastEmittedFormatted is the segment text most recently sent on
 	// the events channel as DictationEventSegment or as the Text of a
@@ -213,6 +218,14 @@ func startChatAudioSession(
 		sessionlog.Warnf("chat-audio: audio capture disabled — %v", err)
 		writer = nil
 	}
+	// A TranscriptionConfig built in code (e.g. tests) may leave
+	// RebatchMaxSeconds unset; fall back to the force-cut bound so the
+	// rebatch cap is never accidentally 0 (which would skip every
+	// rebatch). config.Default() supplies 28 for file-loaded configs.
+	rebatchMaxSeconds := cfg.RebatchMaxSeconds
+	if rebatchMaxSeconds <= 0 {
+		rebatchMaxSeconds = defaultChunkMaxSeconds
+	}
 	pumpCtx, cancel := context.WithCancel(ctx)
 	s := &chatAudioSession{
 		httpClient:           httpClient,
@@ -229,6 +242,7 @@ func startChatAudioSession(
 		extraSystemPrompt:    opts.ExtraSystemPrompt,
 		batchUntilRelease:    cfg.BatchUntilRelease,
 		continuationRebatch:  cfg.ContinuationRebatch,
+		rebatchMaxSamples:    rebatchMaxSeconds * opts.SampleRate,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		audioCapture:         writer,
@@ -241,8 +255,8 @@ func startChatAudioSession(
 	}
 	s.liveSegments.Store(true)
 
-	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t context_mode=%s batch_until_release=%t continuation_rebatch=%t",
-		s.model, defaultChunkMaxSeconds, s.historyTurns, s.streamSSE, s.contextMode, s.batchUntilRelease, s.continuationRebatch)
+	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t context_mode=%s batch_until_release=%t continuation_rebatch=%t rebatch_max=%ds",
+		s.model, defaultChunkMaxSeconds, s.historyTurns, s.streamSSE, s.contextMode, s.batchUntilRelease, s.continuationRebatch, rebatchMaxSeconds)
 
 	// "Connection ready" is synthetic for the chat-audio backend — there
 	// is no upfront handshake to await. The run goroutine fires
@@ -527,7 +541,17 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			var rebatchPriorFormatted string
 			if s.continuationRebatch && len(liveClips) == 1 && len(s.history) > 0 {
 				prior := s.history[len(s.history)-1]
-				if !endsWithTerminalPunctuation(prior.transcript) && len(prior.pcm) > 0 {
+				combinedSamples := len(prior.pcm) + len(liveClips[0])
+				rebatchTooLong := combinedSamples > s.rebatchMaxSamples
+				if !endsWithTerminalPunctuation(prior.transcript) && len(prior.pcm) > 0 && rebatchTooLong {
+					// Prepending the prior audio would push the request
+					// past Gemma's 30 s window, which silently drops the
+					// tail (the freshly-spoken words). Skip the rebatch
+					// and post this chunk as its own segment — two
+					// segments beat losing audio. See docs/debugging.md.
+					sessionlog.Infof("chat-audio: continuation rebatch skipped — combined audio %dms exceeds rebatch cap %dms; posting %q as a fresh segment to avoid Gemma dropping the tail",
+						combinedSamples*1000/s.sampleRate, s.rebatchMaxSamples*1000/s.sampleRate, truncate(prior.transcript, 60))
+				} else if !endsWithTerminalPunctuation(prior.transcript) && len(prior.pcm) > 0 {
 					sessionlog.Infof("chat-audio: continuation rebatch — prior transcript %q lacks terminal punctuation, prepending %dms of prior audio",
 						truncate(prior.transcript, 60), len(prior.pcm)*1000/s.sampleRate)
 					liveClips = [][]int16{prior.pcm, liveClips[0]}
@@ -875,24 +899,24 @@ func parseSSEDelta(payload string) (string, string, error) {
 //
 // User content carries only audio. Three shapes:
 //
-//	1. Single-clip, history-aware (few_shot mode):
-//	   system:   instruction
-//	   user:     [audio prior 1]
-//	   assistant: prior transcript 1
-//	   ...
-//	   user:     [audio current]
+//  1. Single-clip, history-aware (few_shot mode):
+//     system:   instruction
+//     user:     [audio prior 1]
+//     assistant: prior transcript 1
+//     ...
+//     user:     [audio current]
 //
-//	2. Single-clip, history-aware (inline_clips mode):
-//	   system:   instruction (+ "transcribe ONLY the FINAL clip" framing
-//	             when history non-empty)
-//	   user:     [text "[prior clip 1]:", audio prior 1, ..., text
-//	             "[current clip]:", audio current]
+//  2. Single-clip, history-aware (inline_clips mode):
+//     system:   instruction (+ "transcribe ONLY the FINAL clip" framing
+//     when history non-empty)
+//     user:     [text "[prior clip 1]:", audio prior 1, ..., text
+//     "[current clip]:", audio current]
 //
-//	3. Multi-clip current (force-cut batch):
-//	   system:   instruction (+ "transcribe ALL clips as one continuous
-//	             utterance" framing)
-//	   user:     [text "[clip 1]:", audio 1, text "[clip 2]:", audio 2, ...]
-//	   History is intentionally skipped — the audio is the context.
+//  3. Multi-clip current (force-cut batch):
+//     system:   instruction (+ "transcribe ALL clips as one continuous
+//     utterance" framing)
+//     user:     [text "[clip 1]:", audio 1, text "[clip 2]:", audio 2, ...]
+//     History is intentionally skipped — the audio is the context.
 //
 // historyTurns caps the history fed back to the model. When 0 (or no
 // history yet, or multi-clip) the request reduces to one user message.

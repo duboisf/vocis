@@ -741,6 +741,124 @@ func TestChatAudioSessionContinuationRebatch(t *testing.T) {
 	}
 }
 
+// TestChatAudioSessionContinuationRebatchSkippedWhenTooLong is a
+// regression test: an unbounded rebatch chain on a long pause-free
+// monologue grows the prepended prior audio until the combined POST
+// exceeds Gemma's 30 s window, which silently drops the freshly-spoken
+// tail. When prepending the prior clip would breach RebatchMaxSeconds,
+// the rebatch must be SKIPPED — the current chunk posts as its own
+// fresh segment (few-shot history, NOT a multi-clip merge) so the new
+// audio is fully transcribed instead of being dropped past the cap.
+func TestChatAudioSessionContinuationRebatchSkippedWhenTooLong(t *testing.T) {
+	type seenRequest struct{ body []byte }
+	var (
+		mu   sync.Mutex
+		seen []seenRequest
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen = append(seen, seenRequest{body: body})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":\"and the tail of what I said.\"}}]}\n\n")
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	cfg := config.TranscriptionConfig{
+		BaseURL:             server.URL + "/api/v1",
+		Model:               "gemma-test",
+		Prompt:              "Transcribe in {language}.",
+		Language:            "en",
+		ContinuationRebatch: true,
+		// 1 s cap: prior (1 s) + current (1 s) = 2 s combined, which
+		// breaches the bound and must force the rebatch to be skipped.
+		RebatchMaxSeconds: 1,
+	}
+	samples := make(chan []int16, 1)
+	opts := DictationOpts{
+		SampleRate: 8000, // != sileroSampleRate so VAD is skipped
+		Channels:   1,
+		Samples:    samples,
+	}
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	session, err := startChatAudioSession(context.Background(), cfg, httpClient, opts)
+	if err != nil {
+		t.Fatalf("startChatAudioSession: %v", err)
+	}
+
+	// Seed history with a prior turn whose transcript lacks terminal
+	// punctuation — the rebatch trigger condition — but whose audio is
+	// long enough that prepending it would breach RebatchMaxSeconds.
+	priorPCM := make([]int16, 8000) // 1s of audio @ 8 kHz
+	for i := range priorPCM {
+		priorPCM[i] = 1000
+	}
+	session.history = []chatTurn{{
+		pcm:        priorPCM,
+		wav:        encodePCM16WAV(priorPCM, 8000),
+		transcript: "I was saying something",
+	}}
+	session.lastEmittedFormatted = " I was saying something"
+
+	chunk := make([]int16, 8000) // 1s — combined with prior = 2s > 1s cap
+	for i := range chunk {
+		chunk[i] = 2000
+	}
+	samples <- chunk
+	close(samples)
+
+	finalCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := session.Finalize(finalCtx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	mu.Lock()
+	calls := len(seen)
+	var body []byte
+	if calls > 0 {
+		body = seen[0].body
+	}
+	mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("calls=%d want 1", calls)
+	}
+
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	// A skipped rebatch posts as a normal chunk: the prior turn rides
+	// along as few-shot history, so the request carries an assistant
+	// message. A rebatch would instead be system+user only.
+	hasAssistant := false
+	for _, m := range req.Messages {
+		if m["role"] == "assistant" {
+			hasAssistant = true
+		}
+	}
+	if !hasAssistant {
+		t.Fatalf("rebatch was not skipped — request has no assistant few-shot turn (messages=%d), the oversized prior audio was merged into a multi-clip POST", len(req.Messages))
+	}
+
+	// History must be APPENDED to (fresh segment), not REPLACED — a
+	// rebatch overwrites history's last entry, a skip adds a new one.
+	if got := len(session.history); got != 2 {
+		t.Fatalf("history len=%d want 2 (skipped rebatch appends a fresh segment, not replaces)", got)
+	}
+	if got := session.history[0].transcript; got != "I was saying something" {
+		t.Fatalf("history[0].transcript=%q want the prior turn left intact", got)
+	}
+	if got := session.history[1].transcript; got != "and the tail of what I said." {
+		t.Fatalf("history[1].transcript=%q want the new segment transcribed in full", got)
+	}
+}
+
 // TestChatAudioSessionContinuationRebatchPostFinalizeRetractsFromLive
 // regression: when the prior segment was emitted on the events channel
 // (i.e. before liveSegments flipped to false) and the trailing flush
@@ -911,4 +1029,3 @@ func TestChatAudioSessionDropsHallucination(t *testing.T) {
 		t.Fatalf("text=%q want empty (hallucination dropped)", res.Text)
 	}
 }
-

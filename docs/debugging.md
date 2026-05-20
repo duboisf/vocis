@@ -27,6 +27,7 @@ If an event is filtered from the existing trace machinery (e.g. the audio payloa
 - `chat-audio: force-cut at Ns` — a long monologue without a VAD pause hit `chunk_max_seconds`; the cut clip is stashed for the next natural flush.
 - `chat-audio: dropped silent clip peak=… rms=…` — energy gate filtered a clip before posting. Compare against `min_chunk_peak` / `min_chunk_rms`.
 - `chat-audio: continuation rebatch` — the previous chunk's transcript ended without terminal punctuation; this chunk was reposted with the prior audio prepended to produce a unified transcript.
+- `chat-audio: continuation rebatch skipped` — prepending the prior audio would have pushed the combined POST past `transcription.rebatch_max_seconds` (and so past Gemma's 30 s window, which silently drops the tail). The chunk posted as a fresh segment instead. Expected on long pause-free monologues — it's the guard against losing freshly-spoken audio.
 - `dropped hallucinated final:` — the hallucination filter caught a Whisper/Gemma stock phrase ("Thank you.", etc.). See `transcription.hallucination_filters`.
 - `postprocess` — input/output text (DEBUG), timeouts, errors.
 - `finalization` — trailing transcript assembly, commit errors.
