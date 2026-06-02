@@ -99,10 +99,25 @@ type AudioCaptureConfig struct {
 // PostProcessConfig is the user-facing knobs for the optional LLM
 // cleanup pass after a dictation. Timeouts, the min-word-count
 // floor, and the sampling knobs were pinned as consts in
-// internal/transcribe — only the three policy choices remain here:
-// is cleanup on, which model does it, and what's the cleanup prompt.
+// internal/transcribe — only the policy choices remain here:
+// is cleanup on, which model does it, what's the cleanup prompt,
+// and whether to combine it into the chat-audio transcription call.
+//
+// Combine=true (the default) folds the cleanup prompt into the
+// per-chunk chat-audio system message and skips the separate
+// /chat/completions round-trip — same final text, half the latency,
+// but each chunk is cleaned in isolation so the model can't see
+// cross-chunk context (e.g. it will close a chunk that ends
+// mid-sentence with a period).
+//
+// Combine=false runs cleanup as a real second pass on the joined
+// transcript. Costs one extra round-trip per dictation but lets
+// the cleanup prompt re-punctuate across chunk boundaries, which is
+// what you want if "stopping mid-sentence inserts a period" is a
+// recurring complaint.
 type PostProcessConfig struct {
 	Enabled bool   `yaml:"enabled"`
+	Combine bool   `yaml:"combine"`
 	Model   string `yaml:"model"`
 	Prompt  string `yaml:"prompt"`
 }
@@ -404,13 +419,18 @@ func Default() Config {
 		},
 		PostProcess: PostProcessConfig{
 			Enabled: true,
-			// Same model as transcription. On the chat-audio backend the
-			// postprocess prompt is folded into the chat-audio system
-			// message and the separate /chat/completions call is skipped
-			// (see app.startRecordingLocked). On the realtime-WS backend
-			// they're separate calls but both go to gemma — Lemonade's
-			// llm slot only fits one model, so reusing the transcription
-			// model avoids a 5-10 s slot swap on every dictation.
+			// Combine defaults to true: folds the postprocess prompt into
+			// the chat-audio system message and skips the separate
+			// /chat/completions call (see app.startRecordingLocked) for
+			// the half-latency fast-path. Flip to false to run postprocess
+			// as a real second pass on the joined transcript — costs one
+			// extra round-trip but lets cleanup re-punctuate across chunk
+			// boundaries (fixes the "pause mid-sentence inserts a period"
+			// class of bug).
+			Combine: true,
+			// Same model as transcription. Lemonade's llm slot only fits
+			// one model at a time, so reusing the transcription model
+			// avoids a 5-10 s slot swap on every dictation.
 			Model:  "gemma4-it-e2b-FLM",
 			Prompt: DefaultPostProcessPrompt,
 		},

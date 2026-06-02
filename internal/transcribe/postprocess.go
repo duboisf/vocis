@@ -33,11 +33,17 @@ type chatStream interface {
 // one place a runtime override is justified, and there's no plan to
 // expose them as YAML knobs again.
 const (
-	// defaultMinWordCount skips the postprocess call entirely when
-	// the transcript has fewer words than this — short utterances
-	// (single commands, "yes", "go ahead") don't benefit from
-	// LLM cleanup and pay the round-trip cost for no gain.
-	defaultMinWordCount = 10
+	// defaultMinWordCount used to short-circuit short transcripts at
+	// 10 words on the theory that single commands didn't benefit from
+	// cleanup. That assumption broke when combine=false became viable:
+	// in separate-pass mode the postprocess prompt is what restores
+	// capitalization and terminal punctuation, so skipping it leaves
+	// short utterances ("yes", "ship it") pasted as raw lowercase
+	// fragments. 0 disables the floor — every dictation runs through
+	// cleanup. The runtime cost is a single extra /chat/completions
+	// call (~0.5-2 s on warm Lemonade) which is acceptable on the
+	// short-utterance path users actually care about.
+	defaultMinWordCount = 0
 	// defaultTemperature is the sampling temperature handed to the
 	// LLM for cleanup. Low enough to keep the output faithful to
 	// the input transcript without re-writing the user's words.

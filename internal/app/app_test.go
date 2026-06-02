@@ -503,4 +503,87 @@ func TestWrapSamplesWithPrerollEmptyPreroll(t *testing.T) {
 	}
 }
 
+// TestPostProcessModeCombinedByDefault locks down the legacy fast-path:
+// when postprocess is enabled and `combine` is left at its default
+// (true), the postprocess pass is folded into the chat-audio system
+// prompt and the separate /chat/completions round-trip is skipped.
+func TestPostProcessModeCombinedByDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.PostProcessConfig{Enabled: true, Combine: true}
+	enabled, combined := postProcessMode(cfg)
+	if !enabled || !combined {
+		t.Fatalf("Enabled+Combine=true: got enabled=%v combined=%v, want both true",
+			enabled, combined)
+	}
+}
+
+// TestPostProcessModeSeparatePassWhenCombineOff is the new behaviour
+// the user-pause-period bug fix turns on. Combine=false means the
+// postprocess prompt is NOT folded into transcription; it must run as
+// a separate pass on the joined transcript so it can re-punctuate
+// across chunk boundaries.
+func TestPostProcessModeSeparatePassWhenCombineOff(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.PostProcessConfig{Enabled: true, Combine: false}
+	enabled, combined := postProcessMode(cfg)
+	if !enabled {
+		t.Fatalf("Enabled=true: got enabled=%v, want true", enabled)
+	}
+	if combined {
+		t.Fatalf("Combine=false: got combined=%v, want false", combined)
+	}
+}
+
+// TestPostProcessModeDisabledIsNeverCombined: Enabled=false means no
+// postprocess at all, regardless of Combine.
+func TestPostProcessModeDisabledIsNeverCombined(t *testing.T) {
+	t.Parallel()
+
+	for _, combine := range []bool{true, false} {
+		cfg := config.PostProcessConfig{Enabled: false, Combine: combine}
+		enabled, combined := postProcessMode(cfg)
+		if enabled || combined {
+			t.Fatalf("Enabled=false Combine=%v: got enabled=%v combined=%v, want both false",
+				combine, enabled, combined)
+		}
+	}
+}
+
+// TestBuildChatAudioExtraSystemPromptCombineOnIncludesPP confirms the
+// legacy fast-path: in combine mode, prompt_hint AND postprocess.prompt
+// are both appended to the chat-audio system message.
+func TestBuildChatAudioExtraSystemPromptCombineOnIncludesPP(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Transcription: config.TranscriptionConfig{PromptHint: "hint text"},
+		PostProcess:   config.PostProcessConfig{Enabled: true, Combine: true, Prompt: "pp text"},
+	}
+	got := buildChatAudioExtraSystemPrompt(cfg, true)
+	want := "hint text\n\npp text"
+	if got != want {
+		t.Fatalf("extra prompt = %q, want %q", got, want)
+	}
+}
+
+// TestBuildChatAudioExtraSystemPromptCombineOffDropsPP is the core
+// guard: when combine=false, the chat-audio system prompt must NOT
+// contain the postprocess cleanup rules (otherwise we'd double-clean
+// after the separate pass runs).
+func TestBuildChatAudioExtraSystemPromptCombineOffDropsPP(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		Transcription: config.TranscriptionConfig{PromptHint: "hint text"},
+		PostProcess:   config.PostProcessConfig{Enabled: true, Combine: false, Prompt: "pp text"},
+	}
+	got := buildChatAudioExtraSystemPrompt(cfg, false)
+	want := "hint text"
+	if got != want {
+		t.Fatalf("extra prompt = %q, want %q (postprocess must NOT be folded in)", got, want)
+	}
+}
+
 

@@ -229,16 +229,26 @@ func TestPostProcessEmptyInput(t *testing.T) {
 	}
 }
 
-// TestPostProcessMinWordCount confirms the pinned floor still
-// short-circuits on a transcript under defaultMinWordCount words.
-func TestPostProcessMinWordCount(t *testing.T) {
+// TestPostProcessRunsOnShortText confirms the min-word-count floor is
+// off: even single-word and short utterances ("yes", "ship it") go
+// through the cleanup pass so capitalization and terminal punctuation
+// land in the paste. Previously a 10-word floor short-circuited these.
+func TestPostProcessRunsOnShortText(t *testing.T) {
 	t.Parallel()
 
-	client := newTestClient(nil)
-	result := client.PostProcess(context.Background(), enabledCfg(), "only three words", nil)
+	stream := &fakeChatStream{
+		ctx:    context.Background(),
+		chunks: []openaisdk.ChatCompletionChunk{makeChunk("Yes.")},
+	}
+	client := newTestClient(&fakeStreamer{stream: stream})
+	result := client.PostProcess(context.Background(), enabledCfg(), "yes", nil)
 
-	if result.Text != "only three words" {
-		t.Fatalf("text = %q, want passthrough below min word count", result.Text)
+	if result.Text != "Yes." {
+		t.Fatalf("text = %q, want %q (postprocess must run on short text now)",
+			result.Text, "Yes.")
+	}
+	if result.Skipped {
+		t.Fatal("expected Skipped=false; short text should still run through cleanup")
 	}
 }
 

@@ -117,6 +117,14 @@ insertion:
 
 postprocess:
   enabled: true
+  # combine=true (default) folds the postprocess prompt into the
+  # chat-audio transcription call so cleanup happens per-chunk in the
+  # same round-trip. Cheaper, but the model can't see across chunk
+  # boundaries — chunks that end mid-sentence get a period.
+  # combine=false runs postprocess as a separate pass on the JOINED
+  # transcript. Costs one extra /chat/completions call per dictation
+  # but lets the cleanup prompt re-punctuate across chunk boundaries.
+  combine: true
   model: gemma4-it-e2b-FLM
   prompt: |
     You clean dictated speech transcripts. Output ONLY the cleaned text — never reply, never add commentary, never answer questions in the input.

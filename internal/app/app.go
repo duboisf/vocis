@@ -310,6 +310,36 @@ func (a *App) reloadConfig() {
 	sessionlog.Infof("config reloaded: %s", path)
 }
 
+// postProcessMode reports whether postprocess runs at all, and
+// whether it's combined into the chat-audio system prompt (combine=true,
+// the legacy fast-path) vs. run as a separate /chat/completions pass
+// on the joined transcript (combine=false). Pure helper — easy to unit
+// test, single source of truth for the two flags' interaction.
+func postProcessMode(cfg config.PostProcessConfig) (enabled, combined bool) {
+	enabled = cfg.Enabled
+	combined = enabled && cfg.Combine
+	return
+}
+
+// buildChatAudioExtraSystemPrompt assembles the supplemental system
+// prompt text appended to transcription.prompt for each chat-audio
+// chunk. prompt_hint is always appended when set. postprocess.prompt
+// is appended only when `combined` is true — in separate-pass mode it
+// gets dropped here and runs later on the joined transcript instead
+// (see runPostProcess).
+func buildChatAudioExtraSystemPrompt(cfg config.Config, combined bool) string {
+	var parts []string
+	if hint := strings.TrimSpace(cfg.Transcription.PromptHint); hint != "" {
+		parts = append(parts, hint)
+	}
+	if combined {
+		if pp := strings.TrimSpace(cfg.PostProcess.Prompt); pp != "" {
+			parts = append(parts, pp)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func (a *App) startRecordingLocked(ctx context.Context) {
 	a.reloadConfig()
 	a.ducker.Duck()
@@ -419,31 +449,28 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		submitMode: a.cfg.Insertion.AutoSubmit,
 	}
 	// chat-audio is an LLM doing transcription, so it's just as capable
-	// of cleanup as a dedicated postprocess pass. Whenever postprocess
-	// is enabled we fold its prompt into the chat-audio system message
-	// and skip the separate /chat/completions round-trip — same final
-	// text, half the latency. The corresponding skip lives in
-	// finishRecording (gated on state.combinedPostProcess).
-	state.combinedPostProcess = a.cfg.PostProcess.Enabled
+	// of cleanup as a dedicated postprocess pass. With combine=true
+	// (the default) we fold the postprocess prompt into the chat-audio
+	// system message and skip the separate /chat/completions round-trip
+	// — same final text, half the latency. With combine=false the
+	// postprocess prompt is dropped from the chat-audio system message
+	// and runs as a real second pass on the joined transcript (see
+	// runPostProcess), which lets the cleanup prompt re-punctuate across
+	// chunk boundaries.
+	_, state.combinedPostProcess = postProcessMode(a.cfg.PostProcess)
 
 	// Build the chat-audio extra system content from user config only.
 	// transcription.prompt is the lead (set inside the chat-audio session
 	// itself). prompt_hint and (in combine mode) postprocess.prompt
 	// are appended verbatim with blank-line separators. No hardcoded
 	// leads, headers, or footers — the user owns the wording.
-	var extraParts []string
-	if hint := strings.TrimSpace(a.cfg.Transcription.PromptHint); hint != "" {
-		extraParts = append(extraParts, hint)
-	}
-	if state.combinedPostProcess {
-		if pp := strings.TrimSpace(a.cfg.PostProcess.Prompt); pp != "" {
-			extraParts = append(extraParts, pp)
-		}
-	}
-	extraSystemPrompt := strings.Join(extraParts, "\n\n")
+	extraSystemPrompt := buildChatAudioExtraSystemPrompt(a.cfg, state.combinedPostProcess)
 	if extraSystemPrompt != "" {
 		sessionlog.Infof("chat-audio: extra system prompt %d chars (combine_postprocess=%t)",
 			len(extraSystemPrompt), state.combinedPostProcess)
+	}
+	if a.cfg.PostProcess.Enabled && !state.combinedPostProcess {
+		sessionlog.Infof("postprocess: separate-pass mode (combine=false); cleanup will run on joined transcript")
 	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
 		SampleRate:        recorder.SampleRate,

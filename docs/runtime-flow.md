@@ -115,7 +115,7 @@ When `vocis serve` runs:
 
 - `transcription.*` — base_url, model, prompt, prompt_hint, language, hallucination_filters, min_chunk_peak, min_chunk_rms, ctx_size, batch_until_release, continuation_rebatch, rebatch_max_seconds, silero.onnxruntime_library. The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
 - `recording.device`.
-- `postprocess.*` — enabled, model, prompt.
+- `postprocess.*` — enabled, combine, model, prompt. `combine=true` folds the cleanup prompt into the chat-audio per-chunk system message (one round-trip, but each chunk is cleaned in isolation); `combine=false` drops it from the chat-audio prompt and runs cleanup as a separate `/chat/completions` pass on the joined transcript (one extra round-trip, but re-punctuates across chunk boundaries).
 - `log_window_title`.
 
 **Pinned at `vocis serve` startup (require restart to change):**
@@ -174,7 +174,7 @@ When the hotkey stops dictation:
    - `Finalize` flips the session out of live-segment mode, waits for the audio pump to drain, and the worker flushes a trailing chunk that POSTs to `/chat/completions` one last time (multi-clip when force-cut segments are pending).
    - Trailing transcripts are joined to the already-emitted live segments. Continuation rebatch first emits a `begin_replace` event (live phase only) so the overlay can retract — and animate the deletion of — the prior segment in parallel with the rebatched POST; a `replace_segment` follows on success with the unified two-clip transcript, or a `cancel_replace` restores the prior segment if the POST fails.
 6. The overlay updates to show the complete transcription text (segments + trailing) with newlines preserved. The finished "Wrapping up" phase is pushed onto a completed-phases list with its elapsed duration (e.g. `Wrapping up — done (2.3s)`) so the user can see how long finalization actually took.
-7. If post-processing is enabled and the text has enough words (`postprocess.min_word_count`):
+7. If post-processing is enabled and the text has enough words (`postprocess.min_word_count`). Skipped entirely when `postprocess.combine=true` (the cleanup already happened per-chunk inside the chat-audio system prompt); the steps below apply only in `combine=false` separate-pass mode:
    - The overlay shows a new `Wait...` phase counting up from 0. Internal first-token / total timeouts still apply inside the post-processing call — they are enforced but not displayed.
    - When the first token arrives, the phase extends in place to `Wait · Stream... (elapsed)`, again counting up from 0 for the streaming portion.
    - If no first token arrives within the first-token timeout, raw text is pasted immediately (the model is likely stuck).
