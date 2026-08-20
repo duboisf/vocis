@@ -32,6 +32,7 @@ If an event is filtered from the existing trace machinery (e.g. the audio payloa
 - `postprocess` — input/output text (DEBUG), timeouts, errors.
 - `finalization` — trailing transcript assembly, commit errors.
 - `duck` — audio volume ducking/restore.
+- `overlay backend:` — `x11` when the on-screen overlay is live, `none` when `x11.NewOverlay()` failed and the no-op overlay took over (preceded by an `overlay: cannot create X11 overlay` WARN with the underlying error). `none` means dictation works but there is no visual feedback.
 - `hotkey` — fallback decisions, registration failures.
 - `submit mode:` — Enter-after-paste decision. See `insertion.auto_submit`.
 - `kitty capture state:` / `kitty post-send state:` — pre/post `kitty @ ls` snapshot of the targeted window's title, foreground process, focus, alt-screen, and at-prompt flags. Compare the two when triaging "transcript landed in the wrong window."

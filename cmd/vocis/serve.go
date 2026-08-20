@@ -82,10 +82,8 @@ func runServe() error {
 	sessionlog.Infof("loaded config: %s", path)
 	sessionlog.Infof("hotkey: %s", cfg.Hotkey)
 
-	ov, err := x11.NewOverlay()
-	if err != nil {
-		return fmt.Errorf("init overlay: %w", err)
-	}
+	ov, overlayBackend := pickOverlay()
+	sessionlog.Infof("overlay backend: %s", overlayBackend)
 
 	compositor, compositorBackend := pickCompositor()
 	sessionlog.Infof("compositor backend: %s", compositorBackend)
@@ -100,6 +98,22 @@ func runServe() error {
 	}).Run(ctx)
 	shutdownStart = time.Now()
 	return runErr
+}
+
+// pickOverlay returns the on-screen overlay matching the current session.
+// The overlay is X11-only; on a Wayland session with no XWayland server (or
+// any other X connection failure) NewOverlay fails. Since the overlay is
+// purely visual feedback — dictation works end to end without it — we degrade
+// to a no-op overlay rather than treating it as a fatal startup error. The
+// returned label ("x11" or "none") is logged so a session transcript shows
+// which path ran.
+func pickOverlay() (app.OverlayUI, string) {
+	ov, err := x11.NewOverlay()
+	if err != nil {
+		sessionlog.Warnf("overlay: cannot create X11 overlay (%v) — running without visual overlay", err)
+		return app.NoopOverlay{}, "none"
+	}
+	return ov, "x11"
 }
 
 // pickCompositor returns the platform.Compositor matching the current

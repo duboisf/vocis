@@ -103,7 +103,7 @@ sequenceDiagram
 When `vocis serve` runs:
 
 1. [`cmd/vocis/serve.go`](/home/fred/git/vtt/cmd/vocis/serve.go) starts a session log and loads config.
-2. `serve.go` creates the X11 platform implementations (overlay, injector, hotkey registrar).
+2. `serve.go` creates the platform implementations (overlay, injector, hotkey registrar). The overlay is X11-only: if `x11.NewOverlay()` fails — a Wayland session with no XWayland server, or any other X connection error — `serve.go` logs a warning and substitutes `app.NoopOverlay`, so dictation still runs end to end without visual feedback. The chosen backend is logged as `overlay backend: x11` or `overlay backend: none`.
 3. `serve.go` injects them into [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) via `app.New(cfg, deps)`.
 4. `app.Run()` registers the hotkey (with fallback candidates) and enters the event loop.
 
