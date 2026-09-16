@@ -315,7 +315,9 @@ func fetchLemonadeModels(cfg config.Config) (tx []modelChoice, err error) {
 			Group:   lemonadeGroup(m.Downloaded, m.Recipe),
 			sortKey: lemonadeSortKey(m.Downloaded, m.Recipe, m.ID),
 		}
-		if labels["transcription"] {
+		// Lemonade labels Gemma audio models "audio"/"chat-transcription"
+		// and Whisper "audio"/"transcription"; "audio" covers both.
+		if labels["audio"] {
 			tx = append(tx, choice)
 		}
 	}

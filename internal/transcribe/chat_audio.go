@@ -797,8 +797,10 @@ type BatchSegment struct {
 // verbatim. When it's 0, we query Lemonade /api/v1/health for the
 // loaded model's recipe_options.ctx_size and compute a safe budget:
 //
-//   - Audio costs 6.25 tokens per second (Gemma 3n/4 USM encoder
-//     produces one token per 160ms frame — documented by Google).
+//   - Audio costs 25 tokens per second on Gemma 4 (Google's audio
+//     docs: "Each second of audio is 25 tokens for Gemma 4"). Gemma 3n
+//     was 6.25; using that figure here packed 4x too much audio per
+//     request.
 //   - Reserve 60% of context for non-audio overhead: system prompt
 //     (~200 tokens), per-segment labels (~10 tok each, and there can
 //     be 50+ on a multi-minute window of small VAD segments), and
@@ -811,7 +813,7 @@ type BatchSegment struct {
 // cap and is safe for any reasonable model.
 func (c *Client) resolveBatchBudget(ctx context.Context) (int, string) {
 	const (
-		audioTokensPerSec = 6.25
+		audioTokensPerSec = 25
 		audioFraction     = 0.40 // 40% of ctx for audio, 60% for prompt + labels + response
 		fallback          = 30
 		floor             = 10

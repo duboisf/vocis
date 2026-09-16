@@ -1,6 +1,7 @@
 package hotkey
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -109,8 +110,9 @@ func TestTrackedKeyRelease(t *testing.T) {
 func TestReleaseTimerDoesNotEmitWhileKeyHeld(t *testing.T) {
 	t.Parallel()
 
-	down := true
-	s := NewState("ctrl+shift+space", func() bool { return down })
+	var down atomic.Bool
+	down.Store(true)
+	s := NewState("ctrl+shift+space", down.Load)
 
 	s.HandlePress()
 	expectEvent(t, s.Down())
@@ -118,7 +120,7 @@ func TestReleaseTimerDoesNotEmitWhileKeyHeld(t *testing.T) {
 	s.HandleTrackedKeyRelease()
 	expectNoEvent(t, s.Up(), AutoRepeatDelay+80*time.Millisecond)
 
-	down = false
+	down.Store(false)
 	expectEventWithin(t, s.Up(), AutoRepeatDelay+120*time.Millisecond)
 }
 
