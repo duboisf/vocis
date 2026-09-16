@@ -292,12 +292,23 @@ func (s *chatAudioSession) run(
 			onConnected = nil
 		}
 	}
+	// send hands a chunk to the worker without blocking forever: once
+	// ctx is cancelled the worker has already exited and nobody drains
+	// chunksCh, so the pump must give up instead of leaking (and
+	// keeping the Silero session alive).
+	send := func(c chatChunk) {
+		select {
+		case s.chunksCh <- c:
+		case <-ctx.Done():
+			sessionlog.Debugf("chat-audio: dropping chunk reason=%s — session cancelled before the worker took it", c.reason)
+		}
+	}
 	flush := func(reason string, trailing bool) {
 		if len(buf) == 0 && len(pendingForceCuts) == 0 {
 			if trailing {
 				// No audio at all — still send the sentinel so
-				// the worker closes finals.
-				s.chunksCh <- chatChunk{reason: reason, trailing: true}
+				// the worker exits.
+				send(chatChunk{reason: reason, trailing: true})
 			}
 			return
 		}
@@ -317,7 +328,7 @@ func (s *chatAudioSession) run(
 		}
 		sessionlog.Debugf("chat-audio: flush chunk reason=%s clips=%d total_samples=%d (~%dms) trailing=%t vad_speech=%t",
 			reason, len(clips), totalSamples, totalSamples*1000/s.sampleRate, trailing, sawSpeech)
-		s.chunksCh <- chatChunk{clips: clips, reason: reason, trailing: trailing, speech: sawSpeech}
+		send(chatChunk{clips: clips, reason: reason, trailing: trailing, speech: sawSpeech})
 		sawSpeech = false
 	}
 	// flushAtCap slices off exactly chunkMaxSamples from buf and

@@ -497,9 +497,10 @@ func (a *App) forceStopAfter(ctx context.Context, state *recordingState, maxDura
 	}
 	a.recording = nil
 	a.finishing = state
+	body := state.displayText
 	a.mu.Unlock()
 
-	a.overlay.ShowFinishing(state.displayText, a.shortcut)
+	a.overlay.ShowFinishing(body, a.shortcut)
 	state.span.AddEvent("overlay.finishing",
 		trace.WithAttributes(attribute.Bool("auto_stop", true)),
 	)
@@ -789,7 +790,9 @@ func (a *App) handleDictationEvent(state *recordingState, event transcribe.Dicta
 		// Route to both — each setter short-circuits when its title isn't
 		// the active one, so exactly one update fires per call.
 		state.currentPartial = strings.TrimSpace(event.Text)
+		a.mu.Lock()
 		preview := renderPreview(state.displayText, state.currentPartial)
+		a.mu.Unlock()
 		a.overlay.SetListeningText(state.target.WindowClass, preview)
 		a.overlay.SetFinishingText(preview)
 
@@ -799,14 +802,19 @@ func (a *App) handleDictationEvent(state *recordingState, event transcribe.Dicta
 			return
 		}
 		// The canonical turn replaces whatever partial was being shown.
+		// displayText is also read by the hotkey goroutine when it
+		// switches the overlay to Finishing, hence the lock.
+		a.mu.Lock()
 		if state.displayText != "" {
 			state.displayText += "\n"
 		}
 		state.displayText += text
+		shown := state.displayText
+		a.mu.Unlock()
 		state.currentPartial = ""
-		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
-		a.overlay.SetFinishingText(state.displayText)
-		sessionlog.Infof("stream segment shown: %d chars total", len(state.displayText))
+		a.overlay.SetListeningText(state.target.WindowClass, shown)
+		a.overlay.SetFinishingText(shown)
+		sessionlog.Infof("stream segment shown: %d chars total", len(shown))
 	}
 }
 
