@@ -166,7 +166,10 @@ type TranscriptionConfig struct {
 	// to the model, and Gemma helpfully invents a long
 	// "I cannot transcribe..." response. With Silero installed, VAD
 	// already trims silence around utterances, so this gate rarely
-	// fires; it just provides defense in depth.
+	// fires; it just provides defense in depth. When Silero reported
+	// speech inside a chunk only the peak arm applies — a long pause
+	// followed by a short phrase would otherwise average below the RMS
+	// floor and lose the phrase.
 	//
 	// Defaults match recall's segment filters (0.02 / 0.005). Set
 	// either to 0 to disable that arm of the check.

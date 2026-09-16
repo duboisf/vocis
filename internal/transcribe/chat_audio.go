@@ -141,6 +141,11 @@ type chatChunk struct {
 	// path that emitted it.
 	reason   string
 	trailing bool
+	// speech is true when Silero reported speech inside this chunk's
+	// audio. The worker then skips the RMS arm of the energy gate: a
+	// clip that is mostly pause with a short quiet phrase at the end
+	// averages below min_chunk_rms even though it holds real words.
+	speech bool
 }
 
 // startChatAudioSession constructs and starts a chat-audio dictation
@@ -278,6 +283,9 @@ func (s *chatAudioSession) run(
 	// utterance audio in one round-trip and avoids per-chunk
 	// transcribe/respond cycles for long uninterrupted speech.
 	var pendingForceCuts [][]int16
+	// sawSpeech is set when Silero reports speech since the last flush.
+	// Rides along on the chunk so the worker's energy gate trusts VAD.
+	sawSpeech := false
 	fireConnected := func() {
 		if onConnected != nil {
 			onConnected()
@@ -307,9 +315,10 @@ func (s *chatAudioSession) run(
 		for _, c := range clips {
 			totalSamples += len(c)
 		}
-		sessionlog.Debugf("chat-audio: flush chunk reason=%s clips=%d total_samples=%d (~%dms) trailing=%t",
-			reason, len(clips), totalSamples, totalSamples*1000/s.sampleRate, trailing)
-		s.chunksCh <- chatChunk{clips: clips, reason: reason, trailing: trailing}
+		sessionlog.Debugf("chat-audio: flush chunk reason=%s clips=%d total_samples=%d (~%dms) trailing=%t vad_speech=%t",
+			reason, len(clips), totalSamples, totalSamples*1000/s.sampleRate, trailing, sawSpeech)
+		s.chunksCh <- chatChunk{clips: clips, reason: reason, trailing: trailing, speech: sawSpeech}
+		sawSpeech = false
 	}
 	// flushAtCap slices off exactly chunkMaxSamples from buf and
 	// appends it to pendingForceCuts. The cut clip waits for the next
@@ -345,7 +354,11 @@ func (s *chatAudioSession) run(
 			fireConnected()
 			buf = append(buf, chunk...)
 			if vad != nil {
-				if evt := vad.Feed(chunk); evt == VADSpeechStopped {
+				switch vad.Feed(chunk) {
+				case VADSpeechStarted:
+					sawSpeech = true
+				case VADSpeechStopped:
+					sawSpeech = true
 					vad.Reset()
 					flush("vad_stopped", false)
 					continue
@@ -392,13 +405,18 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			// the POST. Without VAD, a hold over silence would
 			// otherwise send the entire silent buffer to Gemma,
 			// which hallucinates a long "I cannot transcribe..."
-			// response. With VAD on, this is defense in depth.
+			// response. When VAD saw speech only the peak arm runs.
 			liveClips := chunk.clips[:0:0]
 			for _, c := range chunk.clips {
-				if peak, rms, ok := s.passEnergyGate(c); !ok {
-					sessionlog.Infof("chat-audio: dropped silent clip peak=%.4f rms=%.4f (min_peak=%.4f min_rms=%.4f)",
-						peak, rms, s.minChunkPeak, s.minChunkRMS)
+				peak, rms, ok := s.passEnergyGate(c, chunk.speech)
+				if !ok {
+					sessionlog.Infof("chat-audio: dropped silent clip peak=%.4f rms=%.4f (min_peak=%.4f min_rms=%.4f vad_speech=%t)",
+						peak, rms, s.minChunkPeak, s.minChunkRMS, chunk.speech)
 					continue
+				}
+				if chunk.speech && s.minChunkRMS > 0 && rms < s.minChunkRMS {
+					sessionlog.Infof("chat-audio: energy gate kept clip on VAD verdict — rms=%.4f is under min_rms=%.4f but Silero saw speech",
+						rms, s.minChunkRMS)
 				}
 				liveClips = append(liveClips, c)
 			}
@@ -780,11 +798,12 @@ func (s *chatAudioSession) finishPump(err error) {
 
 // passEnergyGate returns (peak, rms, ok) for the chunk. ok=false when
 // either threshold is configured (>0) and the chunk falls below it.
-// Both metrics are normalized to 0-1 by /32768. A chunk that's mostly
-// silence with a brief loud spike still passes if peak alone is high
-// enough; a chunk with sustained low-level noise (fan, room tone)
-// fails the RMS check while peak alone might falsely pass it.
-func (s *chatAudioSession) passEnergyGate(pcm []int16) (float64, float64, bool) {
+// Both metrics are normalized to 0-1 by /32768. A chunk with sustained
+// low-level noise (fan, room tone) fails the RMS check while peak alone
+// might falsely pass it. vadSpeech=true disables the RMS arm: Silero
+// already vouched for speech, and a long pause before a short phrase
+// drags the average below the threshold without the clip being silent.
+func (s *chatAudioSession) passEnergyGate(pcm []int16, vadSpeech bool) (float64, float64, bool) {
 	if s.minChunkPeak <= 0 && s.minChunkRMS <= 0 {
 		return 0, 0, true
 	}
@@ -811,7 +830,7 @@ func (s *chatAudioSession) passEnergyGate(pcm []int16) (float64, float64, bool) 
 	if s.minChunkPeak > 0 && peakNorm < s.minChunkPeak {
 		return peakNorm, rmsNorm, false
 	}
-	if s.minChunkRMS > 0 && rmsNorm < s.minChunkRMS {
+	if !vadSpeech && s.minChunkRMS > 0 && rmsNorm < s.minChunkRMS {
 		return peakNorm, rmsNorm, false
 	}
 	return peakNorm, rmsNorm, true

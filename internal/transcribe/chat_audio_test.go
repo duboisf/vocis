@@ -494,3 +494,29 @@ func TestChatAudioSessionDropsHallucination(t *testing.T) {
 		t.Fatalf("text=%q want empty (hallucination dropped)", res.Text)
 	}
 }
+
+// TestEnergyGateTrustsVADOverRMS reproduces the "pause, resume, release"
+// loss: after a VAD pause the buffer keeps filling with room silence
+// until the user speaks again, so the trailing clip is mostly silence
+// with a short quiet phrase at the end. Its RMS averages below
+// min_chunk_rms even though Silero saw speech, and the whole phrase was
+// dropped as "silent". When VAD vouched for speech the RMS arm must not
+// apply; the peak arm still catches true silence.
+func TestEnergyGateTrustsVADOverRMS(t *testing.T) {
+	t.Parallel()
+	s := &chatAudioSession{minChunkPeak: 0.02, minChunkRMS: 0.005}
+	const rate = 16000
+	clip := make([]int16, 10*rate)
+	for i := 0; i < rate/5; i++ { // 200 ms of quiet speech at the tail
+		clip[len(clip)-1-i] = 983 // 0.03 of full scale
+	}
+	if _, _, ok := s.passEnergyGate(clip, false); ok {
+		t.Fatal("without VAD the diluted clip must fail the RMS arm")
+	}
+	if _, _, ok := s.passEnergyGate(clip, true); !ok {
+		t.Fatal("with VAD speech the diluted clip must pass")
+	}
+	if _, _, ok := s.passEnergyGate(make([]int16, rate), true); ok {
+		t.Fatal("pure silence must still fail on peak even when VAD vouched")
+	}
+}
