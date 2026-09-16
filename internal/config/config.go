@@ -22,7 +22,7 @@ const DefaultPromptHint = "Transcribe naturally for a programmer. " +
 	"Clean up hesitations into fluent sentences while preserving the speaker's intent and meaning. " +
 	"Prefer technical terminology for software, CLI, cloud, and API concepts. " +
 	"Preserve obvious technical terms, acronyms, and capitalization when the audio supports them. " +
-	"Vocabulary the speaker uses often: pull request (never \"poll request\"), PR, repo, commit, branch, worktree, " +
+	"Vocabulary the speaker uses often: pull request (never \"poll request\"), PR, repo, commit, branch, worktree, backend, frontend (one word each), " +
 	"CLI, API, JSON, YAML, regex, Go, Python, TypeScript, Kubernetes, kubectl, Docker, GitHub, Lemonade, Gemma, Silero, kitty, vocis, NPU, Wayland, X11."
 
 // DefaultChatAudioPrompt is the transcription instruction validated

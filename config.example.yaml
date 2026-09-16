@@ -19,7 +19,8 @@ transcription:
     terminology for software, CLI, cloud, and API concepts. Preserve obvious
     technical terms, acronyms, and capitalization when the audio supports
     them. Vocabulary the speaker uses often: pull request (never "poll
-    request"), PR, repo, commit, branch, worktree, CLI, API, JSON, YAML,
+    request"), PR, repo, commit, branch, worktree, backend, frontend (one
+    word each), CLI, API, JSON, YAML,
     regex, Go, Python, TypeScript, Kubernetes, kubectl, Docker, GitHub,
     Lemonade, Gemma, Silero, kitty, vocis, NPU, Wayland, X11.
   # Drop finals whose trimmed text exactly matches one of these
