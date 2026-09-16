@@ -69,3 +69,25 @@ func TestLevelMeterDropsToZeroWhenStale(t *testing.T) {
 		t.Fatalf("stale level = %f, want 0", got)
 	}
 }
+
+// TestLevelMeterIsLogarithmic: quiet-but-normal speech peaks around
+// 0.05 of full scale. On a linear meter that is 5% bar height, which
+// reads as "mic not moving". The meter maps dB instead: -40 dB is the
+// floor, 0 dB is full, so 0.05 (-26 dB) lands near a third.
+func TestLevelMeterIsLogarithmic(t *testing.T) {
+	m := &levelMeter{}
+	m.Update([]int16{1638}) // 0.05 of full scale, about -26 dB
+	if got := m.Level(); got < 0.3 || got > 0.4 {
+		t.Fatalf("Level() for 0.05 peak = %.3f, want about 0.35", got)
+	}
+	m = &levelMeter{}
+	m.Update([]int16{0})
+	if got := m.Level(); got != 0 {
+		t.Fatalf("Level() for silence = %.3f, want 0", got)
+	}
+	m = &levelMeter{}
+	m.Update([]int16{32767})
+	if got := m.Level(); got < 0.99 {
+		t.Fatalf("Level() for full scale = %.3f, want 1", got)
+	}
+}

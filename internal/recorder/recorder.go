@@ -391,8 +391,12 @@ func (m *levelMeter) Level() float64 {
 		return 0
 	}
 
-	level := m.level * (1 - float64(age)/(220*float64(time.Millisecond)))
-	if level < 0 {
+	// Bars track loudness, not raw amplitude: map the peak to dB with
+	// -40 dB as the floor and 0 dB as full scale, so normal speech at
+	// 0.05 (-26 dB) reads as about a third of the meter instead of 5%.
+	level := 1 + math.Log10(m.level)/2
+	level *= 1 - float64(age)/(220*float64(time.Millisecond))
+	if level < 0 || math.IsNaN(level) || math.IsInf(level, 0) {
 		return 0
 	}
 	if level > 1 {

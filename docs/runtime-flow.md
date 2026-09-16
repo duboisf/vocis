@@ -167,6 +167,10 @@ Client-side Silero VAD decides clip boundaries. While the hotkey is held:
 
 Nothing is typed into the target window during recording. This avoids corrupting the X11 keymap state with `xdotool keyup` while the user is still holding the hotkey.
 
+## Level Meter
+
+The Listening bars follow the mic peak on a dB scale: -40 dB is the floor, 0 dB is full height, with a 220 ms decay. Raw amplitude would leave normal speech (around 0.05 of full scale) at 5% height and look dead.
+
 ## Overlay Animations
 
 The overlay uses several animation modes:
