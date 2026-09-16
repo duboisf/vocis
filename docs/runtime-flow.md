@@ -86,7 +86,7 @@ When `vocis serve` runs:
 
 **Refreshed on every hotkey press (no restart needed):**
 
-- `transcription.*` — base_url, model, prompt, prompt_hint, language, hallucination_filters, min_chunk_peak, min_chunk_rms, ctx_size, silero.onnxruntime_library. The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
+- `transcription.*` — base_url, model, prompt, prompt_hint, language, hallucination_filters, min_chunk_peak, min_chunk_rms, ctx_size, history_file, silero.onnxruntime_library. The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
 - `recording.device`.
 - `log_window_title`.
 

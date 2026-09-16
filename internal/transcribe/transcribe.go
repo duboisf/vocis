@@ -51,9 +51,11 @@ type DictationEvent struct {
 	Text string
 }
 
-// FinalizeResult carries the whole transcript of the session.
+// FinalizeResult carries the whole transcript of the session and, when
+// audio capture is on, the path of the WAV the model heard.
 type FinalizeResult struct {
-	Text string
+	Text      string
+	AudioPath string
 }
 
 // Dictation is the surface the app and recall packages consume.

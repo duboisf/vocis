@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -575,6 +576,21 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 
 	if err := a.deliverTranscript(spanCtx, state, text); err != nil {
 		dictationErr = err
+		return
+	}
+	if path := a.cfg.Transcription.HistoryFile; path != "" {
+		err := appendTranscriptHistory(path, historyEntry{
+			Time:        time.Now(),
+			Text:        text,
+			Audio:       result.AudioPath,
+			AudioMS:     int(state.session.Duration() / time.Millisecond),
+			WindowClass: state.target.WindowClass,
+		})
+		if err != nil {
+			sessionlog.Warnf("transcript history: %v", err)
+		} else {
+			sessionlog.Infof("transcript history: appended %d chars to %s", len(text), os.ExpandEnv(path))
+		}
 	}
 }
 

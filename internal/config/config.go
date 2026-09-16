@@ -201,6 +201,12 @@ type TranscriptionConfig struct {
 	// transcription because it captures the transcription POST
 	// stream specifically (it isn't a global recording feature).
 	AudioCapture AudioCaptureConfig `yaml:"audio_capture"`
+	// HistoryFile is a JSONL file that gets one line per delivered
+	// dictation: timestamp, pasted text, target window class, audio
+	// duration and the path of the captured WAV. It is the record to
+	// audit transcription quality against. $VAR expands. Empty
+	// disables the history.
+	HistoryFile string `yaml:"history_file"`
 }
 
 // SileroConfig is just the onnxruntime library path now. The
@@ -298,6 +304,7 @@ func Default() Config {
 				TTLSeconds:        3600,
 				GCIntervalSeconds: 600,
 			},
+			HistoryFile: "$HOME/.local/state/vocis/transcripts.jsonl",
 		},
 		Recording: RecordingConfig{
 			Device: "default",

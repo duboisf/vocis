@@ -219,8 +219,9 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 
 	// Mirror the WAV to disk BEFORE the POST so a failed/cancelled
 	// request still leaves replayable audio on disk.
+	var audioPath string
 	if s.audioCapture != nil {
-		s.audioCapture.WriteChunk("release", encodePCM16WAV(concatClips(clips), s.sampleRate))
+		audioPath = s.audioCapture.WriteChunk("release", encodePCM16WAV(concatClips(clips), s.sampleRate))
 	}
 
 	text, err := s.transcribeChunk(ctx, clips)
@@ -235,7 +236,7 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 		sessionlog.Infof("chat-audio: dropped hallucinated transcript: %q", text)
 		text = ""
 	}
-	return FinalizeResult{Text: text}, nil
+	return FinalizeResult{Text: text, AudioPath: audioPath}, nil
 }
 
 // run is the audio pump. It reads samples, feeds Silero, and cuts the

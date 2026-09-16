@@ -41,6 +41,17 @@ If an event is filtered from the existing trace machinery (e.g. the audio payloa
 - `audio capture: gc deleted N files older than …` (INFO) / `gc swept dir=… (0 stale)` (DEBUG) — periodic prune of the audio dir.
 - `kitty verify-paste id=N screen.len=…` (DEBUG) and `kitty verify-paste id=N: payload head … NOT visible …` (WARN) — post-send `kitty @ get-text --extent screen` probe. The WARN means `send-text` returned 0 but the program in the window appears to have swallowed the bytes (alt-screen TUI in an odd input mode, claude mid-stream, shell with bracketed-paste off). Disable with `insertion.kitty_verify_paste: false`.
 
+## Transcript history
+
+Every delivered dictation appends one JSON line to
+`transcription.history_file` (default
+`~/.local/state/vocis/transcripts.jsonl`): `time`, `text`,
+`window_class`, `audio_ms` and `audio` (the captured WAV path while it
+still exists, see below). This is the record to audit transcription
+quality against; pair a line's `audio` with its `text` and replay the
+WAV through `/chat/completions` to compare. `INFO  transcript history:
+appended N chars` confirms the write.
+
 ## Audio capture (chunk replay)
 
 Every chunk POSTed to `/chat/completions` is mirrored to

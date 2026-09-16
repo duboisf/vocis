@@ -14,6 +14,7 @@ At a high level:
 - Silero VAD cuts the speech into clips at pauses while you talk; nothing is sent yet
 - on release, every clip goes to Lemonade in one `/chat/completions` request and the reply streams into the overlay
 - the transcript is inserted back into the previously focused app as a single paste
+- each delivered transcript is appended to `~/.local/state/vocis/transcripts.jsonl` alongside the path of the captured audio
 - if submit mode was toggled on during recording, Enter is pressed after paste
 
 Important constraints:
