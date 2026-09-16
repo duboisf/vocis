@@ -195,17 +195,10 @@ func startChatAudioSession(
 	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds prompt_hint_chars=%d",
 		s.model, defaultChunkMaxSeconds, len(strings.TrimSpace(s.promptHint)))
 
-	// "Connection ready" is synthetic for the chat-audio backend — there
-	// is no upfront handshake to await. The run goroutine fires
-	// OnConnected on the first audio chunk it sees, which guarantees
-	// app.go has finished initialization (ShowListening transitions the
-	// overlay to the Listening state). A synchronous call here would
-	// no-op because SetConnected short-circuits when the overlay isn't
-	// yet Listening; a goroutine without a sync point would race
-	// ShowListening. OnConnecting is skipped entirely — there's no real
-	// connecting phase to surface, and the default Listening subtitle
-	// shows "Connecting" until OnConnected swaps it.
-	go s.run(pumpCtx, opts.Samples, cfg.Silero, opts.Callbacks)
+	// OnConnected fires from the pump on the first audio chunk rather
+	// than here: by then app.go has reached the Listening state, so the
+	// overlay's SetConnected does not short-circuit.
+	go s.run(pumpCtx, opts.Samples, cfg.Silero, opts.OnConnected)
 	go s.worker(pumpCtx)
 	return s, nil
 }
@@ -258,7 +251,7 @@ func (s *chatAudioSession) run(
 	ctx context.Context,
 	samples <-chan []int16,
 	silero config.SileroConfig,
-	callbacks ConnectCallbacks,
+	onConnected func(),
 ) {
 	var vad *SileroVAD
 	if err := initSilero(silero.OnnxruntimeLibrary); err != nil {
@@ -285,14 +278,10 @@ func (s *chatAudioSession) run(
 	// utterance audio in one round-trip and avoids per-chunk
 	// transcribe/respond cycles for long uninterrupted speech.
 	var pendingForceCuts [][]int16
-	connectedFired := false
 	fireConnected := func() {
-		if connectedFired {
-			return
-		}
-		connectedFired = true
-		if callbacks.OnConnected != nil {
-			callbacks.OnConnected()
+		if onConnected != nil {
+			onConnected()
+			onConnected = nil
 		}
 	}
 	flush := func(reason string, trailing bool) {

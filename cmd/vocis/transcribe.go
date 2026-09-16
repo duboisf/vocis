@@ -18,7 +18,7 @@ var transcribeCmd = &cobra.Command{
 	Use:   "transcribe",
 	Short: "One-shot dictation: speak, press Enter to finish, transcript prints to stdout",
 	Long: `Records from the default microphone and streams to the configured Lemonade
-backend (realtime WS or chat-audio) without the overlay, hotkey, or paste
+backend without the overlay, hotkey, or paste
 injection — useful for iterating on transcription quality / latency from the
 command line.
 
@@ -63,10 +63,8 @@ func runTranscribe() error {
 		SampleRate: recSession.SampleRate(),
 		Channels:   recSession.Channels(),
 		Samples:    recSession.Samples(),
-		Callbacks: transcribe.ConnectCallbacks{
-			OnConnected: func() {
-				sessionlog.Infof("realtime: connected")
-			},
+		OnConnected: func() {
+			sessionlog.Infof("chat-audio: first audio chunk reached the session")
 		},
 	})
 	if err != nil {

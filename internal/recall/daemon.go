@@ -538,8 +538,7 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64) (string, error
 	}
 	span.SetAttributes(attribute.Bool("cache_hit", false))
 
-	text, runErr := d.runDictation(spanCtx, 60*time.Second, seg.PCM, seg.SampleRate,
-		int(seg.Duration/time.Millisecond), "vocis.recall.transcribe")
+	text, runErr := d.runDictation(spanCtx, 60*time.Second, seg.PCM, seg.SampleRate, "vocis.recall.transcribe")
 	if runErr != nil {
 		err = runErr
 		return "", err

@@ -66,24 +66,16 @@ type Dictation interface {
 	Finalize(ctx context.Context) (FinalizeResult, error)
 }
 
-// ConnectCallbacks receives notifications about connection status.
-// OnConnected fires once, on the first audio chunk the session sees.
-type ConnectCallbacks struct {
-	OnConnected func()
-}
-
-// DictationOpts groups every parameter StartDictation needs. Pass-by-struct
-// keeps call sites readable when the parameter list grows beyond ~3 args.
+// DictationOpts groups every parameter StartDictation needs.
 type DictationOpts struct {
 	SampleRate int
 	Channels   int
 	Samples    <-chan []int16
-	Callbacks  ConnectCallbacks
-	// ExpectedAudioMS is the total audio duration (in ms) the caller
-	// intends to feed through the session, when known upfront. Currently
-	// informational — reserved for future per-call timeout scaling.
-	// 0 = unknown.
-	ExpectedAudioMS int
+	// OnConnected, when non-nil, fires once on the first audio chunk
+	// the session sees. There is no handshake to await; this is the
+	// sync point that lets the overlay flip from "Connecting" to
+	// "Ready" after the caller finished its own setup.
+	OnConnected func()
 }
 
 // StartDictation begins a chat-audio dictation session. The backend is

@@ -46,7 +46,6 @@ func (d *Daemon) runDictation(
 	timeout time.Duration,
 	pcm []int16,
 	sampleRate int,
-	totalMS int,
 	spanPrefix string,
 ) (string, error) {
 	var dictCtx context.Context
@@ -63,33 +62,18 @@ func (d *Daemon) runDictation(
 		SampleRate: sampleRate,
 		Channels:   recorder.Channels,
 		Samples:    samples,
-		// Let waitForCompletion scale its post-commit budget to the
-		// audio we're about to feed — otherwise the 15 s wait_final
-		// floor fires before a local model has time to transcribe
-		// anything meaningful on a multi-minute batch.
-		ExpectedAudioMS: totalMS,
 	})
 	if err != nil {
 		return "", fmt.Errorf("start dictation: %w", err)
 	}
 
-	// Drain events so the dictation pump doesn't stall on a full
-	// channel. DictationSession doesn't close its events channel on
-	// Finalize — a naive `for range session.Events()` would block
-	// forever, leaking one goroutine per pick. Bind to dictCtx so the
-	// drain exits as soon as the transcribe call returns.
+	// Drain display events so the worker never blocks on a full
+	// channel. Events() closes when the worker exits, which happens on
+	// the trailing chunk or on dictCtx cancellation.
 	drainDone := make(chan struct{})
 	go func() {
 		defer close(drainDone)
-		for {
-			select {
-			case <-dictCtx.Done():
-				return
-			case _, ok := <-session.Events():
-				if !ok {
-					return
-				}
-			}
+		for range session.Events() {
 		}
 	}()
 
@@ -137,10 +121,6 @@ func (d *Daemon) runDictation(
 
 	text := result.Text
 
-	// Wait for the drain to exit so a tight pick loop doesn't leave
-	// stragglers behind. Cancel explicitly first — session.Events()
-	// doesn't close on Finalize, so the drain is blocked on
-	// dictCtx.Done() and we'd deadlock if we just waited.
 	cancel()
 	<-drainDone
 

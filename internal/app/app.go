@@ -404,11 +404,9 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		SampleRate: recorder.SampleRate,
 		Channels:   recorder.Channels,
 		Samples:    wrappedSamples,
-		Callbacks: transcribe.ConnectCallbacks{
-			OnConnected: func() {
-				a.overlay.SetConnected(target.WindowClass)
-				recordingSpan.AddEvent("overlay.connected")
-			},
+		OnConnected: func() {
+			a.overlay.SetConnected(target.WindowClass)
+			recordingSpan.AddEvent("overlay.connected")
 		},
 	})
 	if err != nil {
@@ -534,7 +532,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 			sessionlog.Infof("discarding short recording duration=%s",
 				state.session.Duration().Round(10*time.Millisecond))
 			state.cancel()
-			a.hideCompletionOverlay()
+			a.overlay.Hide()
 			return
 		}
 		dictationErr = err
@@ -729,15 +727,9 @@ func userFacingError(err error) error {
 		return errors.New("Timed out waiting for transcription")
 	case strings.Contains(msg, "i/o timeout"):
 		return errors.New("Could not connect to Lemonade (network timeout)")
-	case strings.Contains(msg, "stream was not established"):
-		return errors.New("Could not connect to Lemonade")
 	default:
 		return err
 	}
-}
-
-func (a *App) hideCompletionOverlay() {
-	a.overlay.Hide()
 }
 
 func (a *App) dismissed(state *recordingState) bool {
