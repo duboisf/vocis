@@ -14,165 +14,27 @@ func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {
 	t.Parallel()
 
 	fakeOverlay := &overlayStub{}
-	app := &App{
-		cfg:     config.Config{},
-		overlay: fakeOverlay,
-	}
-	state := &recordingState{
-		target: platform.Target{WindowClass: "Gedit"},
-	}
+	app := &App{cfg: config.Config{}, overlay: fakeOverlay}
+	state := &recordingState{target: platform.Target{WindowClass: "Gedit"}}
 
 	app.handleDictationEvent(state, transcribe.DictationEvent{
 		Type: transcribe.DictationEventPartial,
-		Text: "hello world",
+		Text: "hello world ",
 	})
-
 	if fakeOverlay.windowClass != "Gedit" {
 		t.Fatalf("windowClass = %q, want Gedit", fakeOverlay.windowClass)
 	}
 	if fakeOverlay.listeningText != "hello world" {
 		t.Fatalf("listeningText = %q, want hello world", fakeOverlay.listeningText)
 	}
-}
 
-// TestPartialAppendsBelowAccumulatedSegments locks down live-subtitle
-// behavior: the in-flight partial renders on its own line below the
-// committed segments. When the matching `completed` event arrives, the
-// canonical text replaces the partial in place (covered separately).
-func TestPartialAppendsBelowAccumulatedSegments(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{
-		cfg:     config.Config{},
-		overlay: fakeOverlay,
-	}
-	state := &recordingState{
-		target:      platform.Target{WindowClass: "Gedit"},
-		displayText: "Hello world.",
-	}
-
+	// A later partial replaces the previous one in place.
 	app.handleDictationEvent(state, transcribe.DictationEvent{
 		Type: transcribe.DictationEventPartial,
-		Text: "this is more",
+		Text: "hello world again",
 	})
-
-	if fakeOverlay.listeningText != "Hello world.\nthis is more" {
-		t.Fatalf("listeningText = %q, want committed + newline + partial", fakeOverlay.listeningText)
-	}
-	if state.currentPartial != "this is more" {
-		t.Fatalf("currentPartial = %q, want %q", state.currentPartial, "this is more")
-	}
-}
-
-// TestPartialReplacesPreviousPartial confirms the in-place update
-// behavior — newer partial overwrites the previous one rather than
-// appending.
-func TestPartialReplacesPreviousPartial(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{
-		cfg:     config.Config{},
-		overlay: fakeOverlay,
-	}
-	state := &recordingState{
-		target:         platform.Target{WindowClass: "Gedit"},
-		displayText:    "Hello world.",
-		currentPartial: "this is",
-	}
-
-	app.handleDictationEvent(state, transcribe.DictationEvent{
-		Type: transcribe.DictationEventPartial,
-		Text: "this is more text",
-	})
-
-	if fakeOverlay.listeningText != "Hello world.\nthis is more text" {
-		t.Fatalf("listeningText = %q, want previous partial replaced", fakeOverlay.listeningText)
-	}
-}
-
-// TestSegmentClearsPartial confirms that when a turn completes, the
-// canonical segment text replaces the in-flight partial (no double
-// rendering of "this is more text" + "this is more text, you know").
-func TestSegmentClearsPartial(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{
-		cfg:     config.Config{},
-		overlay: fakeOverlay,
-	}
-	state := &recordingState{
-		target:         platform.Target{WindowClass: "Gedit"},
-		displayText:    "Hello world.",
-		currentPartial: "this is mo",
-	}
-
-	app.handleDictationEvent(state, transcribe.DictationEvent{
-		Type: transcribe.DictationEventSegment,
-		Text: "this is more text, finalized.",
-	})
-
-	if state.currentPartial != "" {
-		t.Fatalf("currentPartial = %q, want cleared after segment", state.currentPartial)
-	}
-	want := "Hello world.\nthis is more text, finalized."
-	if fakeOverlay.listeningText != want {
-		t.Fatalf("listeningText = %q, want %q", fakeOverlay.listeningText, want)
-	}
-}
-
-func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{
-		cfg:     config.Config{},
-		overlay: fakeOverlay,
-	}
-	state := &recordingState{
-		target:      platform.Target{WindowClass: "Gedit"},
-		displayText: "Hello world.",
-	}
-
-	// Set initial text so we can detect if it gets cleared.
-	fakeOverlay.listeningText = "Hello world."
-
-	app.handleDictationEvent(state, transcribe.DictationEvent{
-		Type: transcribe.DictationEventPartial,
-		Text: "",
-	})
-
-	if fakeOverlay.listeningText != "Hello world." {
-		t.Fatalf("listeningText = %q, want unchanged display text", fakeOverlay.listeningText)
-	}
-}
-
-func TestHandleDictationEventAccumulatesSegments(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{
-		cfg: config.Config{
-			HotkeyMode: "hold",
-		},
-		overlay: fakeOverlay,
-	}
-	state := &recordingState{
-		target: platform.Target{WindowID: "42", WindowClass: "Gedit"},
-	}
-	app.recording = state
-
-	for _, seg := range []string{"segment one", " segment two"} {
-		app.handleDictationEvent(state, transcribe.DictationEvent{
-			Type: transcribe.DictationEventSegment,
-			Text: seg,
-		})
-	}
-
-	if fakeOverlay.listeningText != "segment one\nsegment two" {
-		t.Fatalf("listeningText = %q, want newline-separated display", fakeOverlay.listeningText)
+	if fakeOverlay.listeningText != "hello world again" {
+		t.Fatalf("listeningText = %q, want replaced partial", fakeOverlay.listeningText)
 	}
 }
 

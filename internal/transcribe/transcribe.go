@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"vocis/internal/config"
@@ -42,8 +41,9 @@ func New(cfg config.TranscriptionConfig) *Client {
 type DictationEventType string
 
 const (
+	// DictationEventPartial carries the cumulative SSE text of the
+	// in-flight response, for live display only.
 	DictationEventPartial DictationEventType = "partial"
-	DictationEventSegment DictationEventType = "segment"
 )
 
 type DictationEvent struct {
@@ -51,16 +51,14 @@ type DictationEvent struct {
 	Text string
 }
 
-// FinalizeResult carries the whole transcript of the session: every
-// segment emitted live plus the trailing chunk flushed at release.
+// FinalizeResult carries the whole transcript of the session.
 type FinalizeResult struct {
 	Text string
 }
 
 // Dictation is the surface the app and recall packages consume.
-// Events() streams partials and segments for live display and closes
-// when the session is done; Finalize() blocks until every chunk has
-// been transcribed and returns the full text.
+// Events() streams partials for live display and closes when Finalize
+// returns; Finalize() sends the whole dictation and returns the text.
 type Dictation interface {
 	Events() <-chan DictationEvent
 	Finalize(ctx context.Context) (FinalizeResult, error)
@@ -111,57 +109,6 @@ func buildHallucinationSet(filters []string) map[string]bool {
 		set[key] = true
 	}
 	return set
-}
-
-// ---------------------------------------------------------------------------
-// Segment formatting / text utilities
-// ---------------------------------------------------------------------------
-
-// formatSegmentText increments the segment counter and adds a leading
-// space when the new segment needs separation from the running text.
-// Atomic.Add returns the new count, so first-segment is `n == 1`.
-func formatSegmentText(count *atomic.Int32, text string) string {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return ""
-	}
-	if count.Add(1) == 1 {
-		return text
-	}
-	if strings.HasPrefix(text, " ") || strings.HasPrefix(text, "\n") {
-		return text
-	}
-	if startsWithPunctuation(text) {
-		return text
-	}
-	return " " + text
-}
-
-func appendSegmentText(current, next string) string {
-	switch {
-	case strings.TrimSpace(next) == "":
-		return current
-	case current == "":
-		return next
-	case strings.HasPrefix(next, " ") || strings.HasPrefix(next, "\n"):
-		return current + next
-	case startsWithPunctuation(next):
-		return current + next
-	default:
-		return current + " " + next
-	}
-}
-
-func startsWithPunctuation(text string) bool {
-	if text == "" {
-		return false
-	}
-	switch []rune(text)[0] {
-	case '.', ',', ';', ':', '!', '?', ')', ']', '}':
-		return true
-	default:
-		return false
-	}
 }
 
 // ---------------------------------------------------------------------------

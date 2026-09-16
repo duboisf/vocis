@@ -17,19 +17,19 @@ import (
 // model is on disk, not that it will respond to requests without a
 // 5–10 s load stall.
 type LemonadeHealth struct {
-	Version   string                  `json:"version"`
-	Status    string                  `json:"status"`
-	WSPort    int                     `json:"websocket_port"`
-	MaxModels map[string]int          `json:"max_models"`
-	Loaded    []LemonadeLoadedModel   `json:"all_models_loaded"`
+	Version   string                `json:"version"`
+	Status    string                `json:"status"`
+	WSPort    int                   `json:"websocket_port"`
+	MaxModels map[string]int        `json:"max_models"`
+	Loaded    []LemonadeLoadedModel `json:"all_models_loaded"`
 }
 
 type LemonadeLoadedModel struct {
-	Name       string                       `json:"model_name"`
-	Type       string                       `json:"type"` // audio | llm | tts | embedding | ...
-	Device     string                       `json:"device"`
-	Recipe     string                       `json:"recipe"`
-	Checkpoint string                       `json:"checkpoint"`
+	Name       string `json:"model_name"`
+	Type       string `json:"type"` // audio | llm | tts | embedding | ...
+	Device     string `json:"device"`
+	Recipe     string `json:"recipe"`
+	Checkpoint string `json:"checkpoint"`
 	// RecipeOptions surfaces runtime knobs the recipe was loaded with.
 	// CtxSize is the only field vocis currently reads — it's the actual
 	// prompt-token budget the model will accept, which can be MUCH

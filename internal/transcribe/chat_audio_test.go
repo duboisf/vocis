@@ -394,8 +394,8 @@ func TestChatAudioSessionWritesAudioCaptureWAV(t *testing.T) {
 		t.Fatalf("audio dir entries=%d want 1; got %v", len(entries), names)
 	}
 	name := entries[0].Name()
-	if !strings.Contains(name, "samples_closed") || !strings.Contains(name, "trailing") {
-		t.Errorf("filename %q should encode samples_closed-trailing reason", name)
+	if !strings.Contains(name, "release") {
+		t.Errorf("filename %q should encode the release reason", name)
 	}
 	if !strings.HasSuffix(name, ".wav") {
 		t.Errorf("filename %q should end in .wav", name)

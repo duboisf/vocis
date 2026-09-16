@@ -13,7 +13,6 @@ import (
 	"math"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -61,21 +60,16 @@ const DefaultBatchPrompt = "Transcribe each of the following speech segments in 
 	"Never output preamble, commentary, bullet points, or anything beyond the requested lines."
 
 // chatAudioSession is the lemonade-chat backend's implementation of the
-// dictation surface. Unlike the realtime-WebSocket transports, this
-// backend is request/response: each VAD-detected utterance becomes one
-// /chat/completions POST with the audio embedded as an `input_audio`
-// content part. Each chunk is transcribed exactly once and in
-// isolation: no prior audio or transcript is re-sent.
+// dictation surface. The whole dictation becomes ONE /chat/completions
+// POST at release: the audio pump runs Silero VAD while the hotkey is
+// held and cuts the speech into clips at pauses (and at the 28 s
+// per-clip cap), Finalize gates out silent clips and sends every clip
+// as its own input_audio part in a single request. The model sees the
+// full dictation in one go, so punctuation and casing across pauses
+// come from context, and nothing is ever transcribed twice.
 //
-// The pump and HTTP worker are split:
-//   - pump goroutine reads samples and runs Silero VAD; speech_stopped
-//     transitions and chunk_max_seconds boundaries close a chunk and
-//     hand it to the worker.
-//   - worker goroutine drains chunks from chunksCh, posts them
-//     serially (so segments land in spoken order), appends each
-//     transcript to the session text, and emits it as a DictationEvent
-//     for live display. Finalize returns the accumulated text once
-//     the worker has drained every chunk.
+// Nothing goes on the wire while the user is speaking; SSE partials
+// stream during the Finishing phase.
 type chatAudioSession struct {
 	httpClient *http.Client
 	endpoint   string
@@ -98,54 +92,25 @@ type chatAudioSession struct {
 
 	hallucinationFilters map[string]bool
 
-	// audioCapture mirrors each POSTed chunk WAV to disk for replay.
+	// audioCapture mirrors the POSTed WAV to disk for replay.
 	// Owned by the session; opened from cfg.AudioCapture at startup.
 	// A nil-pointer call is a safe no-op when the feature is disabled.
 	audioCapture *audiocapture.Writer
 
 	events   chan DictationEvent
-	pumpDone chan error
-	chunksCh chan chatChunk
+	pumpDone chan pumpResult
 	cancel   context.CancelFunc
-
-	segmentCount atomic.Int32
-
-	// text and err are owned by the worker goroutine. They are read by
-	// Finalize only after workerDone has closed, so no lock is needed.
-	text string
-	err  error
-
-	// workerDone closes once the worker exits, so Finalize can wait
-	// for in-flight HTTP work to drain before returning.
-	workerDone chan struct{}
 }
 
-// chatChunk is one VAD-bounded audio segment headed for the worker.
-// trailing=true marks the last chunk produced after the samples
-// channel closed — the worker exits after handling it.
-//
-// Most chunks are single-clip (clips has one entry) — VAD-stopped
-// utterances or short holds. When the user holds the hotkey through
-// a long monologue and chunk_max_seconds force-cuts fire, the cut
-// audio accumulates without going on the wire. The next natural
-// flush (VAD-stopped pause or hotkey release) emits a multi-clip
-// chunk that carries every accumulated force-cut as its own audio
-// part. Lemonade's gemma-audio handles multiple input_audio parts
-// in one user message per Google's docs, so the model sees the full
-// utterance context in one round-trip.
-type chatChunk struct {
-	clips [][]int16
-	// reason is the flush trigger that produced this chunk (e.g.
-	// vad_stopped, samples_closed, force_cut_batch). Propagated to the
-	// audio-capture filename so a replayed WAV identifies the source
-	// path that emitted it.
-	reason   string
-	trailing bool
-	// speech is true when Silero reported speech inside this chunk's
-	// audio. The worker then skips the RMS arm of the energy gate: a
-	// clip that is mostly pause with a short quiet phrase at the end
-	// averages below min_chunk_rms even though it holds real words.
+// pumpResult is what the audio pump hands to Finalize once the samples
+// channel closes: every clip cut during the hold, in spoken order, plus
+// whether Silero reported speech at any point. speech lets the energy
+// gate skip its RMS arm — a clip that is mostly pause with a short
+// quiet phrase averages below min_chunk_rms even though it holds words.
+type pumpResult struct {
+	clips  [][]int16
 	speech bool
+	err    error
 }
 
 // startChatAudioSession constructs and starts a chat-audio dictation
@@ -192,66 +157,90 @@ func startChatAudioSession(
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		audioCapture:         writer,
 		events:               make(chan DictationEvent, 16),
-		pumpDone:             make(chan error, 1),
-		chunksCh:             make(chan chatChunk, 4),
+		pumpDone:             make(chan pumpResult, 1),
 		cancel:               cancel,
-		workerDone:           make(chan struct{}),
 	}
-	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds prompt_hint_chars=%d",
+
+	sessionlog.Infof("chat-audio: session started model=%q clip_max=%ds prompt_hint_chars=%d (one POST at release)",
 		s.model, defaultChunkMaxSeconds, len(strings.TrimSpace(s.promptHint)))
 
 	// OnConnected fires from the pump on the first audio chunk rather
 	// than here: by then app.go has reached the Listening state, so the
 	// overlay's SetConnected does not short-circuit.
 	go s.run(pumpCtx, opts.Samples, cfg.Silero, opts.OnConnected)
-	go s.worker(pumpCtx)
 	return s, nil
 }
 
 func (s *chatAudioSession) Events() <-chan DictationEvent { return s.events }
 
-// Finalize waits for the audio pump to drain, then for the HTTP worker
-// to finish every queued chunk (including the trailing one flushed at
-// hotkey release), and returns the whole transcript. A chunk failure
-// is only fatal when no text at all was produced; otherwise it is
-// logged and the surviving segments are returned.
+// Finalize waits for the audio pump to drain, drops silent clips, and
+// sends every remaining clip in one /chat/completions POST. Returns
+// the transcript. Events() closes when Finalize returns.
 func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error) {
+	defer close(s.events)
+	defer s.cancel()
+
+	var res pumpResult
 	select {
-	case pumpErr := <-s.pumpDone:
-		if pumpErr != nil {
-			s.cancel()
-			return FinalizeResult{}, pumpErr
-		}
+	case res = <-s.pumpDone:
 	case <-ctx.Done():
-		s.cancel()
 		return FinalizeResult{}, ctx.Err()
+	}
+	if res.err != nil {
+		return FinalizeResult{}, res.err
 	}
 
-	_, span := telemetry.StartSpan(ctx, "vocis.transcribe.chat_audio.collect_trailing")
-	defer telemetry.EndSpan(span, nil)
-	select {
-	case <-s.workerDone:
-	case <-ctx.Done():
-		s.cancel()
-		return FinalizeResult{}, ctx.Err()
+	// Energy gate per clip — drop silent clips before the POST. Without
+	// VAD, a hold over silence would otherwise send the entire silent
+	// buffer to Gemma, which hallucinates a long "I cannot
+	// transcribe..." response. When VAD saw speech only the peak arm runs.
+	clips := res.clips[:0:0]
+	for _, c := range res.clips {
+		peak, rms, ok := s.passEnergyGate(c, res.speech)
+		if !ok {
+			sessionlog.Infof("chat-audio: dropped silent clip peak=%.4f rms=%.4f (min_peak=%.4f min_rms=%.4f vad_speech=%t)",
+				peak, rms, s.minChunkPeak, s.minChunkRMS, res.speech)
+			continue
+		}
+		if res.speech && s.minChunkRMS > 0 && rms < s.minChunkRMS {
+			sessionlog.Infof("chat-audio: energy gate kept clip on VAD verdict — rms=%.4f is under min_rms=%.4f but Silero saw speech",
+				rms, s.minChunkRMS)
+		}
+		clips = append(clips, c)
 	}
-	if s.text == "" && s.err != nil {
-		return FinalizeResult{}, s.err
+	if len(clips) == 0 {
+		sessionlog.Infof("chat-audio: no clips survived the energy gate; nothing to transcribe")
+		return FinalizeResult{}, nil
 	}
-	if s.err != nil {
-		sessionlog.Warnf("chat-audio: a chunk failed mid-dictation, returning the %d segment(s) that succeeded: %v",
-			s.segmentCount.Load(), s.err)
+
+	// Mirror the WAV to disk BEFORE the POST so a failed/cancelled
+	// request still leaves replayable audio on disk.
+	if s.audioCapture != nil {
+		s.audioCapture.WriteChunk("release", encodePCM16WAV(concatClips(clips), s.sampleRate))
 	}
-	return FinalizeResult{Text: s.text}, nil
+
+	text, err := s.transcribeChunk(ctx, clips)
+	if err != nil {
+		return FinalizeResult{}, err
+	}
+	text = strings.TrimSpace(text)
+	if text != "" {
+		sessionlog.Infof("chat-audio: response %q", text)
+	}
+	if text != "" && s.isHallucination(text) {
+		sessionlog.Infof("chat-audio: dropped hallucinated transcript: %q", text)
+		text = ""
+	}
+	return FinalizeResult{Text: text}, nil
 }
 
-// run is the audio pump. It reads samples, feeds Silero, and emits
-// chunks on speech_stopped or chunk_max_samples force-cut. On samples
-// channel close (hotkey release / recorder stop), it flushes any
-// remaining buffered audio as the trailing chunk. Fires OnConnected
-// on the first audio chunk so the overlay transition out of the
-// default "Connecting" subtitle lands after app.go has reached the
-// Listening state.
+// run is the audio pump. It reads samples, feeds Silero, and cuts the
+// buffer into clips on speech_stopped or at chunkMaxSamples. Nothing is
+// sent while recording; the clips are handed to Finalize as one batch
+// when the samples channel closes (hotkey release / recorder stop).
+// Fires OnConnected on the first audio chunk so the overlay transition
+// out of the default "Connecting" subtitle lands after app.go has
+// reached the Listening state.
 func (s *chatAudioSession) run(
 	ctx context.Context,
 	samples <-chan []int16,
@@ -260,9 +249,9 @@ func (s *chatAudioSession) run(
 ) {
 	var vad *SileroVAD
 	if err := initSilero(silero.OnnxruntimeLibrary); err != nil {
-		sessionlog.Warnf("chat-audio: silero init failed, falling back to chunk_max-only chunking: %v", err)
+		sessionlog.Warnf("chat-audio: silero init failed, falling back to clip_max-only cutting: %v", err)
 	} else if s.sampleRate != sileroSampleRate {
-		sessionlog.Warnf("chat-audio: silero requires 16kHz, got %d; falling back to chunk_max-only", s.sampleRate)
+		sessionlog.Warnf("chat-audio: silero requires 16kHz, got %d; falling back to clip_max-only", s.sampleRate)
 	} else {
 		v, err := NewSileroVAD(defaultSileroSilenceMS, defaultSileroSpeechMS, defaultSileroMinUtteranceMS)
 		if err != nil {
@@ -276,93 +265,44 @@ func (s *chatAudioSession) run(
 	}
 
 	var buf []int16
-	// pendingForceCuts accumulates clips force-cut at chunk_max_seconds.
-	// They don't go on the wire individually — they wait for the next
-	// natural flush (VAD-stopped pause or hotkey release) to be sent
-	// as a single multi-clip request. Gives the model the full
-	// utterance audio in one round-trip and avoids per-chunk
-	// transcribe/respond cycles for long uninterrupted speech.
-	var pendingForceCuts [][]int16
-	// sawSpeech is set when Silero reports speech since the last flush.
-	// Rides along on the chunk so the worker's energy gate trusts VAD.
+	var clips [][]int16
 	sawSpeech := false
-	fireConnected := func() {
-		if onConnected != nil {
-			onConnected()
-			onConnected = nil
-		}
-	}
-	// send hands a chunk to the worker without blocking forever: once
-	// ctx is cancelled the worker has already exited and nobody drains
-	// chunksCh, so the pump must give up instead of leaking (and
-	// keeping the Silero session alive).
-	send := func(c chatChunk) {
-		select {
-		case s.chunksCh <- c:
-		case <-ctx.Done():
-			sessionlog.Debugf("chat-audio: dropping chunk reason=%s — session cancelled before the worker took it", c.reason)
-		}
-	}
-	flush := func(reason string, trailing bool) {
-		if len(buf) == 0 && len(pendingForceCuts) == 0 {
-			if trailing {
-				// No audio at all — still send the sentinel so
-				// the worker exits.
-				send(chatChunk{reason: reason, trailing: true})
-			}
-			return
-		}
-		// Drain pendingForceCuts ahead of the current buffer so the
-		// model sees clips in spoken order.
-		clips := pendingForceCuts
-		pendingForceCuts = nil
-		if len(buf) > 0 {
-			tail := make([]int16, len(buf))
-			copy(tail, buf)
-			buf = buf[:0]
-			clips = append(clips, tail)
-		}
-		var totalSamples int
-		for _, c := range clips {
-			totalSamples += len(c)
-		}
-		sessionlog.Debugf("chat-audio: flush chunk reason=%s clips=%d total_samples=%d (~%dms) trailing=%t vad_speech=%t",
-			reason, len(clips), totalSamples, totalSamples*1000/s.sampleRate, trailing, sawSpeech)
-		send(chatChunk{clips: clips, reason: reason, trailing: trailing, speech: sawSpeech})
-		sawSpeech = false
-	}
-	// flushAtCap slices off exactly chunkMaxSamples from buf and
-	// appends it to pendingForceCuts. The cut clip waits for the next
-	// natural flush instead of going out as its own request — this is
-	// the batching that lets a long monologue produce one multi-clip
-	// POST instead of N separate ones.
-	flushAtCap := func() {
-		head := make([]int16, s.chunkMaxSamples)
-		copy(head, buf[:s.chunkMaxSamples])
-		tailLen := len(buf) - s.chunkMaxSamples
-		copy(buf, buf[s.chunkMaxSamples:])
-		buf = buf[:tailLen]
-		pendingForceCuts = append(pendingForceCuts, head)
-		sessionlog.Warnf("chat-audio: force-cut at %ds (utterance > chunk_max_seconds), %d clip(s) batched, %dms tail kept",
-			s.chunkMaxSamples/s.sampleRate, len(pendingForceCuts), tailLen*1000/s.sampleRate)
+	cut := func(reason string, n int) {
+		clip := make([]int16, n)
+		copy(clip, buf[:n])
+		buf = append(buf[:0], buf[n:]...)
+		clips = append(clips, clip)
+		sessionlog.Debugf("chat-audio: cut clip reason=%s clip_ms=%d clips=%d",
+			reason, n*1000/s.sampleRate, len(clips))
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			flush("ctx_done", true)
-			s.finishPump(nil)
+			sessionlog.Debugf("chat-audio: pump cancelled with %d clip(s) buffered", len(clips))
+			s.pumpDone <- pumpResult{err: ctx.Err()}
 			return
 		case chunk, ok := <-samples:
 			if !ok {
-				flush("samples_closed", true)
-				s.finishPump(nil)
+				if len(buf) > 0 {
+					cut("release", len(buf))
+				}
+				var total int
+				for _, c := range clips {
+					total += len(c)
+				}
+				sessionlog.Infof("chat-audio: release with %d clip(s), %dms of audio, vad_speech=%t",
+					len(clips), total*1000/s.sampleRate, sawSpeech)
+				s.pumpDone <- pumpResult{clips: clips, speech: sawSpeech}
 				return
 			}
 			if len(chunk) == 0 {
 				continue
 			}
-			fireConnected()
+			if onConnected != nil {
+				onConnected()
+				onConnected = nil
+			}
 			buf = append(buf, chunk...)
 			if vad != nil {
 				switch vad.Feed(chunk) {
@@ -371,19 +311,18 @@ func (s *chatAudioSession) run(
 				case VADSpeechStopped:
 					sawSpeech = true
 					vad.Reset()
-					flush("vad_stopped", false)
+					cut("vad_stopped", len(buf))
 					continue
 				}
 			}
 			// One samples-channel write may push buf well past the cap
-			// if the recorder hands us a chunk larger than chunk_max
-			// at once. Loop the slice-and-flush so a single oversize
-			// arrival emits multiple capped chunks without losing tail
-			// audio between them.
+			// if the recorder hands us a chunk larger than clip_max at
+			// once. Loop so a single oversize arrival yields several
+			// capped clips without losing the tail between them.
 			for len(buf) >= s.chunkMaxSamples {
-				sessionlog.Warnf("chat-audio: forced cut at %ds (utterance > chunk_max_seconds)",
+				sessionlog.Warnf("chat-audio: forced cut at %ds (utterance longer than the per-clip cap)",
 					s.chunkMaxSamples/s.sampleRate)
-				flushAtCap()
+				cut("force_cut", s.chunkMaxSamples)
 				if vad != nil {
 					vad.Reset()
 				}
@@ -392,103 +331,10 @@ func (s *chatAudioSession) run(
 	}
 }
 
-// worker serially drains chunks from chunksCh and posts each to the
-// chat-completions endpoint. Exits after the trailing chunk; closing
-// events tells consumers no more text is coming.
-func (s *chatAudioSession) worker(ctx context.Context) {
-	defer close(s.workerDone)
-	defer close(s.events)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case chunk, ok := <-s.chunksCh:
-			if !ok {
-				return
-			}
-			if len(chunk.clips) == 0 {
-				if chunk.trailing {
-					return
-				}
-				continue
-			}
-			// Energy gate per clip — drop any silent clips before
-			// the POST. Without VAD, a hold over silence would
-			// otherwise send the entire silent buffer to Gemma,
-			// which hallucinates a long "I cannot transcribe..."
-			// response. When VAD saw speech only the peak arm runs.
-			liveClips := chunk.clips[:0:0]
-			for _, c := range chunk.clips {
-				peak, rms, ok := s.passEnergyGate(c, chunk.speech)
-				if !ok {
-					sessionlog.Infof("chat-audio: dropped silent clip peak=%.4f rms=%.4f (min_peak=%.4f min_rms=%.4f vad_speech=%t)",
-						peak, rms, s.minChunkPeak, s.minChunkRMS, chunk.speech)
-					continue
-				}
-				if chunk.speech && s.minChunkRMS > 0 && rms < s.minChunkRMS {
-					sessionlog.Infof("chat-audio: energy gate kept clip on VAD verdict — rms=%.4f is under min_rms=%.4f but Silero saw speech",
-						rms, s.minChunkRMS)
-				}
-				liveClips = append(liveClips, c)
-			}
-			if len(liveClips) == 0 {
-				if chunk.trailing {
-					return
-				}
-				continue
-			}
-			// Mirror this chunk's WAV to disk BEFORE the POST so a
-			// failed/cancelled request still leaves replayable audio
-			// on disk. Tag the filename with the flush reason so it
-			// lines up with the chat-audio log.
-			if s.audioCapture != nil {
-				captureReason := chunk.reason
-				if captureReason == "" {
-					captureReason = "unknown"
-				}
-				if chunk.trailing {
-					captureReason = captureReason + "-trailing"
-				}
-				captureWAV := encodePCM16WAV(concatClips(liveClips), s.sampleRate)
-				s.audioCapture.WriteChunk(captureReason, captureWAV)
-			}
-			text, err := s.transcribeChunk(ctx, liveClips)
-			if err != nil {
-				sessionlog.Errorf("chat-audio: chunk transcription failed: %v", err)
-				s.err = err
-				if chunk.trailing {
-					return
-				}
-				continue
-			}
-			text = strings.TrimSpace(text)
-			if text != "" {
-				sessionlog.Infof("chat-audio: chunk response %q", text)
-			}
-			if text != "" && s.isHallucination(text) {
-				sessionlog.Infof("chat-audio: dropped hallucinated final: %q", text)
-				text = ""
-			}
-			if text != "" {
-				formatted := formatSegmentText(&s.segmentCount, text)
-				s.text += formatted
-				select {
-				case s.events <- DictationEvent{Type: DictationEventSegment, Text: formatted}:
-				case <-ctx.Done():
-				}
-			}
-			if chunk.trailing {
-				return
-			}
-		}
-	}
-}
-
 // transcribeChunk wraps each clip as WAV, builds the message list,
 // posts to /chat/completions, and returns the assembled transcript.
 // Emits SSE deltas as DictationEventPartial events while the response
-// streams. Multi-clip chunks (force-cut
-// batches) produce one POST with N input_audio parts.
+// streams. Multi-clip batches produce one POST with N input_audio parts.
 func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16) (text string, err error) {
 	var totalSamples int
 	wavs := make([][]byte, len(clips))
@@ -796,13 +642,6 @@ func (s *chatAudioSession) renderPrompt() string {
 func (s *chatAudioSession) emitPartial(text string) {
 	select {
 	case s.events <- DictationEvent{Type: DictationEventPartial, Text: text}:
-	default:
-	}
-}
-
-func (s *chatAudioSession) finishPump(err error) {
-	select {
-	case s.pumpDone <- err:
 	default:
 	}
 }

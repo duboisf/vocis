@@ -366,9 +366,9 @@ func (v *SileroVAD) Feed(samples []int16) VADEvent {
 // events with a two-threshold state machine, matching
 // snakers4/silero-vad's reference implementation:
 //
-//   prob >= 0.5           → speech frame (count speech, reset silence)
-//   prob <  0.35          → silence frame (count silence)
-//   0.35 <= prob <  0.5   → ambiguous — hold state, do nothing
+//	prob >= 0.5           → speech frame (count speech, reset silence)
+//	prob <  0.35          → silence frame (count silence)
+//	0.35 <= prob <  0.5   → ambiguous — hold state, do nothing
 //
 // The ambiguous band is critical for ignoring marginal noise once an
 // episode is winding down. With a single 0.5 threshold, a single frame

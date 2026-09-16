@@ -32,10 +32,10 @@ text (or text into audio):
   ≥ 10.3.0 with `whisper-v3-turbo-FLM` (realtime WS) or
   `gemma4-it-e2b-FLM` (chat-audio) running on NPU via FLM — no API key,
   no network. Pick a backend with `vocis config backend`.
-- **Single-pass transcription.** Each chunk of speech is sent to the model
-  exactly once; cleanup rules (filler words, digits, technical vocabulary)
-  live in `transcription.prompt` / `prompt_hint`, so there is no second LLM
-  round-trip after you release the hotkey.
+- **Single-pass transcription.** The whole dictation goes to the model in
+  one request at release; cleanup rules (filler words, digits, technical
+  vocabulary) live in `transcription.prompt` / `prompt_hint`, so there is
+  no second LLM round-trip and nothing is transcribed twice.
 - **Mic preroll during model preflight.** On Lemonade with a cold model,
   vocis opens the mic *before* the 5–10 s NPU load and replays those samples
   into the realtime session once it's ready, so the first words after you
@@ -219,11 +219,11 @@ label guard).
 
 Drives Gemma's native multimodal audio mode through Lemonade's
 OpenAI-compatible `/chat/completions` endpoint instead of the realtime
-WebSocket. Speech is segmented client-side with Silero VAD, each chunk
-is wrapped in a WAV and sent as one POST with the audio embedded as an
-`input_audio` content part. Each chunk is transcribed exactly once and
-in isolation: nothing already spoken is re-sent. SSE streaming drives
-live overlay partials.
+WebSocket. Speech is cut into clips client-side with Silero VAD while
+you hold the hotkey; on release every clip is sent in ONE POST, each as
+its own `input_audio` content part, and the model returns a single
+continuous transcript. SSE streaming drives the overlay partials while
+the reply arrives.
 
 Tunable knobs live directly under `transcription:` —
 `prompt`, `prompt_hint`, `language`, `hallucination_filters`.

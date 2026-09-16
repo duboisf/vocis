@@ -53,18 +53,12 @@ type recordingState struct {
 	// dismissed is set (under App.mu) when the user cancels during
 	// finishing, so late results skip the overlay instead of
 	// overwriting the "Cancelled" warning.
-	dismissed   bool
-	target      platform.Target
-	displayText string // committed segments (canonical text), one per line
-	// currentPartial is the in-flight (still-streaming) turn. The overlay
-	// renders displayText + currentPartial; on the next Partial it
-	// replaces, on the next Segment it gets cleared and the canonical
-	// text lands in displayText instead.
-	currentPartial string
-	submitMode     bool
-	span           trace.Span
-	spanCtx        context.Context
-	activeSpan     trace.Span
+	dismissed  bool
+	target     platform.Target
+	submitMode bool
+	span       trace.Span
+	spanCtx    context.Context
+	activeSpan trace.Span
 }
 
 type OverlayUI interface {
@@ -439,7 +433,7 @@ func (a *App) stopRecordingLocked(ctx context.Context) {
 	state := a.recording
 	a.recording = nil
 	a.finishing = state
-	a.overlay.ShowFinishing(state.displayText, a.shortcut)
+	a.overlay.ShowFinishing("", a.shortcut)
 	state.span.AddEvent("overlay.finishing")
 	sessionlog.Infof("stopping recording duration=%s",
 		time.Since(state.startedAt).Round(10*time.Millisecond))
@@ -497,10 +491,9 @@ func (a *App) forceStopAfter(ctx context.Context, state *recordingState, maxDura
 	}
 	a.recording = nil
 	a.finishing = state
-	body := state.displayText
 	a.mu.Unlock()
 
-	a.overlay.ShowFinishing(body, a.shortcut)
+	a.overlay.ShowFinishing("", a.shortcut)
 	state.span.AddEvent("overlay.finishing",
 		trace.WithAttributes(attribute.Bool("auto_stop", true)),
 	)
@@ -774,61 +767,17 @@ func (a *App) consumeDictationEvents(state *recordingState) {
 	}
 }
 
+// handleDictationEvent renders a streaming partial. The POST only
+// happens at release, so partials arrive during the Finishing phase;
+// both setters are called and each short-circuits when its view is
+// not the active one.
 func (a *App) handleDictationEvent(state *recordingState, event transcribe.DictationEvent) {
-	switch event.Type {
-	case transcribe.DictationEventPartial:
-		// Chat-audio always emits partials (SSE deltas while the LLM is
-		// generating the chunk's transcript) and they're inherently useful
-		// — they're the only signal the user has that the model is
-		// processing their audio. Always forwarded to the overlay.
-		// Live-subtitle mode: the partial replaces the previous in-flight
-		// partial. Rendered preview = committed segments + current partial.
-		// For chat-audio, the SSE response only starts after the user
-		// releases the hotkey, by which point the overlay has transitioned
-		// from Listening to Finishing. SetListeningText short-circuits
-		// outside Listening state, so we'd silently drop every partial.
-		// Route to both — each setter short-circuits when its title isn't
-		// the active one, so exactly one update fires per call.
-		state.currentPartial = strings.TrimSpace(event.Text)
-		a.mu.Lock()
-		preview := renderPreview(state.displayText, state.currentPartial)
-		a.mu.Unlock()
-		a.overlay.SetListeningText(state.target.WindowClass, preview)
-		a.overlay.SetFinishingText(preview)
-
-	case transcribe.DictationEventSegment:
-		text := strings.TrimSpace(event.Text)
-		if text == "" {
-			return
-		}
-		// The canonical turn replaces whatever partial was being shown.
-		// displayText is also read by the hotkey goroutine when it
-		// switches the overlay to Finishing, hence the lock.
-		a.mu.Lock()
-		if state.displayText != "" {
-			state.displayText += "\n"
-		}
-		state.displayText += text
-		shown := state.displayText
-		a.mu.Unlock()
-		state.currentPartial = ""
-		a.overlay.SetListeningText(state.target.WindowClass, shown)
-		a.overlay.SetFinishingText(shown)
-		sessionlog.Infof("stream segment shown: %d chars total", len(shown))
+	if event.Type != transcribe.DictationEventPartial {
+		return
 	}
-}
-
-// renderPreview joins committed text with the in-flight partial. Partial
-// goes on its own line because once it completes it becomes a new line —
-// the visual position shouldn't jump between the two states.
-func renderPreview(committed, partial string) string {
-	if partial == "" {
-		return committed
-	}
-	if committed == "" {
-		return partial
-	}
-	return committed + "\n" + partial
+	text := strings.TrimSpace(event.Text)
+	a.overlay.SetListeningText(state.target.WindowClass, text)
+	a.overlay.SetFinishingText(text)
 }
 
 // prerollSnapshot is what drainPreroll returns when stopped: the chunks

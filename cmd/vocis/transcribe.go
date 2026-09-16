@@ -82,10 +82,6 @@ func runTranscribe() error {
 				if ev.Text != "" {
 					fmt.Fprintf(os.Stderr, "[partial] %s\n", ev.Text)
 				}
-			case transcribe.DictationEventSegment:
-				if ev.Text != "" {
-					fmt.Fprintf(os.Stderr, "[segment] %s\n", ev.Text)
-				}
 			}
 		}
 	}()

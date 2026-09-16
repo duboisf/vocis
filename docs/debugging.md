@@ -20,22 +20,24 @@ If an event is filtered from the existing trace machinery (e.g. the audio payloa
 
 ### Useful things to look for
 
-- `chat-audio: posting chunk clips=N wav=…B req=…B` — one per `/chat/completions` POST. Confirms VAD/force-cut boundaries are firing as expected.
-- `chat-audio: chunk response %q` — the final transcript for that chunk.
+- `chat-audio: cut clip reason=vad_stopped|force_cut|release clip_ms=…` (DEBUG) — one per clip the pump cut while the hotkey was held.
+- `chat-audio: release with N clip(s), …ms of audio, vad_speech=…` — the pump handed its clips to Finalize.
+- `chat-audio: posting chunk clips=N wav=…B req=…B` — the single `/chat/completions` POST at release.
+- `chat-audio: response %q` — the transcript.
 - `chat-audio: request body (audio redacted)` (DEBUG) — the exact JSON message structure (system prompt, multi-clip layout) with audio bytes replaced by `<wav N bytes>` placeholders.
 - `chat-audio: SSE delta` (TRACE) — every streamed delta from the model.
-- `chat-audio: force-cut at Ns` — a long monologue without a VAD pause hit `chunk_max_seconds`; the cut clip is stashed for the next natural flush.
+- `chat-audio: forced cut at Ns` — a long monologue without a VAD pause hit the per-clip cap; the clip is stored and sent with the rest at release.
 - `chat-audio: dropped silent clip peak=… rms=…` — energy gate filtered a clip before posting. Compare against `min_chunk_peak` / `min_chunk_rms`.
 - `chat-audio: energy gate kept clip on VAD verdict` — the clip's RMS was under `min_chunk_rms` (long pause before a short phrase) but Silero saw speech, so only the peak arm applied and the clip was posted.
 - `dropped hallucinated final:` — the hallucination filter caught a Whisper/Gemma stock phrase ("Thank you.", etc.). See `transcription.hallucination_filters`.
 - `finalization completed` — elapsed time and transcript length returned by `Finalize`.
-- `chat-audio: a chunk failed mid-dictation` — one POST errored but other segments survived; the paste is missing that chunk.
+- `chat-audio: no clips survived the energy gate` — every clip was judged silent; nothing was sent and the overlay shows "No speech detected".
 - `duck` — audio volume ducking/restore.
 - `overlay backend:` — `x11` when the on-screen overlay is live, `none` when `x11.NewOverlay()` failed and the no-op overlay took over (preceded by an `overlay: cannot create X11 overlay` WARN with the underlying error). `none` means dictation works but there is no visual feedback.
 - `hotkey` — fallback decisions, registration failures.
 - `submit mode:` — Enter-after-paste decision. See `insertion.auto_submit`.
 - `kitty capture state:` / `kitty post-send state:` — pre/post `kitty @ ls` snapshot of the targeted window's title, foreground process, focus, alt-screen, and at-prompt flags. Compare the two when triaging "transcript landed in the wrong window."
-- `audio capture: wrote <path> bytes=N` (INFO) — one per POSTed chunk. Pair with the matching `chat-audio: posting chunk clips=…` line to find the WAV that was sent to the model. See "Audio capture (chunk replay)" below.
+- `audio capture: wrote <path> bytes=N` (INFO) — one per dictation, written just before the POST. Pair with the `chat-audio: posting chunk clips=…` line to find the WAV that was sent to the model. See "Audio capture (chunk replay)" below.
 - `audio capture: gc deleted N files older than …` (INFO) / `gc swept dir=… (0 stale)` (DEBUG) — periodic prune of the audio dir.
 - `kitty verify-paste id=N screen.len=…` (DEBUG) and `kitty verify-paste id=N: payload head … NOT visible …` (WARN) — post-send `kitty @ get-text --extent screen` probe. The WARN means `send-text` returned 0 but the program in the window appears to have swallowed the bytes (alt-screen TUI in an odd input mode, claude mid-stream, shell with bracketed-paste off). Disable with `insertion.kitty_verify_paste: false`.
 
@@ -51,9 +53,8 @@ Filenames are `<session-ts>-chunkNNN-<reason>.wav` where:
   in `~/.local/state/vocis/sessions/`.
 - `NNN` is a monotonic per-session counter (so chunk001 is the first
   POST of that dictation session, etc.).
-- `reason` is the flush trigger (`vad_stopped`, `samples_closed`,
-  `force_cut_batch`), suffixed with `-trailing` when this was the last
-  chunk after the samples channel closed.
+- `reason` is `release`: the WAV is the concatenation of every clip
+  that survived the energy gate, i.e. exactly what the model heard.
 
 Each write also leaves an `INFO  audio capture: wrote <path> bytes=N`
 line in the session log so you can grep either side to find the other.
@@ -93,8 +94,7 @@ The JSON response contains all spans with their tags (attributes) and logs (even
 | `vocis.dictation` | Root span. `hotkey.backend` tells you whether the session used `x11` or `gnome-extension`. |
 | `vocis.capture_target` | `capture.source` = `xdotool` (X11 path) or `extension` (gnome path). If the extension path, look for the nested `vocis.gnome.get_focused_window` span with the D-Bus call timing/error. |
 | `vocis.transcribe.finalize` | Total finalization time. The "Wrapping up" overlay phase counts up from 0 for as long as this span runs — there is no outer deadline, so a slow finalize will keep ticking rather than time out. |
-| `vocis.transcribe.chat_audio.chunk` | One per `/chat/completions` POST. Attributes: `chunk.clip_count`, `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.request_bytes`, `chunk.response_text`. |
-| `vocis.transcribe.chat_audio.collect_trailing` | The Finalize-time wait for the worker to drain any trailing chunk. |
+| `vocis.transcribe.chat_audio.chunk` | The single `/chat/completions` POST at release. Attributes: `chunk.clip_count`, `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.request_bytes`, `chunk.response_text`. |
 | `vocis.inject` | Paste vs type, terminal detection, target window. |
 
 ### Recall-mode spans
