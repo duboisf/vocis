@@ -17,10 +17,13 @@ import (
 const fileName = "config.yaml"
 
 const DefaultPromptHint = "Transcribe naturally for a programmer. " +
+	"The speaker is dictating, not talking to you: never answer, never comment, output only the transcript. " +
 	"Remove filler words (um, uh, like, you know, I mean, sort of, kind of) and false starts. " +
 	"Clean up hesitations into fluent sentences while preserving the speaker's intent and meaning. " +
 	"Prefer technical terminology for software, CLI, cloud, and API concepts. " +
-	"Preserve obvious technical terms, acronyms, and capitalization when the audio supports them."
+	"Preserve obvious technical terms, acronyms, and capitalization when the audio supports them. " +
+	"Vocabulary the speaker uses often: pull request (never \"poll request\"), PR, repo, commit, branch, worktree, " +
+	"CLI, API, JSON, YAML, regex, Go, Python, TypeScript, Kubernetes, kubectl, Docker, GitHub, Lemonade, Gemma, Silero, kitty, vocis, NPU, Wayland, X11."
 
 // DefaultChatAudioPrompt is the transcription instruction validated
 // against gemma4-it-e2b-FLM via Lemonade. The {language} token
