@@ -162,7 +162,7 @@ Client-side Silero VAD decides clip boundaries. While the hotkey is held:
 
 1. The audio pump feeds 16 kHz mono PCM through Silero. A `speech_stopped` transition cuts a clip; a long monologue without a pause is cut at the 28 s per-clip cap (Gemma's 30 s audio limit with margin).
 2. Clips stay in memory. No request is made until release.
-3. On release, all clips travel in one request, labelled `[clip N]:` in spoken order, with a system-prompt framing that asks for one continuous transcript.
+3. On release, silent clips are dropped and the rest are merged back together up to the 28 s cap. A dictation under 28 s therefore goes out as a single `input_audio` part; longer ones travel as a few parts split at pauses, labelled `[clip N]:`, with a system-prompt framing that asks for one punctuated transcript.
 4. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) renders SSE partials into the Finishing view and pastes the text `Finalize` returns.
 
 Nothing is typed into the target window during recording. This avoids corrupting the X11 keymap state with `xdotool keyup` while the user is still holding the hotkey.

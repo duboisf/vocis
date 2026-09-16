@@ -30,8 +30,9 @@ transcription:
     - "you"
     - "."
   prompt: |
-    Transcribe the following speech segment in {language}. Follow these specific instructions for formatting the answer:
+    Transcribe the following dictation in {language}. Follow these specific instructions for formatting the answer:
     * Only output the transcription, with no newlines.
+    * Write it as proper prose: capitalize sentence starts, and use periods, commas and question marks where the speech calls for them.
     * When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three.
   language: its original language
   # Energy gate. Drops a chunk client-side when its peak (max-abs /

@@ -520,3 +520,38 @@ func TestEnergyGateTrustsVADOverRMS(t *testing.T) {
 		t.Fatal("pure silence must still fail on peak even when VAD vouched")
 	}
 }
+
+// TestMergeClipsRejoinsUnderCap: VAD cuts exist to pick pause-aligned
+// split points for the 28 s per-clip cap, not to make the model see
+// separate parts. Multi-clip requests came back without punctuation or
+// capitalization, so clips are merged back together up to the cap and
+// most dictations go out as a single input_audio part.
+func TestMergeClipsRejoinsUnderCap(t *testing.T) {
+	t.Parallel()
+	mk := func(n int) []int16 { return make([]int16, n) }
+	lens := func(clips [][]int16) []int {
+		out := make([]int, len(clips))
+		for i, c := range clips {
+			out[i] = len(c)
+		}
+		return out
+	}
+	cases := []struct {
+		name string
+		in   [][]int16
+		max  int
+		want []int
+	}{
+		{"single stays", [][]int16{mk(5)}, 28, []int{5}},
+		{"three short become one", [][]int16{mk(5), mk(7), mk(6)}, 28, []int{18}},
+		{"splits at cap on a pause", [][]int16{mk(10), mk(10), mk(10)}, 28, []int{20, 10}},
+		{"force-cut tail stays separate", [][]int16{mk(28), mk(2)}, 28, []int{28, 2}},
+		{"empty", nil, 28, []int{}},
+	}
+	for _, c := range cases {
+		got := lens(mergeClips(c.in, c.max))
+		if fmt.Sprint(got) != fmt.Sprint(c.want) {
+			t.Errorf("%s: mergeClips lens=%v want %v", c.name, got, c.want)
+		}
+	}
+}

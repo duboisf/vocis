@@ -25,9 +25,10 @@ const DefaultPromptHint = "Transcribe naturally for a programmer. " +
 // DefaultChatAudioPrompt is the transcription instruction validated
 // against gemma4-it-e2b-FLM via Lemonade. The {language} token
 // expands to TranscriptionConfig.Language at request build time.
-const DefaultChatAudioPrompt = "Transcribe the following speech segment in {language}. " +
+const DefaultChatAudioPrompt = "Transcribe the following dictation in {language}. " +
 	"Follow these specific instructions for formatting the answer:\n" +
 	"* Only output the transcription, with no newlines.\n" +
+	"* Write it as proper prose: capitalize sentence starts, and use periods, commas and question marks where the speech calls for them.\n" +
 	"* When transcribing numbers, write the digits, i.e. write 1.7 and not one point seven, and write 3 instead of three."
 
 type Config struct {

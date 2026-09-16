@@ -212,6 +212,10 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 		sessionlog.Infof("chat-audio: no clips survived the energy gate; nothing to transcribe")
 		return FinalizeResult{}, nil
 	}
+	if merged := mergeClips(clips, s.chunkMaxSamples); len(merged) != len(clips) {
+		sessionlog.Infof("chat-audio: merged %d clip(s) into %d part(s) under the %ds cap", len(clips), len(merged), s.chunkMaxSamples/s.sampleRate)
+		clips = merged
+	}
 
 	// Mirror the WAV to disk BEFORE the POST so a failed/cancelled
 	// request still leaves replayable audio on disk.
@@ -541,9 +545,9 @@ func (s *chatAudioSession) buildMessages(currentWAVs [][]byte) []map[string]any 
 		systemPrompt = systemPrompt + "\n\n" + hint
 	}
 	if multiClip {
-		systemPrompt = "You will receive several short audio clips that together form ONE continuous utterance " +
-			"(the audio was split for size). Transcribe ALL clips IN ORDER as a single continuous text — " +
-			"no clip labels, no separators, just the spoken content as if it were one recording.\n\n" +
+		systemPrompt = "You will receive several audio clips that together form ONE dictation " +
+			"(the audio was split for size). Transcribe ALL clips IN ORDER as one transcript with normal " +
+			"sentence punctuation and capitalization — do not echo the clip labels and do not insert separators.\n\n" +
 			systemPrompt
 	}
 
@@ -571,6 +575,24 @@ func multiClipContent(wavs [][]byte) []map[string]any {
 		)
 	}
 	return parts
+}
+
+// mergeClips glues adjacent clips back together while the result stays
+// under maxSamples. VAD cuts only exist to give the per-clip cap a
+// pause-aligned split point; the model transcribes best when it hears
+// the whole dictation as one input_audio part (multi-part requests came
+// back without punctuation or casing), so anything that fits goes out
+// as a single clip.
+func mergeClips(clips [][]int16, maxSamples int) [][]int16 {
+	out := make([][]int16, 0, len(clips))
+	for _, c := range clips {
+		if n := len(out); n > 0 && len(out[n-1])+len(c) <= maxSamples {
+			out[n-1] = append(out[n-1], c...)
+			continue
+		}
+		out = append(out, append([]int16(nil), c...))
+	}
+	return out
 }
 
 // concatClips joins multiple PCM clips into one slice for the audio
