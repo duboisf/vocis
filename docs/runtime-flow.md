@@ -35,7 +35,7 @@ sequenceDiagram
         Lemonade-->>App: SSE partial deltas
         App->>Overlay: SetListeningText (live preview)
         Lemonade-->>App: Segment events (on chunk completion)
-        App->>App: Accumulate liveText + displayText
+        App->>App: Append segment to overlay text
         App->>Overlay: Update overlay (one line per segment)
     end
 
@@ -54,7 +54,7 @@ sequenceDiagram
 
     Lemonade->>Lemonade: Flush trailing audio (multi-clip if force-cuts pending)
     Lemonade->>Lemonade: POST /chat/completions for trailing chunk
-    Lemonade-->>App: Trailing transcript joined to live segments
+    Lemonade-->>App: Finalize returns the full transcript
 
     App->>Overlay: SetFinishingText (full text with newlines)
 
@@ -145,10 +145,10 @@ When the hotkey stops dictation:
 2. The overlay switches to the "Finishing" state with a heartbeat wave animation, showing the accumulated text and an elapsed-time counter that ticks up from 0 (e.g. `Wrapping up... (2.3s)`). There is no outer deadline on the finalize call — the counter runs until the transcription completes or the user cancels.
 3. The user can press the hotkey during this state to cancel the in-flight transcription. The overlay shows "Cancelled — transcription discarded". The dismissable window ends as soon as the paste lands (and submit Enter, if any, has fired): from that point onward, a hotkey press starts a fresh dictation rather than dismissing the just-completed one. This matters because the success-overlay fade-out takes ~320ms — without an explicit "delivery completed" marker, an eager user pressing the hotkey during the fade would otherwise hit the cancel path and see a stray "Cancelled" warning even though the transcript already landed.
 4. [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go) finalizes the `chatAudioSession`:
-   - `Finalize` flips the session out of live-segment mode, waits for the audio pump to drain, and the worker flushes a trailing chunk that POSTs to `/chat/completions` one last time (multi-clip when force-cut segments are pending).
-   - Trailing transcripts are joined to the already-emitted live segments. Audio that already produced a segment is never re-sent for re-transcription.
-5. The overlay updates to show the complete transcription text (segments + trailing) with newlines preserved.
-6. The accumulated segment text plus any trailing transcript is combined and inserted as a single paste.
+   - `Finalize` waits for the audio pump to drain, the worker flushes the trailing chunk as one last `/chat/completions` POST (multi-clip when force-cut segments are pending), and `Finalize` returns the whole transcript the worker accumulated. Audio that already produced a segment is never re-sent.
+   - A chunk that failed mid-dictation is logged and skipped; `Finalize` only errors when no text at all was produced.
+5. The overlay updates to show the complete transcription text.
+6. The transcript returned by `Finalize` is inserted as a single paste.
 7. If submit mode was toggled on, Enter is pressed on the target window.
 8. Audio ducking restores the speaker volume.
 
@@ -168,9 +168,9 @@ Client-side Silero VAD decides chunk boundaries. While the hotkey is held:
 
 1. The chat-audio audio pump feeds 16 kHz mono PCM through Silero. A `speech_stopped` transition closes a chunk; long monologues without a pause force-cut at `chunk_max_seconds` and accumulate into a multi-clip batch.
 2. The HTTP worker POSTs each chunk to `/chat/completions` and emits SSE-derived partial deltas plus a segment event when the response completes.
-3. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) accumulates segment text in `recordingState.liveText` (for pasting) and `recordingState.displayText` (for the overlay, with newlines between segments).
+3. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) appends each segment to `recordingState.displayText` for the overlay (one line per segment). The session keeps the authoritative text itself; events are display only.
 4. The overlay displays each segment on a separate line, growing vertically as text accumulates. Partial transcription text is prepended with the accumulated segments so previously completed text stays visible.
-5. On release, the trailing chunk POSTs one last time, and the joined text is pasted into the target window as a single insertion.
+5. On release, the trailing chunk POSTs one last time, and the text returned by `Finalize` is pasted into the target window as a single insertion.
 
 Segments are never typed into the target window during recording. This avoids corrupting the X11 keymap state with `xdotool keyup` while the user is still holding the hotkey.
 
@@ -197,7 +197,7 @@ Overlay strings live as Go consts in [`internal/ui/overlay_consts.go`](/home/fre
 When telemetry is enabled, the following OpenTelemetry spans are emitted per dictation session:
 
 - `vocis.dictation` — root span covering the full session lifecycle
-  - Attributes: `hotkey.backend` (`x11` or `gnome-extension`), `target.window_id`, `target.window_class`, `hotkey_mode`, `submit_mode`, `recording.bytes`, `recording.duration`, `transcription.total_chars`, `transcription.live_chars`, `transcription.trailing_chars`
+  - Attributes: `hotkey.backend` (`x11` or `gnome-extension`), `target.window_id`, `target.window_class`, `hotkey_mode`, `submit_mode`, `recording.bytes`, `recording.duration`, `transcription.total_chars`
   - Events (overlay state transitions):
     - `overlay.connected` — first audio chunk reached the transcription session
     - `overlay.submit_mode` (`enabled`) — user toggled submit mode
@@ -208,7 +208,7 @@ When telemetry is enabled, the following OpenTelemetry spans are emitted per dic
     - `vocis.capture_target` — identify the focused window. `capture.source` = `xdotool` or `extension`; the extension path nests `vocis.gnome.get_focused_window` for the D-Bus call.
     - `vocis.recorder.start` — PulseAudio client init and stream creation
     - `vocis.recording.active` — the user speaking (from dictation start to release)
-    - `vocis.transcribe.chat_audio.chunk` — one span per VAD-bounded audio chunk POSTed to `/chat/completions`. Attributes include `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.request_bytes`, and the response text. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing`.
+    - `vocis.transcribe.chat_audio.chunk` — one span per VAD-bounded audio chunk POSTed to `/chat/completions`. Attributes include `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.request_bytes`, and the response text. `Finalize` waits for the worker to drain the trailing chunk under `vocis.transcribe.chat_audio.collect_trailing`.
     - `vocis.recorder.stop` — stream stop and resource cleanup
     - `vocis.inject` — text insertion into the target window
       - `vocis.inject.focus` — window activate and modifier key release

@@ -31,25 +31,30 @@ type App struct {
 	registerHotkey HotkeyRegistrar
 	hotkeyBackend  string
 
-	mu                       sync.Mutex
-	recording                *recordingState
-	transcribing             bool
-	transcribeCancel         context.CancelFunc
-	sessionCancel            context.CancelFunc
-	dismissCompletionOverlay bool
-	lastToggle               time.Time
-	sequence                 uint64
-	shortcut                 string
+	mu sync.Mutex
+	// recording is set while the mic is open (hotkey held); finishing
+	// is set from release until the transcript is delivered or fails.
+	// At most one dictation exists at a time, so both never point at
+	// different states simultaneously.
+	recording  *recordingState
+	finishing  *recordingState
+	lastToggle time.Time
+	shortcut   string
 }
 
 type recordingState struct {
-	id          uint64
-	startedAt   time.Time
-	session     *recorder.Session
-	dictation   transcribe.Dictation
-	cancel      context.CancelFunc
+	startedAt time.Time
+	session   *recorder.Session
+	dictation transcribe.Dictation
+	// ctx spans the whole dictation (recording + finalize); cancel
+	// aborts every goroutine attached to it.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// dismissed is set (under App.mu) when the user cancels during
+	// finishing, so late results skip the overlay instead of
+	// overwriting the "Cancelled" warning.
+	dismissed   bool
 	target      platform.Target
-	liveText    string
 	displayText string // committed segments (canonical text), one per line
 	// currentPartial is the in-flight (still-streaming) turn. The overlay
 	// renders displayText + currentPartial; on the next Partial it
@@ -210,7 +215,7 @@ func (a *App) handleDown(ctx context.Context) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.transcribing || a.recording != nil {
+	if a.finishing != nil || a.recording != nil {
 		return
 	}
 	a.startRecordingLocked(ctx)
@@ -223,7 +228,7 @@ func (a *App) handleUp(ctx context.Context) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.transcribing || a.recording == nil {
+	if a.recording == nil {
 		return
 	}
 	a.stopRecordingLocked(ctx)
@@ -238,7 +243,7 @@ func (a *App) handleToggle(ctx context.Context) {
 	}
 	a.lastToggle = time.Now()
 
-	if a.transcribing {
+	if a.finishing != nil {
 		return
 	}
 
@@ -294,7 +299,6 @@ func (a *App) reloadConfig() {
 func (a *App) startRecordingLocked(ctx context.Context) {
 	a.reloadConfig()
 	a.ducker.Duck()
-	a.dismissCompletionOverlay = false
 	a.overlay.ShowListening("", a.cfg.HotkeyMode)
 
 	spanCtx, recordingSpan := telemetry.StartSpan(ctx, "vocis.dictation",
@@ -386,13 +390,10 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	}
 
 	recordCtx, cancel := context.WithCancel(spanCtx)
-	a.sessionCancel = cancel
-
-	a.sequence++
 	state := &recordingState{
-		id:         a.sequence,
 		startedAt:  time.Now(),
 		session:    session,
+		ctx:        recordCtx,
 		cancel:     cancel,
 		target:     target,
 		span:       recordingSpan,
@@ -428,18 +429,18 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 	}
 	sessionlog.Infof("recording started: %d Hz, %d channel(s), connecting realtime transcription",
 		state.session.SampleRate(), state.session.Channels())
-	go a.consumeDictationEvents(recordCtx, state)
-	go a.monitorRecordingLevel(ctx, state.id, state.session)
+	go a.consumeDictationEvents(state)
+	go a.monitorRecordingLevel(state)
 
 	if recorder.DefaultMaxDurationSeconds > 0 {
-		go a.forceStopAfter(ctx, state.id, time.Duration(recorder.DefaultMaxDurationSeconds)*time.Second)
+		go a.forceStopAfter(ctx, state, time.Duration(recorder.DefaultMaxDurationSeconds)*time.Second)
 	}
 }
 
 func (a *App) stopRecordingLocked(ctx context.Context) {
 	state := a.recording
 	a.recording = nil
-	a.transcribing = true
+	a.finishing = state
 	a.overlay.ShowFinishing(state.displayText, a.shortcut)
 	state.span.AddEvent("overlay.finishing")
 	sessionlog.Infof("stopping recording duration=%s",
@@ -481,7 +482,7 @@ func (a *App) registerHotkeyWithFallback() (HotkeySource, error) {
 	return nil, lastErr
 }
 
-func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Duration) {
+func (a *App) forceStopAfter(ctx context.Context, state *recordingState, maxDuration time.Duration) {
 	timer := time.NewTimer(maxDuration)
 	defer timer.Stop()
 
@@ -492,13 +493,12 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 	}
 
 	a.mu.Lock()
-	if a.recording == nil || a.recording.id != id || a.transcribing {
+	if a.recording != state {
 		a.mu.Unlock()
 		return
 	}
-	state := a.recording
 	a.recording = nil
-	a.transcribing = true
+	a.finishing = state
 	a.mu.Unlock()
 
 	a.overlay.ShowFinishing(state.displayText, a.shortcut)
@@ -510,14 +510,10 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 }
 
 func (a *App) finishRecording(ctx context.Context, state *recordingState) {
-	// Safety net for error returns. The success path clears the flag
+	// Safety net for error returns. The success path clears finishing
 	// earlier via markDelivered() so the overlay fade-out doesn't
 	// extend the dismissable window past the paste.
-	defer func() {
-		a.mu.Lock()
-		a.transcribing = false
-		a.mu.Unlock()
-	}()
+	defer a.markDelivered(state)
 	var dictationErr error
 	defer state.cancel()
 	defer func() { telemetry.EndSpan(state.span, dictationErr) }()
@@ -543,7 +539,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 		}
 		dictationErr = err
 		sessionlog.Errorf("stop recording: %v", err)
-		a.showCompletionError(err)
+		a.showCompletionError(state, err)
 		state.cancel()
 		return
 	}
@@ -558,67 +554,32 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 
 	sessionlog.Infof("finalizing recording=%s (no timeout — elapsed counter replaces deadline)",
 		state.session.Duration().Round(10*time.Millisecond))
-	transcribeCtx, transcribeCancel := context.WithCancel(spanCtx)
-	defer transcribeCancel()
-
-	a.mu.Lock()
-	a.transcribeCancel = transcribeCancel
-	a.mu.Unlock()
-	defer func() {
-		a.mu.Lock()
-		a.transcribeCancel = nil
-		a.mu.Unlock()
-	}()
 
 	finalizeStart := time.Now()
-	transcribeCtx, transcribeSpan := telemetry.StartSpan(transcribeCtx, "vocis.transcribe.finalize")
+	transcribeCtx, transcribeSpan := telemetry.StartSpan(state.ctx, "vocis.transcribe.finalize")
 	result, err := state.dictation.Finalize(transcribeCtx)
 	finalizeDuration := time.Since(finalizeStart).Round(10 * time.Millisecond)
 	telemetry.EndSpan(transcribeSpan, err)
 	if err != nil {
 		dictationErr = err
-		if a.completionOverlayDismissed() {
+		if a.dismissed(state) {
 			sessionlog.Infof("transcription cancelled by user elapsed=%s error=%v", finalizeDuration, err)
 			return
 		}
 		sessionlog.Errorf("transcribe failed elapsed=%s error=%v", finalizeDuration, err)
-		a.showCompletionError(err)
+		a.showCompletionError(state, err)
 		return
 	}
-	sessionlog.Infof("finalization completed elapsed=%s", finalizeDuration)
-	trailing := strings.TrimSpace(result.Text)
-
-	text := state.liveText
-	if trailing != "" {
-		if text == "" {
-			text = trailing
-		} else {
-			text = text + " " + trailing
-		}
-	}
-	text = strings.TrimSpace(text)
-	state.span.SetAttributes(
-		attribute.Int("transcription.total_chars", len(text)),
-		attribute.Int("transcription.live_chars", len(state.liveText)),
-		attribute.Int("transcription.trailing_chars", len(trailing)),
-	)
-	sessionlog.Infof("transcription complete chars=%d live=%d trailing=%d",
-		len(text), len(state.liveText), len(trailing))
+	text := strings.TrimSpace(result.Text)
+	state.span.SetAttributes(attribute.Int("transcription.total_chars", len(text)))
+	sessionlog.Infof("finalization completed elapsed=%s chars=%d", finalizeDuration, len(text))
 
 	if text == "" {
 		sessionlog.Warnf("transcription was empty")
-		a.showCompletionError(errors.New("transcription came back empty"))
+		a.showCompletionError(state, errors.New("transcription came back empty"))
 		return
 	}
-
-	displayText := state.displayText
-	if trailing != "" {
-		if displayText != "" {
-			displayText += "\n"
-		}
-		displayText += trailing
-	}
-	a.overlay.SetFinishingText(displayText)
+	a.overlay.SetFinishingText(text)
 
 	if err := a.deliverTranscript(spanCtx, state, text); err != nil {
 		dictationErr = err
@@ -646,12 +607,12 @@ func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, 
 				trace.WithAttributes(attribute.String("reason", "target_gone")),
 			)
 			sessionlog.Warnf("target window gone — transcript on clipboard (%d chars)", len(text))
-			a.markDelivered()
+			a.markDelivered(state)
 			a.overlay.ShowWarning(ui.OverlayWarningTargetGone)
 			return nil
 		}
 		sessionlog.Errorf("insert transcript: %v", err)
-		a.showCompletionError(err)
+		a.showCompletionError(state, err)
 		return err
 	}
 
@@ -673,51 +634,48 @@ func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, 
 		}
 	}
 	// Paste (and submit Enter, if any) is done — the user has the
-	// result. Clear the transcribing flag NOW so a quick follow-up
-	// hotkey press starts a new dictation instead of being eaten by
+	// result. Clear finishing NOW so a quick follow-up hotkey press
+	// starts a new dictation instead of being eaten by
 	// dismissInFlightOverlay during the ~320ms overlay fade-out below.
-	a.markDelivered()
+	a.markDelivered(state)
 	state.span.SetAttributes(attribute.Bool("submit_mode", state.submitMode))
 	state.span.AddEvent("overlay.success")
 	a.overlay.Hide()
 	return nil
 }
 
-// markDelivered ends the dismissable phase of a dictation. The
-// transcript is now in the destination (paste landed; submit Enter, if
-// any, was dispatched), so a follow-up hotkey press should start a new
-// dictation rather than be eaten by dismissInFlightOverlay during the
-// remaining overlay-fade animation. Called only on the
-// transcript-delivered paths (Insert success, ErrTargetGone clipboard
-// fallback); error paths fall through to the deferred clear in
-// finishRecording, which doesn't pretend a delivery happened.
-func (a *App) markDelivered() {
+// markDelivered ends the dismissable phase of a dictation: a follow-up
+// hotkey press starts a new dictation instead of cancelling this one.
+// Idempotent, and a no-op if a different state is already finishing.
+func (a *App) markDelivered(state *recordingState) {
 	a.mu.Lock()
-	a.transcribing = false
-	a.mu.Unlock()
-	sessionlog.Debugf("dictation delivered: transcribing flag cleared (overlay cleanup may still be running)")
+	defer a.mu.Unlock()
+	if a.finishing == state {
+		a.finishing = nil
+		sessionlog.Debugf("dictation finished: finishing state cleared (overlay cleanup may still be running)")
+	}
 }
 
-func (a *App) monitorRecordingLevel(ctx context.Context, id uint64, session *recorder.Session) {
+func (a *App) monitorRecordingLevel(state *recordingState) {
 	ticker := time.NewTicker(65 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-state.ctx.Done():
 			return
 		case <-ticker.C:
 		}
 
 		a.mu.Lock()
-		active := a.recording != nil && a.recording.id == id && !a.transcribing
+		active := a.recording == state
 		a.mu.Unlock()
 		if !active {
 			a.overlay.SetLevel(0)
 			return
 		}
 
-		a.overlay.SetLevel(session.Level())
+		a.overlay.SetLevel(state.session.Level())
 	}
 }
 
@@ -728,30 +686,28 @@ func (a *App) hotkeyHint(shortcut string) string {
 	return fmt.Sprintf("Hold %s, release to transcribe", shortcut)
 }
 
+// dismissInFlightOverlay cancels a dictation that is still finishing.
+// Returns false when nothing is finishing, so the caller starts a new
+// recording instead.
 func (a *App) dismissInFlightOverlay() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if !a.transcribing {
+	state := a.finishing
+	if state == nil {
 		return false
 	}
-
-	a.dismissCompletionOverlay = true
-	if a.transcribeCancel != nil {
-		a.transcribeCancel()
-	}
-	if a.sessionCancel != nil {
-		a.sessionCancel()
-	}
-	a.transcribing = false
+	state.dismissed = true
+	state.cancel()
+	a.finishing = nil
 	a.overlay.ShowWarning(ui.OverlayWarningCancelled)
 	sessionlog.Infof("transcription cancelled by user")
 	// Note: span is ended by the finishRecording defer, which will see the cancelled context.
 	return true
 }
 
-func (a *App) showCompletionError(err error) {
-	if a.completionOverlayDismissed() {
+func (a *App) showCompletionError(state *recordingState, err error) {
+	if a.dismissed(state) {
 		a.overlay.Hide()
 		return
 	}
@@ -784,10 +740,10 @@ func (a *App) hideCompletionOverlay() {
 	a.overlay.Hide()
 }
 
-func (a *App) completionOverlayDismissed() bool {
+func (a *App) dismissed(state *recordingState) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.dismissCompletionOverlay
+	return state.dismissed
 }
 
 func (a *App) shutdown() error {
@@ -808,29 +764,24 @@ func (a *App) shutdown() error {
 	return nil
 }
 
-func (a *App) consumeDictationEvents(ctx context.Context, state *recordingState) {
+// consumeDictationEvents drives the overlay from the session's event
+// stream. Display only: the authoritative transcript comes back from
+// Finalize, so a dropped or late event never loses text.
+func (a *App) consumeDictationEvents(state *recordingState) {
 	for {
 		select {
-		case <-ctx.Done():
+		case <-state.ctx.Done():
 			return
 		case event, ok := <-state.dictation.Events():
 			if !ok {
 				return
 			}
-			if err := a.handleDictationEvent(ctx, state, event); err != nil {
-				sessionlog.Errorf("live dictation event: %v", err)
-				a.showCompletionError(err)
-				return
-			}
+			a.handleDictationEvent(state, event)
 		}
 	}
 }
 
-func (a *App) handleDictationEvent(
-	ctx context.Context,
-	state *recordingState,
-	event transcribe.DictationEvent,
-) error {
+func (a *App) handleDictationEvent(state *recordingState, event transcribe.DictationEvent) {
 	switch event.Type {
 	case transcribe.DictationEventPartial:
 		// Chat-audio always emits partials (SSE deltas while the LLM is
@@ -849,26 +800,21 @@ func (a *App) handleDictationEvent(
 		preview := renderPreview(state.displayText, state.currentPartial)
 		a.overlay.SetListeningText(state.target.WindowClass, preview)
 		a.overlay.SetFinishingText(preview)
-		return nil
 
 	case transcribe.DictationEventSegment:
 		text := strings.TrimSpace(event.Text)
 		if text == "" {
-			return nil
+			return
 		}
 		// The canonical turn replaces whatever partial was being shown.
-		state.liveText += event.Text
 		if state.displayText != "" {
 			state.displayText += "\n"
 		}
 		state.displayText += text
 		state.currentPartial = ""
 		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
-		sessionlog.Infof("stream segment accumulated: %d chars total", len(state.liveText))
-		return nil
-
-	default:
-		return nil
+		a.overlay.SetFinishingText(state.displayText)
+		sessionlog.Infof("stream segment shown: %d chars total", len(state.displayText))
 	}
 }
 

@@ -51,13 +51,16 @@ type DictationEvent struct {
 	Text string
 }
 
+// FinalizeResult carries the whole transcript of the session: every
+// segment emitted live plus the trailing chunk flushed at release.
 type FinalizeResult struct {
 	Text string
 }
 
-// Dictation is the surface every backend's session must expose to the
-// app and recall packages. The chat-audio path returns *chatAudioSession;
-// callers consume Events() and Finalize() through this interface.
+// Dictation is the surface the app and recall packages consume.
+// Events() streams partials and segments for live display and closes
+// when the session is done; Finalize() blocks until every chunk has
+// been transcribed and returns the full text.
 type Dictation interface {
 	Events() <-chan DictationEvent
 	Finalize(ctx context.Context) (FinalizeResult, error)
@@ -81,14 +84,6 @@ type DictationOpts struct {
 	// informational — reserved for future per-call timeout scaling.
 	// 0 = unknown.
 	ExpectedAudioMS int
-}
-
-// finalResult is the trailing-transcript message the chat-audio worker
-// publishes to its finals channel after Finalize has flipped the session
-// out of live mode.
-type finalResult struct {
-	text string
-	err  error
 }
 
 // StartDictation begins a chat-audio dictation session. The backend is

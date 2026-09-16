@@ -35,10 +35,6 @@ const (
 	// VAD-detected pause gets force-cut at this boundary and the
 	// remainder rolls into the next chunk.
 	defaultChunkMaxSeconds = 28
-	// defaultStreamSSE controls whether requests use SSE streaming.
-	// Always on — partials are how the user knows the model is
-	// actually generating their transcript.
-	defaultStreamSSE = true
 	// defaultSileroSilenceMS / defaultSileroSpeechMS /
 	// defaultSileroMinUtteranceMS are the Silero hysteresis knobs
 	// used by the chat-audio chunker. Pinned here because nobody
@@ -76,8 +72,10 @@ const DefaultBatchPrompt = "Transcribe each of the following speech segments in 
 //     transitions and chunk_max_seconds boundaries close a chunk and
 //     hand it to the worker.
 //   - worker goroutine drains chunks from chunksCh, posts them
-//     serially (so segments land in spoken order), and pushes
-//     transcripts back as DictationEvents (live) or finals (post-Finalize).
+//     serially (so segments land in spoken order), appends each
+//     transcript to the session text, and emits it as a DictationEvent
+//     for live display. Finalize returns the accumulated text once
+//     the worker has drained every chunk.
 type chatAudioSession struct {
 	httpClient *http.Client
 	endpoint   string
@@ -89,7 +87,6 @@ type chatAudioSession struct {
 	// separator when non-empty (transcription.prompt_hint).
 	promptHint   string
 	language     string
-	streamSSE    bool
 	minChunkPeak float64
 	minChunkRMS  float64
 
@@ -108,12 +105,15 @@ type chatAudioSession struct {
 
 	events   chan DictationEvent
 	pumpDone chan error
-	finals   chan finalResult
 	chunksCh chan chatChunk
 	cancel   context.CancelFunc
 
-	liveSegments atomic.Bool
 	segmentCount atomic.Int32
+
+	// text and err are owned by the worker goroutine. They are read by
+	// Finalize only after workerDone has closed, so no lock is needed.
+	text string
+	err  error
 
 	// workerDone closes once the worker exits, so Finalize can wait
 	// for in-flight HTTP work to drain before returning.
@@ -122,8 +122,7 @@ type chatAudioSession struct {
 
 // chatChunk is one VAD-bounded audio segment headed for the worker.
 // trailing=true marks the last chunk produced after the samples
-// channel closed — the worker treats it as the trigger to close the
-// finals channel.
+// channel closed — the worker exits after handling it.
 //
 // Most chunks are single-clip (clips has one entry) — VAD-stopped
 // utterances or short holds. When the user holds the hotkey through
@@ -182,7 +181,6 @@ func startChatAudioSession(
 		promptTemplate:       cfg.Prompt,
 		promptHint:           cfg.PromptHint,
 		language:             cfg.Language,
-		streamSSE:            defaultStreamSSE,
 		minChunkPeak:         cfg.MinChunkPeak,
 		minChunkRMS:          cfg.MinChunkRMS,
 		sampleRate:           opts.SampleRate,
@@ -190,15 +188,12 @@ func startChatAudioSession(
 		audioCapture:         writer,
 		events:               make(chan DictationEvent, 16),
 		pumpDone:             make(chan error, 1),
-		finals:               make(chan finalResult, 8),
 		chunksCh:             make(chan chatChunk, 4),
 		cancel:               cancel,
 		workerDone:           make(chan struct{}),
 	}
-	s.liveSegments.Store(true)
-
-	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds stream=%t prompt_hint_chars=%d",
-		s.model, defaultChunkMaxSeconds, s.streamSSE, len(strings.TrimSpace(s.promptHint)))
+	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds prompt_hint_chars=%d",
+		s.model, defaultChunkMaxSeconds, len(strings.TrimSpace(s.promptHint)))
 
 	// "Connection ready" is synthetic for the chat-audio backend — there
 	// is no upfront handshake to await. The run goroutine fires
@@ -217,49 +212,39 @@ func startChatAudioSession(
 
 func (s *chatAudioSession) Events() <-chan DictationEvent { return s.events }
 
-// Finalize flips the session out of live-segment mode, waits for the
-// audio pump to drain, then waits for the HTTP worker to finish any
-// in-flight requests. Trailing transcripts arrive on s.finals and are
-// joined into the FinalizeResult.
+// Finalize waits for the audio pump to drain, then for the HTTP worker
+// to finish every queued chunk (including the trailing one flushed at
+// hotkey release), and returns the whole transcript. A chunk failure
+// is only fatal when no text at all was produced; otherwise it is
+// logged and the surviving segments are returned.
 func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error) {
-	s.liveSegments.Store(false)
-
-	var pumpErr error
 	select {
-	case pumpErr = <-s.pumpDone:
+	case pumpErr := <-s.pumpDone:
+		if pumpErr != nil {
+			s.cancel()
+			return FinalizeResult{}, pumpErr
+		}
 	case <-ctx.Done():
 		s.cancel()
 		return FinalizeResult{}, ctx.Err()
 	}
-	if pumpErr != nil {
+
+	_, span := telemetry.StartSpan(ctx, "vocis.transcribe.chat_audio.collect_trailing")
+	defer telemetry.EndSpan(span, nil)
+	select {
+	case <-s.workerDone:
+	case <-ctx.Done():
 		s.cancel()
-		return FinalizeResult{}, pumpErr
+		return FinalizeResult{}, ctx.Err()
 	}
-
-	// Wait for worker to finish remaining chunks. The pump signals
-	// trailing=true on the last chunk, after which the worker closes
-	// finals and exits. A context cancel falls through to abort.
-	collectCtx, collectSpan := telemetry.StartSpan(ctx, "vocis.transcribe.chat_audio.collect_trailing")
-	defer telemetry.EndSpan(collectSpan, nil)
-
-	var trailing string
-	for {
-		select {
-		case <-ctx.Done():
-			s.cancel()
-			return FinalizeResult{}, ctx.Err()
-		case <-collectCtx.Done():
-			return FinalizeResult{}, collectCtx.Err()
-		case res, ok := <-s.finals:
-			if !ok {
-				return FinalizeResult{Text: trailing}, nil
-			}
-			if res.err != nil {
-				return FinalizeResult{}, res.err
-			}
-			trailing += res.text
-		}
+	if s.text == "" && s.err != nil {
+		return FinalizeResult{}, s.err
 	}
+	if s.err != nil {
+		sessionlog.Warnf("chat-audio: a chunk failed mid-dictation, returning the %d segment(s) that succeeded: %v",
+			s.segmentCount.Load(), s.err)
+	}
+	return FinalizeResult{Text: s.text}, nil
 }
 
 // run is the audio pump. It reads samples, feeds Silero, and emits
@@ -395,11 +380,11 @@ func (s *chatAudioSession) run(
 }
 
 // worker serially drains chunks from chunksCh and posts each to the
-// chat-completions endpoint.
-// Closes finals on the trailing-marker chunk so Finalize can return.
+// chat-completions endpoint. Exits after the trailing chunk; closing
+// events tells consumers no more text is coming.
 func (s *chatAudioSession) worker(ctx context.Context) {
 	defer close(s.workerDone)
-	defer close(s.finals)
+	defer close(s.events)
 	for {
 		select {
 		case <-ctx.Done():
@@ -452,12 +437,7 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			text, err := s.transcribeChunk(ctx, liveClips)
 			if err != nil {
 				sessionlog.Errorf("chat-audio: chunk transcription failed: %v", err)
-				if !s.liveSegments.Load() {
-					select {
-					case s.finals <- finalResult{err: err}:
-					default:
-					}
-				}
+				s.err = err
 				if chunk.trailing {
 					return
 				}
@@ -473,16 +453,10 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			}
 			if text != "" {
 				formatted := formatSegmentText(&s.segmentCount, text)
-				if s.liveSegments.Load() {
-					select {
-					case s.events <- DictationEvent{Type: DictationEventSegment, Text: formatted}:
-					default:
-					}
-				} else {
-					select {
-					case s.finals <- finalResult{text: formatted}:
-					default:
-					}
+				s.text += formatted
+				select {
+				case s.events <- DictationEvent{Type: DictationEventSegment, Text: formatted}:
+				case <-ctx.Done():
 				}
 			}
 			if chunk.trailing {
@@ -495,7 +469,7 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 // transcribeChunk wraps each clip as WAV, builds the message list,
 // posts to /chat/completions, and returns the assembled transcript.
 // Emits SSE deltas as DictationEventPartial events while the response
-// streams (when streamSSE is on). Multi-clip chunks (force-cut
+// streams. Multi-clip chunks (force-cut
 // batches) produce one POST with N input_audio parts.
 func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16) (text string, err error) {
 	var totalSamples int
@@ -518,7 +492,7 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16)
 	body := map[string]any{
 		"model":    s.model,
 		"messages": messages,
-		"stream":   s.streamSSE,
+		"stream":   true,
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -548,9 +522,7 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16)
 		return "", fmt.Errorf("build chat-audio request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if s.streamSSE {
-		req.Header.Set("Accept", "text/event-stream")
-	}
+	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -560,11 +532,7 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16)
 	if resp.StatusCode/100 != 2 {
 		return "", fmt.Errorf("chat-audio HTTP %d: %s", resp.StatusCode, httpBodyExcerpt(resp))
 	}
-
-	if s.streamSSE {
-		return s.readSSE(resp.Body)
-	}
-	return readChatCompletion(resp.Body)
+	return s.readSSE(resp.Body)
 }
 
 // readSSE consumes an OpenAI-shaped SSE stream and returns the joined
@@ -804,13 +772,10 @@ func (s *chatAudioSession) renderPrompt() string {
 	return strings.ReplaceAll(s.promptTemplate, "{language}", s.language)
 }
 
+// emitPartial is display-only, so a slow consumer drops the delta
+// instead of stalling the SSE read. The segment event that follows is
+// sent blocking and carries the authoritative text.
 func (s *chatAudioSession) emitPartial(text string) {
-	// chat-audio's SSE deltas typically arrive AFTER Finalize() flips
-	// liveSegments to false (the trailing chunk gets POSTed at hotkey
-	// release, and the response streams in during the Finishing phase).
-	// Always emit the partial — app.go routes it to whichever overlay
-	// state is active (Listening or Finishing), so the user sees the
-	// model's output as it generates regardless of phase.
 	select {
 	case s.events <- DictationEvent{Type: DictationEventPartial, Text: text}:
 	default:

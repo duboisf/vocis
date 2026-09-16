@@ -22,13 +22,10 @@ func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {
 		target: platform.Target{WindowClass: "Gedit"},
 	}
 
-	err := app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+	app.handleDictationEvent(state, transcribe.DictationEvent{
 		Type: transcribe.DictationEventPartial,
 		Text: "hello world",
 	})
-	if err != nil {
-		t.Fatalf("handleDictationEvent: %v", err)
-	}
 
 	if fakeOverlay.windowClass != "Gedit" {
 		t.Fatalf("windowClass = %q, want Gedit", fakeOverlay.windowClass)
@@ -52,11 +49,10 @@ func TestPartialAppendsBelowAccumulatedSegments(t *testing.T) {
 	}
 	state := &recordingState{
 		target:      platform.Target{WindowClass: "Gedit"},
-		liveText:    "Hello world.",
 		displayText: "Hello world.",
 	}
 
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+	app.handleDictationEvent(state, transcribe.DictationEvent{
 		Type: transcribe.DictationEventPartial,
 		Text: "this is more",
 	})
@@ -86,7 +82,7 @@ func TestPartialReplacesPreviousPartial(t *testing.T) {
 		currentPartial: "this is",
 	}
 
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+	app.handleDictationEvent(state, transcribe.DictationEvent{
 		Type: transcribe.DictationEventPartial,
 		Text: "this is more text",
 	})
@@ -113,7 +109,7 @@ func TestSegmentClearsPartial(t *testing.T) {
 		currentPartial: "this is mo",
 	}
 
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+	app.handleDictationEvent(state, transcribe.DictationEvent{
 		Type: transcribe.DictationEventSegment,
 		Text: "this is more text, finalized.",
 	})
@@ -137,14 +133,13 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 	}
 	state := &recordingState{
 		target:      platform.Target{WindowClass: "Gedit"},
-		liveText:    "Hello world.",
 		displayText: "Hello world.",
 	}
 
 	// Set initial text so we can detect if it gets cleared.
 	fakeOverlay.listeningText = "Hello world."
 
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+	app.handleDictationEvent(state, transcribe.DictationEvent{
 		Type: transcribe.DictationEventPartial,
 		Text: "",
 	})
@@ -170,18 +165,12 @@ func TestHandleDictationEventAccumulatesSegments(t *testing.T) {
 	app.recording = state
 
 	for _, seg := range []string{"segment one", " segment two"} {
-		err := app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
+		app.handleDictationEvent(state, transcribe.DictationEvent{
 			Type: transcribe.DictationEventSegment,
 			Text: seg,
 		})
-		if err != nil {
-			t.Fatalf("handleDictationEvent: %v", err)
-		}
 	}
 
-	if state.liveText != "segment one segment two" {
-		t.Fatalf("liveText = %q, want %q", state.liveText, "segment one segment two")
-	}
 	if fakeOverlay.listeningText != "segment one\nsegment two" {
 		t.Fatalf("listeningText = %q, want newline-separated display", fakeOverlay.listeningText)
 	}
@@ -199,11 +188,8 @@ func TestHandleUpDoesNothingWhenNotRecording(t *testing.T) {
 
 	app.handleUp(context.Background())
 
-	if app.recording != nil {
-		t.Fatal("expected no recording state")
-	}
-	if app.transcribing {
-		t.Fatal("expected transcribing to remain false")
+	if app.recording != nil || app.finishing != nil {
+		t.Fatal("expected no dictation state")
 	}
 }
 
@@ -213,10 +199,12 @@ func TestHandleDownDismissesOldOverlayWhileTranscribing(t *testing.T) {
 	fakeOverlay := &overlayStub{}
 	cfg := config.Default()
 	cfg.HotkeyMode = "hold"
+	cancelled := false
+	state := &recordingState{cancel: func() { cancelled = true }}
 	app := &App{
-		cfg:          cfg,
-		overlay:      fakeOverlay,
-		transcribing: true,
+		cfg:       cfg,
+		overlay:   fakeOverlay,
+		finishing: state,
 	}
 
 	app.handleDown(context.Background())
@@ -224,8 +212,11 @@ func TestHandleDownDismissesOldOverlayWhileTranscribing(t *testing.T) {
 	if fakeOverlay.warningText == "" {
 		t.Fatal("expected cancellation warning overlay")
 	}
-	if !app.completionOverlayDismissed() {
-		t.Fatal("expected completion overlay to be dismissed")
+	if !app.dismissed(state) || !cancelled {
+		t.Fatal("expected finishing state to be dismissed and cancelled")
+	}
+	if app.finishing != nil {
+		t.Fatal("expected finishing to be cleared")
 	}
 }
 
@@ -244,19 +235,20 @@ func TestHandleDownAfterDeliveryStartsNewSessionInsteadOfCancelling(t *testing.T
 	fakeOverlay := &overlayStub{}
 	cfg := config.Default()
 	cfg.HotkeyMode = "hold"
+	state := &recordingState{cancel: func() {}}
 	app := &App{
-		cfg:          cfg,
-		overlay:      fakeOverlay,
-		transcribing: true, // simulate "post-Insert, deferred clear hasn't run yet"
+		cfg:       cfg,
+		overlay:   fakeOverlay,
+		finishing: state, // simulate "post-Insert, deferred clear hasn't run yet"
 	}
 
 	// markDelivered is the post-paste hook finishRecording calls once
 	// the transcript is in the destination — well before overlay
 	// fade-out completes.
-	app.markDelivered()
+	app.markDelivered(state)
 
-	if app.transcribing {
-		t.Fatal("markDelivered should have cleared transcribing")
+	if app.finishing != nil {
+		t.Fatal("markDelivered should have cleared finishing")
 	}
 	if app.dismissInFlightOverlay() {
 		t.Fatal("dismissInFlightOverlay must return false once delivery is done")

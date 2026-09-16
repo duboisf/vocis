@@ -27,7 +27,8 @@ If an event is filtered from the existing trace machinery (e.g. the audio payloa
 - `chat-audio: force-cut at Ns` — a long monologue without a VAD pause hit `chunk_max_seconds`; the cut clip is stashed for the next natural flush.
 - `chat-audio: dropped silent clip peak=… rms=…` — energy gate filtered a clip before posting. Compare against `min_chunk_peak` / `min_chunk_rms`.
 - `dropped hallucinated final:` — the hallucination filter caught a Whisper/Gemma stock phrase ("Thank you.", etc.). See `transcription.hallucination_filters`.
-- `finalization` — trailing transcript assembly, commit errors.
+- `finalization completed` — elapsed time and transcript length returned by `Finalize`.
+- `chat-audio: a chunk failed mid-dictation` — one POST errored but other segments survived; the paste is missing that chunk.
 - `duck` — audio volume ducking/restore.
 - `overlay backend:` — `x11` when the on-screen overlay is live, `none` when `x11.NewOverlay()` failed and the no-op overlay took over (preceded by an `overlay: cannot create X11 overlay` WARN with the underlying error). `none` means dictation works but there is no visual feedback.
 - `hotkey` — fallback decisions, registration failures.

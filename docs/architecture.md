@@ -63,7 +63,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - `hotkey.State` receives raw press/release events from any backend
 - `ui.*` provides drawing primitives to any overlay backend
 - `platform/x11/*` implements `OverlayUI`, `InjectorClient`, and `HotkeySource` for X11
-- `transcribe.startChatAudioSession` owns Silero chunking, per-chunk `/chat/completions` POSTs, and the trailing-finalize collector
+- `transcribe.startChatAudioSession` owns Silero chunking, per-chunk `/chat/completions` POSTs, and the transcript returned by `Finalize`
 
 ## Useful rule of thumb
 

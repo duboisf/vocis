@@ -65,11 +65,7 @@ func TestReadSSEAccumulatesAndStopsOnDone(t *testing.T) {
 	body := "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n" +
 		"data: [DONE]\n\n"
-	s := &chatAudioSession{
-		streamSSE: true,
-		events:    make(chan DictationEvent, 16),
-	}
-	s.liveSegments.Store(true)
+	s := &chatAudioSession{events: make(chan DictationEvent, 16)}
 	got, err := s.readSSE(strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("readSSE: %v", err)
