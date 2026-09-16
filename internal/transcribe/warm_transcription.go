@@ -102,10 +102,9 @@ func EnsureTranscribeModelLoaded(ctx context.Context, cfg config.TranscriptionCo
 	return nil
 }
 
-// EnsureLemonadeModelsLoaded checks that the configured transcribe and
-// postprocess models are resident on the Lemonade instance. If either
-// is missing it fires a /load request (async) without blocking the
-// caller. Logs a concise warning per missing model.
+// EnsureLemonadeModelsLoaded checks that the configured transcription
+// model is resident on the Lemonade instance. If it is missing it fires
+// a /load request (async) without blocking the caller.
 //
 // Returns an error when the Lemonade server is unreachable so callers
 // can fail startup loudly instead of letting the user discover the
@@ -149,18 +148,6 @@ func EnsureLemonadeModelsLoaded(ctx context.Context, cfg config.Config, transcri
 		go loadLemonadeModelLogging(context.Background(), cfg.Transcription)
 	} else if txModel != "" {
 		sessionlog.Debugf("lemonade: transcription model %s already loaded", txModel)
-	}
-
-	// chat-audio combines transcription + cleanup in a single call, so
-	// app.go never makes a separate postprocess request — loading a
-	// distinct llm model here would just evict gemma from the single
-	// llm slot Lemonade allows. Note the postprocess.model value so
-	// users see why it's being ignored.
-	if cfg.PostProcess.Enabled {
-		ppModel := strings.TrimSpace(cfg.PostProcess.Model)
-		if ppModel != "" && ppModel != txModel {
-			sessionlog.Infof("postprocess.model=%s ignored — combine mode reuses transcription.model=%s for cleanup", ppModel, txModel)
-		}
 	}
 	return nil
 }

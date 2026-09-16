@@ -1,11 +1,8 @@
 package x11
 
 import (
-	"os"
 	"testing"
 	"time"
-
-	"github.com/BurntSushi/xgbutil"
 
 	"vocis/internal/ui"
 )
@@ -42,60 +39,6 @@ func TestShouldAnimatePartialOnlyWhenTextExtends(t *testing.T) {
 	}
 	if ui.ShouldAnimatePartial("hello world", "goodbye world") {
 		t.Fatal("expected unrelated partial not to animate")
-	}
-}
-
-func TestShouldAnimateRetraction(t *testing.T) {
-	t.Parallel()
-
-	if !ui.ShouldAnimateRetraction("hello world", "hello") {
-		t.Fatal("expected retraction when target is a strict prefix of current")
-	}
-	if !ui.ShouldAnimateRetraction("hello world", "") {
-		t.Fatal("expected retraction when target is empty and current has text")
-	}
-	if !ui.ShouldAnimateRetraction("first\nsecond", "first") {
-		t.Fatal("expected retraction across newline-separated segments")
-	}
-	if ui.ShouldAnimateRetraction("", "anything") {
-		t.Fatal("nothing to retract from an empty current")
-	}
-	if ui.ShouldAnimateRetraction("hello", "hello") {
-		t.Fatal("no retraction needed when text is unchanged")
-	}
-	if ui.ShouldAnimateRetraction("hello", "hello world") {
-		t.Fatal("growth is not a retraction")
-	}
-	if ui.ShouldAnimateRetraction("hello world", "goodbye") {
-		t.Fatal("unrelated text is not a retraction")
-	}
-}
-
-func TestPrevWordBoundary(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		in   string
-		end  int
-		want string
-	}{
-		{"single word", "hello", 5, ""},
-		{"two words trims separator", "hello world", 11, "hello"},
-		{"three words", "one two three", 13, "one two"},
-		{"across newline strips separator", "first\nsecond", 12, "first"},
-		{"trailing space then word", "hello world ", 12, "hello"},
-		{"start at zero", "hello", 0, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			runes := []rune(c.in)
-			got := ui.PrevWordBoundary(runes, c.end)
-			if string(runes[:got]) != c.want {
-				t.Fatalf("PrevWordBoundary(%q, %d) = %d (=%q), want %q",
-					c.in, c.end, got, string(runes[:got]), c.want)
-			}
-		})
 	}
 }
 
@@ -151,51 +94,6 @@ func TestShortenUsesASCIIEllipsis(t *testing.T) {
 	}
 }
 
-func TestGrabEscapeAndUngrab(t *testing.T) {
-	t.Parallel()
-
-	if os.Getenv("DISPLAY") == "" {
-		t.Skip("no DISPLAY set")
-	}
-
-	xu, err := xgbutil.NewConn()
-	if err != nil {
-		t.Skipf("cannot open X connection: %v", err)
-	}
-	defer xu.Conn().Close()
-
-	o := &Overlay{x: xu}
-	ch := o.GrabEscape()
-	if ch == nil {
-		t.Fatal("GrabEscape returned nil channel")
-	}
-	if !o.escapeGrabbed {
-		t.Fatal("expected escapeGrabbed to be true")
-	}
-
-	// Double grab should return same channel.
-	ch2 := o.GrabEscape()
-	if ch != ch2 {
-		t.Fatal("expected same channel on double grab")
-	}
-
-	// Ungrab should not panic.
-	o.UngrabEscape()
-	if o.escapeGrabbed {
-		t.Fatal("expected escapeGrabbed to be false after ungrab")
-	}
-}
-
-func TestUngrabEscapeIsIdempotent(t *testing.T) {
-	t.Parallel()
-
-	o := &Overlay{}
-
-	// Should not panic when not grabbed.
-	o.UngrabEscape()
-	o.UngrabEscape()
-}
-
 func TestFormatElapsedCountsUpFromZero(t *testing.T) {
 	t.Parallel()
 
@@ -204,24 +102,5 @@ func TestFormatElapsedCountsUpFromZero(t *testing.T) {
 	}
 	if got := formatElapsed("Wrapping up", 2300*time.Millisecond); got != "Wrapping up... (2.3s)" {
 		t.Fatalf("formatElapsed(2.3s) = %q, want %q", got, "Wrapping up... (2.3s)")
-	}
-}
-
-func TestFormatTwoPhaseElapsed(t *testing.T) {
-	t.Parallel()
-
-	got := formatTwoPhaseElapsed("Wait", "Stream", 1800*time.Millisecond)
-	if got != "Wait · Stream... (1.8s)" {
-		t.Fatalf("formatTwoPhaseElapsed = %q, want %q", got, "Wait · Stream... (1.8s)")
-	}
-}
-
-func TestPhaseDoneLineIncludesElapsed(t *testing.T) {
-	t.Parallel()
-
-	o := &Overlay{}
-	got := o.phaseDoneLine("Wrapping up", 2300*time.Millisecond)
-	if got != "Wrapping up — done (2.3s)" {
-		t.Fatalf("phaseDoneLine = %q, want %q", got, "Wrapping up — done (2.3s)")
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -36,20 +35,10 @@ const (
 	// VAD-detected pause gets force-cut at this boundary and the
 	// remainder rolls into the next chunk.
 	defaultChunkMaxSeconds = 28
-	// defaultHistoryTurns is how many prior (user-audio,
-	// assistant-transcript) pairs ride along on each request as
-	// few-shot context. Each turn adds ~1.3 MB of base64 audio worst-
-	// case at 30 s/16 kHz mono PCM16, so 2 is a balance between
-	// cross-chunk consistency and request size.
-	defaultHistoryTurns = 2
 	// defaultStreamSSE controls whether requests use SSE streaming.
 	// Always on — partials are how the user knows the model is
 	// actually generating their transcript.
 	defaultStreamSSE = true
-	// defaultContextMode picks how prior chunks are threaded into a
-	// new request. ChatAudioContextFewShot pairs each prior chunk
-	// with its transcript and was the validated default.
-	defaultContextMode = config.ChatAudioContextFewShot
 	// defaultSileroSilenceMS / defaultSileroSpeechMS /
 	// defaultSileroMinUtteranceMS are the Silero hysteresis knobs
 	// used by the chat-audio chunker. Pinned here because nobody
@@ -79,49 +68,30 @@ const DefaultBatchPrompt = "Transcribe each of the following speech segments in 
 // dictation surface. Unlike the realtime-WebSocket transports, this
 // backend is request/response: each VAD-detected utterance becomes one
 // /chat/completions POST with the audio embedded as an `input_audio`
-// content part. The few-shot history of prior (audio, transcript)
-// pairs gives the model context across the documented 30s per-call
-// audio cap.
+// content part. Each chunk is transcribed exactly once and in
+// isolation: no prior audio or transcript is re-sent.
 //
 // The pump and HTTP worker are split:
 //   - pump goroutine reads samples and runs Silero VAD; speech_stopped
 //     transitions and chunk_max_seconds boundaries close a chunk and
 //     hand it to the worker.
 //   - worker goroutine drains chunks from chunksCh, posts them
-//     serially (so each call sees the latest history), and pushes
+//     serially (so segments land in spoken order), and pushes
 //     transcripts back as DictationEvents (live) or finals (post-Finalize).
-//
-// Serialization matters: the assistant-turn from chunk N must be in
-// the prompt for chunk N+1 to keep cross-chunk context coherent.
 type chatAudioSession struct {
 	httpClient *http.Client
 	endpoint   string
 	model      string
 
-	chunkMaxSamples     int
-	historyTurns        int
-	promptTemplate      string
-	language            string
-	streamSSE           bool
-	contextMode         string
-	minChunkPeak        float64
-	minChunkRMS         float64
-	extraSystemPrompt   string
-	batchUntilRelease   bool
-	continuationRebatch bool
-	// rebatchMaxSamples caps the combined (prior + current) clip length
-	// a continuation rebatch may POST. Beyond it, Gemma's 30 s audio
-	// window would drop the tail, so the rebatch is skipped. Derived
-	// from cfg.RebatchMaxSeconds * sampleRate at startup.
-	rebatchMaxSamples int
-
-	// lastEmittedFormatted is the segment text most recently sent on
-	// the events channel as DictationEventSegment or as the Text of a
-	// prior DictationEventReplaceSegment. Owned by the worker
-	// goroutine; only continuation_rebatch reads it. Needed to compute
-	// the PrevLen (rune count) the injector uses to retract the old
-	// segment from the target window.
-	lastEmittedFormatted string
+	chunkMaxSamples int
+	promptTemplate  string
+	// promptHint is appended to the rendered prompt with a blank-line
+	// separator when non-empty (transcription.prompt_hint).
+	promptHint   string
+	language     string
+	streamSSE    bool
+	minChunkPeak float64
+	minChunkRMS  float64
 
 	// Audio assumptions: PCM16 mono at this sample rate. Lemonade's
 	// gemma audio path expects 16 kHz; the recorder already produces
@@ -144,11 +114,6 @@ type chatAudioSession struct {
 
 	liveSegments atomic.Bool
 	segmentCount atomic.Int32
-
-	// Few-shot history. Owned exclusively by the worker goroutine —
-	// every read and write happens inside worker() (transcribeChunk →
-	// buildMessages reads; appendHistory writes). No mutex needed.
-	history []chatTurn
 
 	// workerDone closes once the worker exits, so Finalize can wait
 	// for in-flight HTTP work to drain before returning.
@@ -177,16 +142,6 @@ type chatChunk struct {
 	// path that emitted it.
 	reason   string
 	trailing bool
-}
-
-// chatTurn is a single (user-audio, assistant-transcript) pair that
-// gets folded into the few-shot history list on subsequent requests.
-// pcm is kept alongside wav so continuation_rebatch can prepend the
-// raw samples onto the next chunk without WAV-decoding round-tripping.
-type chatTurn struct {
-	pcm        []int16
-	wav        []byte
-	transcript string
 }
 
 // startChatAudioSession constructs and starts a chat-audio dictation
@@ -218,31 +173,18 @@ func startChatAudioSession(
 		sessionlog.Warnf("chat-audio: audio capture disabled — %v", err)
 		writer = nil
 	}
-	// A TranscriptionConfig built in code (e.g. tests) may leave
-	// RebatchMaxSeconds unset; fall back to the force-cut bound so the
-	// rebatch cap is never accidentally 0 (which would skip every
-	// rebatch). config.Default() supplies 28 for file-loaded configs.
-	rebatchMaxSeconds := cfg.RebatchMaxSeconds
-	if rebatchMaxSeconds <= 0 {
-		rebatchMaxSeconds = defaultChunkMaxSeconds
-	}
 	pumpCtx, cancel := context.WithCancel(ctx)
 	s := &chatAudioSession{
 		httpClient:           httpClient,
 		endpoint:             endpoint,
 		model:                cfg.Model,
 		chunkMaxSamples:      defaultChunkMaxSeconds * opts.SampleRate,
-		historyTurns:         defaultHistoryTurns,
 		promptTemplate:       cfg.Prompt,
+		promptHint:           cfg.PromptHint,
 		language:             cfg.Language,
 		streamSSE:            defaultStreamSSE,
-		contextMode:          defaultContextMode,
 		minChunkPeak:         cfg.MinChunkPeak,
 		minChunkRMS:          cfg.MinChunkRMS,
-		extraSystemPrompt:    opts.ExtraSystemPrompt,
-		batchUntilRelease:    cfg.BatchUntilRelease,
-		continuationRebatch:  cfg.ContinuationRebatch,
-		rebatchMaxSamples:    rebatchMaxSeconds * opts.SampleRate,
 		sampleRate:           opts.SampleRate,
 		hallucinationFilters: buildHallucinationSet(cfg.HallucinationFilters),
 		audioCapture:         writer,
@@ -255,8 +197,8 @@ func startChatAudioSession(
 	}
 	s.liveSegments.Store(true)
 
-	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds history_turns=%d stream=%t context_mode=%s batch_until_release=%t continuation_rebatch=%t rebatch_max=%ds",
-		s.model, defaultChunkMaxSeconds, s.historyTurns, s.streamSSE, s.contextMode, s.batchUntilRelease, s.continuationRebatch, rebatchMaxSeconds)
+	sessionlog.Infof("chat-audio: session started model=%q chunk_max=%ds stream=%t prompt_hint_chars=%d",
+		s.model, defaultChunkMaxSeconds, s.streamSSE, len(strings.TrimSpace(s.promptHint)))
 
 	// "Connection ready" is synthetic for the chat-audio backend — there
 	// is no upfront handshake to await. The run goroutine fires
@@ -301,7 +243,6 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 	defer telemetry.EndSpan(collectSpan, nil)
 
 	var trailing string
-	var retractFromLive int
 	for {
 		select {
 		case <-ctx.Done():
@@ -311,31 +252,10 @@ func (s *chatAudioSession) Finalize(ctx context.Context) (FinalizeResult, error)
 			return FinalizeResult{}, collectCtx.Err()
 		case res, ok := <-s.finals:
 			if !ok {
-				return FinalizeResult{Text: trailing, RetractFromLivePrevLen: retractFromLive}, nil
+				return FinalizeResult{Text: trailing}, nil
 			}
 			if res.err != nil {
 				return FinalizeResult{}, res.err
-			}
-			if res.replacePrevLen > 0 {
-				// Continuation rebatch lands after liveSegments was
-				// flipped to false. Try to retract from the
-				// trailing-collector's buffer first; any portion of
-				// the retraction that doesn't fit (because the prior
-				// emitted segment lives in the caller's liveText
-				// rather than in trailing) is forwarded up via
-				// RetractFromLivePrevLen so the caller strips it from
-				// its own buffer before joining.
-				runes := []rune(trailing)
-				applied := res.replacePrevLen
-				if applied > len(runes) {
-					applied = len(runes)
-				}
-				if applied > 0 {
-					trailing = string(runes[:len(runes)-applied])
-				}
-				if remainder := res.replacePrevLen - applied; remainder > 0 {
-					retractFromLive += remainder
-				}
 			}
 			trailing += res.text
 		}
@@ -453,22 +373,6 @@ func (s *chatAudioSession) run(
 			if vad != nil {
 				if evt := vad.Feed(chunk); evt == VADSpeechStopped {
 					vad.Reset()
-					if s.batchUntilRelease {
-						// Stash the speech episode into the pending
-						// batch instead of POSTing it. The trailing
-						// flush at hotkey release sends everything as
-						// one multi-clip request — see the comment on
-						// pendingForceCuts above.
-						if len(buf) > 0 {
-							clip := make([]int16, len(buf))
-							copy(clip, buf)
-							buf = buf[:0]
-							pendingForceCuts = append(pendingForceCuts, clip)
-							sessionlog.Debugf("chat-audio: vad_stopped batched (batch_until_release) clips=%d clip_ms=%d",
-								len(pendingForceCuts), len(clip)*1000/s.sampleRate)
-						}
-						continue
-					}
 					flush("vad_stopped", false)
 					continue
 				}
@@ -490,8 +394,8 @@ func (s *chatAudioSession) run(
 	}
 }
 
-// worker serially drains chunks from chunksCh, posts each to the chat-
-// completions endpoint, and folds successful transcripts into history.
+// worker serially drains chunks from chunksCh and posts each to the
+// chat-completions endpoint.
 // Closes finals on the trailing-marker chunk so Finalize can return.
 func (s *chatAudioSession) worker(ctx context.Context) {
 	defer close(s.workerDone)
@@ -530,61 +434,14 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 				}
 				continue
 			}
-			// Continuation re-batch: when the prior emitted segment
-			// ended without terminal punctuation, prepend its audio
-			// onto this clip so the model sees both as one continuous
-			// utterance and produces a unified transcript. Only kicks
-			// in for single-clip chunks (a multi-clip force-cut batch
-			// is its own utterance scope and doesn't get rebatched).
-			rebatch := false
-			var rebatchPrevLen int
-			var rebatchPriorFormatted string
-			if s.continuationRebatch && len(liveClips) == 1 && len(s.history) > 0 {
-				prior := s.history[len(s.history)-1]
-				combinedSamples := len(prior.pcm) + len(liveClips[0])
-				rebatchTooLong := combinedSamples > s.rebatchMaxSamples
-				if !endsWithTerminalPunctuation(prior.transcript) && len(prior.pcm) > 0 && rebatchTooLong {
-					// Prepending the prior audio would push the request
-					// past Gemma's 30 s window, which silently drops the
-					// tail (the freshly-spoken words). Skip the rebatch
-					// and post this chunk as its own segment — two
-					// segments beat losing audio. See docs/debugging.md.
-					sessionlog.Infof("chat-audio: continuation rebatch skipped — combined audio %dms exceeds rebatch cap %dms; posting %q as a fresh segment to avoid Gemma dropping the tail",
-						combinedSamples*1000/s.sampleRate, s.rebatchMaxSamples*1000/s.sampleRate, truncate(prior.transcript, 60))
-				} else if !endsWithTerminalPunctuation(prior.transcript) && len(prior.pcm) > 0 {
-					sessionlog.Infof("chat-audio: continuation rebatch — prior transcript %q lacks terminal punctuation, prepending %dms of prior audio",
-						truncate(prior.transcript, 60), len(prior.pcm)*1000/s.sampleRate)
-					liveClips = [][]int16{prior.pcm, liveClips[0]}
-					rebatch = true
-					rebatchPrevLen = utf8.RuneCountInString(s.lastEmittedFormatted)
-					rebatchPriorFormatted = s.lastEmittedFormatted
-					// Announce the upcoming replacement so the overlay can
-					// retract (and animate the deletion of) the prior
-					// segment BEFORE the new transcript's SSE partials start
-					// rendering on top of it. Only meaningful in the live
-					// phase — post-Finalize the prior segment hasn't been
-					// emitted to the consumer yet (it's still queued).
-					if s.liveSegments.Load() && rebatchPrevLen > 0 {
-						sessionlog.Infof("chat-audio: continuation rebatch — emitting begin_replace prev_runes=%d", rebatchPrevLen)
-						select {
-						case s.events <- DictationEvent{Type: DictationEventBeginReplace, PrevLen: rebatchPrevLen}:
-						default:
-						}
-					}
-				}
-			}
 			// Mirror this chunk's WAV to disk BEFORE the POST so a
 			// failed/cancelled request still leaves replayable audio
-			// on disk. Tag the filename with the flush reason (and
-			// "-rebatch" when continuation_rebatch prepended prior
-			// audio) so it lines up with the chat-audio log.
+			// on disk. Tag the filename with the flush reason so it
+			// lines up with the chat-audio log.
 			if s.audioCapture != nil {
 				captureReason := chunk.reason
 				if captureReason == "" {
 					captureReason = "unknown"
-				}
-				if rebatch {
-					captureReason = captureReason + "-rebatch"
 				}
 				if chunk.trailing {
 					captureReason = captureReason + "-trailing"
@@ -595,17 +452,6 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 			text, err := s.transcribeChunk(ctx, liveClips)
 			if err != nil {
 				sessionlog.Errorf("chat-audio: chunk transcription failed: %v", err)
-				if rebatch && s.liveSegments.Load() && rebatchPrevLen > 0 {
-					// Restore the prior segment that we asked the overlay
-					// to retract — without this, a failed rebatch leaves
-					// the overlay short by one segment until the next
-					// successful chunk replaces it.
-					sessionlog.Infof("chat-audio: continuation rebatch failed — emitting cancel_replace to restore prior segment (prev_runes=%d)", rebatchPrevLen)
-					select {
-					case s.events <- DictationEvent{Type: DictationEventCancelReplace, Text: rebatchPriorFormatted, PrevLen: rebatchPrevLen}:
-					default:
-					}
-				}
 				if !s.liveSegments.Load() {
 					select {
 					case s.finals <- finalResult{err: err}:
@@ -626,51 +472,16 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 				text = ""
 			}
 			if text != "" {
-				combinedPCM := concatClips(liveClips)
-				newTurn := chatTurn{
-					pcm:        combinedPCM,
-					wav:        encodePCM16WAV(combinedPCM, s.sampleRate),
-					transcript: text,
-				}
-				if rebatch {
-					// Replace history's last entry instead of appending —
-					// the unified transcript subsumes the prior turn.
-					s.history[len(s.history)-1] = newTurn
-					formatted := s.formatReplacement(text)
-					prevLen := utf8.RuneCountInString(s.lastEmittedFormatted)
-					sessionlog.Infof("chat-audio: continuation rebatch — replacing prior segment (prev_runes=%d new_runes=%d)",
-						prevLen, utf8.RuneCountInString(formatted))
-					s.lastEmittedFormatted = formatted
-					if s.liveSegments.Load() {
-						select {
-						case s.events <- DictationEvent{Type: DictationEventReplaceSegment, Text: formatted, PrevLen: prevLen}:
-						default:
-						}
-					} else {
-						// Post-Finalize: the prior segment hasn't been
-						// pasted yet (it's queued on s.finals as a
-						// finalResult). Replace it in the finals queue
-						// shape: emit a replace marker that the finalize
-						// path collapses into the joined text.
-						select {
-						case s.finals <- finalResult{text: formatted, replacePrevLen: prevLen}:
-						default:
-						}
+				formatted := formatSegmentText(&s.segmentCount, text)
+				if s.liveSegments.Load() {
+					select {
+					case s.events <- DictationEvent{Type: DictationEventSegment, Text: formatted}:
+					default:
 					}
 				} else {
-					s.appendHistory(newTurn)
-					formatted := formatSegmentText(&s.segmentCount, text)
-					s.lastEmittedFormatted = formatted
-					if s.liveSegments.Load() {
-						select {
-						case s.events <- DictationEvent{Type: DictationEventSegment, Text: formatted}:
-						default:
-						}
-					} else {
-						select {
-						case s.finals <- finalResult{text: formatted}:
-						default:
-						}
+					select {
+					case s.finals <- finalResult{text: formatted}:
+					default:
 					}
 				}
 			}
@@ -685,8 +496,7 @@ func (s *chatAudioSession) worker(ctx context.Context) {
 // posts to /chat/completions, and returns the assembled transcript.
 // Emits SSE deltas as DictationEventPartial events while the response
 // streams (when streamSSE is on). Multi-clip chunks (force-cut
-// batches) produce one POST with N input_audio parts and skip
-// few-shot history — the audio itself IS the cross-chunk context.
+// batches) produce one POST with N input_audio parts.
 func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16) (text string, err error) {
 	var totalSamples int
 	wavs := make([][]byte, len(clips))
@@ -718,28 +528,12 @@ func (s *chatAudioSession) transcribeChunk(ctx context.Context, clips [][]int16)
 	for _, w := range wavs {
 		totalWAVBytes += len(w)
 	}
-	// Mirror buildMessages' trimming so the trace reflects what's
-	// actually on the wire (multi-clip drops history; otherwise the
-	// last historyTurns turns).
-	priorOnWire := s.historySnapshot()
-	if len(clips) > 1 {
-		priorOnWire = nil
-	} else if s.historyTurns < len(priorOnWire) {
-		priorOnWire = priorOnWire[len(priorOnWire)-s.historyTurns:]
-	}
-	priorTranscripts := make([]string, len(priorOnWire))
-	for i, t := range priorOnWire {
-		priorTranscripts[i] = t.transcript
-	}
 	span.SetAttributes(
 		attribute.Int("chunk.wav_bytes", totalWAVBytes),
-		attribute.Int("chunk.history_turns", s.historyLen()),
-		attribute.Int("chunk.history_sent_turns", len(priorOnWire)),
-		attribute.StringSlice("chunk.history_transcripts", priorTranscripts),
 		attribute.Int("chunk.request_bytes", len(raw)),
 	)
-	sessionlog.Infof("chat-audio: posting chunk clips=%d wav=%dB history=%d req=%dB",
-		len(clips), totalWAVBytes, s.historyLen(), len(raw))
+	sessionlog.Infof("chat-audio: posting chunk clips=%d wav=%dB req=%dB",
+		len(clips), totalWAVBytes, len(raw))
 	// Audit log of the exact request shape with audio bytes redacted
 	// to a "<wav N bytes>" placeholder. Lets a session-log reader
 	// inspect the prompt, model, message structure, and few-shot vs
@@ -897,95 +691,38 @@ func parseSSEDelta(payload string) (string, string, error) {
 // role frames the same content as meta-instruction the model treats
 // as out-of-band.
 //
-// User content carries only audio. Three shapes:
+// User content carries only audio. Two shapes:
 //
-//  1. Single-clip, history-aware (few_shot mode):
+//  1. Single clip:
 //     system:   instruction
-//     user:     [audio prior 1]
-//     assistant: prior transcript 1
-//     ...
 //     user:     [audio current]
 //
-//  2. Single-clip, history-aware (inline_clips mode):
-//     system:   instruction (+ "transcribe ONLY the FINAL clip" framing
-//     when history non-empty)
-//     user:     [text "[prior clip 1]:", audio prior 1, ..., text
-//     "[current clip]:", audio current]
-//
-//  3. Multi-clip current (force-cut batch):
+//  2. Multi-clip current (force-cut batch):
 //     system:   instruction (+ "transcribe ALL clips as one continuous
 //     utterance" framing)
 //     user:     [text "[clip 1]:", audio 1, text "[clip 2]:", audio 2, ...]
-//     History is intentionally skipped — the audio is the context.
-//
-// historyTurns caps the history fed back to the model. When 0 (or no
-// history yet, or multi-clip) the request reduces to one user message.
 func (s *chatAudioSession) buildMessages(currentWAVs [][]byte) []map[string]any {
 	multiClip := len(currentWAVs) > 1
-	history := s.historySnapshot()
-	if multiClip {
-		// Skip history for multi-clip requests — the clips themselves
-		// already give the model the full utterance audio. Mixing
-		// per-clip and per-utterance history shapes confuses the
-		// transcript boundary, and a multi-clip request body is
-		// already large; not adding more.
-		history = nil
-	} else if s.historyTurns < len(history) {
-		history = history[len(history)-s.historyTurns:]
-	}
 
 	systemPrompt := s.renderPrompt()
-	if extra := strings.TrimSpace(s.extraSystemPrompt); extra != "" {
-		systemPrompt = systemPrompt + "\n\n" + extra
+	if hint := strings.TrimSpace(s.promptHint); hint != "" {
+		systemPrompt = systemPrompt + "\n\n" + hint
 	}
-	switch {
-	case multiClip:
+	if multiClip {
 		systemPrompt = "You will receive several short audio clips that together form ONE continuous utterance " +
 			"(the audio was split for size). Transcribe ALL clips IN ORDER as a single continuous text — " +
 			"no clip labels, no separators, just the spoken content as if it were one recording.\n\n" +
 			systemPrompt
-	case s.contextMode == config.ChatAudioContextInlineClips && len(history) > 0:
-		systemPrompt = "You will receive several short audio clips, in order. " +
-			"Transcribe ONLY the FINAL clip; the earlier clips are provided " +
-			"as continuous context so you can keep proper-noun spelling, " +
-			"language, and turn boundaries consistent.\n\n" + systemPrompt
 	}
 
-	msgs := make([]map[string]any, 0, 2+2*len(history)+1)
-	msgs = append(msgs, map[string]any{
-		"role":    "system",
-		"content": systemPrompt,
-	})
-
-	switch {
-	case multiClip:
-		msgs = append(msgs, map[string]any{
-			"role":    "user",
-			"content": multiClipContent(currentWAVs),
-		})
-		return msgs
-	case s.contextMode == config.ChatAudioContextInlineClips:
-		msgs = append(msgs, map[string]any{
-			"role":    "user",
-			"content": inlineClipsContent(history, currentWAVs[0]),
-		})
-		return msgs
+	var user any = []map[string]any{audioPart(currentWAVs[0])}
+	if multiClip {
+		user = multiClipContent(currentWAVs)
 	}
-	for _, turn := range history {
-		msgs = append(msgs, map[string]any{
-			"role":    "user",
-			"content": []map[string]any{audioPart(turn.wav)},
-		})
-		msgs = append(msgs, map[string]any{
-			"role":    "assistant",
-			"content": turn.transcript,
-		})
+	return []map[string]any{
+		{"role": "system", "content": systemPrompt},
+		{"role": "user", "content": user},
 	}
-	msgs = append(msgs, map[string]any{
-		"role":    "user",
-		"content": []map[string]any{audioPart(currentWAVs[0])},
-	})
-	return msgs
 }
 
 // multiClipContent builds the user message body for a force-cut batch —
@@ -1004,29 +741,8 @@ func multiClipContent(wavs [][]byte) []map[string]any {
 	return parts
 }
 
-// inlineClipsContent builds the inline-clips multimodal content array
-// used by the user message. The leading "transcribe ONLY the FINAL
-// clip" framing now lives in the system message; this function just
-// produces the audio sequence labelled by clip index.
-func inlineClipsContent(history []chatTurn, currentWAV []byte) []map[string]any {
-	parts := make([]map[string]any, 0, 2*(len(history)+1))
-	for i, turn := range history {
-		parts = append(parts,
-			map[string]any{"type": "text", "text": fmt.Sprintf("[prior clip %d]:", i+1)},
-			audioPart(turn.wav),
-		)
-	}
-	parts = append(parts,
-		map[string]any{"type": "text", "text": "[current clip]:"},
-		audioPart(currentWAV),
-	)
-	return parts
-}
-
-// concatClips joins multiple PCM clips into one slice. Used when
-// folding a multi-clip transcribed result into history — the
-// assistant's transcript covers the whole concatenated audio, so a
-// single chatTurn with all the audio is the right shape.
+// concatClips joins multiple PCM clips into one slice for the audio
+// capture mirror.
 func concatClips(clips [][]int16) []int16 {
 	total := 0
 	for _, c := range clips {
@@ -1081,73 +797,11 @@ func redactedRequestJSON(body map[string]any) (string, error) {
 	return strings.TrimRight(buf.String(), "\n"), nil
 }
 
-// endsWithTerminalPunctuation reports whether s ends with a character
-// that closes a sentence/clause and indicates the speaker reached a
-// natural boundary. The set covers the standard ASCII trio plus the
-// ellipsis (which often appears at the end of model output when the
-// utterance trailed off rather than completed). Whitespace at the end
-// is ignored. Empty input returns false (treat "no transcript" as
-// unfinished so an upcoming chunk still rebatches).
-func endsWithTerminalPunctuation(text string) bool {
-	text = strings.TrimRight(text, " \t\n\r")
-	if text == "" {
-		return false
-	}
-	r, _ := utf8.DecodeLastRuneInString(text)
-	switch r {
-	case '.', '?', '!', '…':
-		return true
-	}
-	return false
-}
-
-// formatReplacement renders the unified rebatched text in a way
-// consistent with formatSegmentText's leading-space rule, without
-// incrementing the segment counter — the rebatch replaces a prior
-// segment, it doesn't add a new one. If the prior emitted segment
-// began with whitespace (i.e. it wasn't the first), the replacement
-// also begins with whitespace unless the new text leads with
-// punctuation or already has its own.
-func (s *chatAudioSession) formatReplacement(newText string) string {
-	newText = strings.TrimSpace(newText)
-	if newText == "" {
-		return ""
-	}
-	prior := s.lastEmittedFormatted
-	leading := strings.HasPrefix(prior, " ") || strings.HasPrefix(prior, "\n")
-	if !leading {
-		return newText
-	}
-	if strings.HasPrefix(newText, " ") || strings.HasPrefix(newText, "\n") || startsWithPunctuation(newText) {
-		return newText
-	}
-	return " " + newText
-}
-
 func (s *chatAudioSession) renderPrompt() string {
 	if s.language == "" {
 		return s.promptTemplate
 	}
 	return strings.ReplaceAll(s.promptTemplate, "{language}", s.language)
-}
-
-func (s *chatAudioSession) appendHistory(turn chatTurn) {
-	s.history = append(s.history, turn)
-	// Cap at 2*historyTurns to bound memory if Finalize never runs;
-	// only the most recent historyTurns are sent on the wire anyway.
-	if cap := s.historyTurns * 2; cap > 0 && len(s.history) > cap {
-		s.history = s.history[len(s.history)-cap:]
-	}
-}
-
-func (s *chatAudioSession) historySnapshot() []chatTurn {
-	out := make([]chatTurn, len(s.history))
-	copy(out, s.history)
-	return out
-}
-
-func (s *chatAudioSession) historyLen() int {
-	return len(s.history)
 }
 
 func (s *chatAudioSession) emitPartial(text string) {
@@ -1358,9 +1012,9 @@ func (c *Client) resolveBatchBudget(ctx context.Context) (int, string) {
 // the user finds a number their model handles reliably.
 //
 // Unlike StartDictation, there is no streaming pump, no VAD, no
-// chunk_max splitting, and no few-shot history — the segments
-// themselves are the input. Postprocess is not run; the batch prompt
-// already produces cleaned text.
+// chunk_max splitting — the segments
+// themselves are the input; the batch prompt already produces cleaned
+// text.
 func (c *Client) TranscribeBatchAudios(ctx context.Context, segments []BatchSegment) (string, error) {
 	if len(segments) == 0 {
 		return "", errors.New("transcribe batch: no segments")

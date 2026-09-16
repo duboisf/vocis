@@ -33,13 +33,13 @@ func SegmentIDsWithinWindow(segs []SegmentInfo, now time.Time, window time.Durat
 // runDictation feeds a prepared PCM buffer through the realtime
 // transcription pipeline as a single dictation session. Shared by
 // transcribeSegment (single pick) and transcribeBatch (recall last).
-// Everything from "open session" through "drain final transcript and
-// optionally postprocess" is identical and lives here.
+// Everything from "open session" through "drain final transcript" is
+// identical and lives here.
 //
 // `timeout` controls the dictation context: 0 means "no internal
 // timeout, lifetime driven by spanCtx" (batches can legitimately take
 // tens of minutes on a local model); positive means "cap at this".
-// spanPrefix names the child spans (.feed / .finalize / .postprocess)
+// spanPrefix names the child spans (.feed / .finalize)
 // under whatever root span the caller already opened.
 func (d *Daemon) runDictation(
 	spanCtx context.Context,
@@ -48,7 +48,6 @@ func (d *Daemon) runDictation(
 	sampleRate int,
 	totalMS int,
 	spanPrefix string,
-	postprocess bool,
 ) (string, error) {
 	var dictCtx context.Context
 	var cancel context.CancelFunc
@@ -138,28 +137,6 @@ func (d *Daemon) runDictation(
 
 	text := result.Text
 
-	if postprocess && d.cfg.PostProcess.Enabled {
-		_, ppSpan := telemetry.StartSpan(spanCtx, spanPrefix+".postprocess")
-		// Use a generous wall-clock cap for the recall path's
-		// postprocess call. The per-request timeout that PostProcess
-		// itself enforces is pinned in internal/transcribe; this is
-		// just a context fence so a runaway HTTP call can't hang
-		// the daemon. 60 s covers a cold-loaded model plus a long
-		// transcript without coupling to the transcribe package's
-		// internal default.
-		ppCtx, ppCancel := context.WithTimeout(context.Background(), 60*time.Second)
-		pp := d.transcribeClient.PostProcess(ppCtx, d.cfg.PostProcess, text, nil)
-		ppCancel()
-		if !pp.Skipped {
-			text = pp.Text
-		}
-		ppSpan.SetAttributes(
-			attribute.Bool("postprocess.skipped", pp.Skipped),
-			attribute.Int("postprocess.text_length", len(text)),
-		)
-		telemetry.EndSpan(ppSpan, nil)
-	}
-
 	// Wait for the drain to exit so a tight pick loop doesn't leave
 	// stragglers behind. Cancel explicitly first — session.Events()
 	// doesn't close on Finalize, so the drain is blocked on
@@ -178,11 +155,6 @@ func (d *Daemon) runDictation(
 // updated — a batch result is a different artifact from per-segment
 // transcriptions, so clobbering per-segment caches would be wrong.
 //
-// The `postprocess` flag is ignored: the batch prompt itself produces
-// cleaned text, and post-processing would mangle the timestamped line
-// format the user is relying on. A warn-log fires when the caller
-// passes true so the surprising no-op is visible.
-//
 // Concurrent calls with transcribeSegment are fine: http.Client is
 // concurrency-safe and Lemonade schedules requests server-side.
 //
@@ -190,7 +162,7 @@ func (d *Daemon) runDictation(
 // disconnection (Ctrl-C on the CLI) propagates through and aborts the
 // HTTP POST. A batch can legitimately take a while on a local model,
 // so there is no internal wall-clock timeout.
-func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess bool) (string, error) {
+func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64) (string, error) {
 	if len(ids) == 0 {
 		return "", fmt.Errorf("no segment ids provided")
 	}
@@ -208,10 +180,6 @@ func (d *Daemon) transcribeBatch(ctx context.Context, ids []int64, postprocess b
 			runtime.NumGoroutine()-goroutinesBefore))
 		telemetry.EndSpan(span, err)
 	}()
-
-	if postprocess {
-		sessionlog.Warnf("recall: batch transcribe ignoring postprocess=true — batch prompt already produces cleaned text")
-	}
 
 	batch := make([]transcribe.BatchSegment, 0, len(ids))
 	var totalMS int

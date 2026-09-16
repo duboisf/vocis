@@ -92,7 +92,7 @@ func runDoctor() error {
 
 // checkLemonadeModels hits /models (is it downloaded?) and /health
 // (is it currently resident?) and reports both for the configured
-// transcribe + postprocess model IDs. "Downloaded" means the model
+// transcription model ID. "Downloaded" means the model
 // is on disk; "loaded" means Lemonade has it in memory right now
 // and will respond to a request without a 5-10s load stall. The WS
 // realtime stream silently accepts any model name at session.update,
@@ -126,9 +126,6 @@ func checkLemonadeModels(cfg config.Config) {
 	}
 
 	reportModel("lemonade-tx", cfg.Transcription.Model, downloaded, loaded)
-	if cfg.PostProcess.Enabled {
-		reportModel("lemonade-pp", cfg.PostProcess.Model, downloaded, loaded)
-	}
 }
 
 func fetchDownloadedModels(baseURL string) (map[string]bool, error) {

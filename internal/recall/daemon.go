@@ -29,13 +29,13 @@ import (
 // than the chat-audio chunker (lower min_utterance, lower min_silence
 // — quick bursts of speech still get captured).
 const (
-	defaultMinSilenceMS     = 500
-	defaultMinSpeechMS      = 150
-	defaultMinUtteranceMS   = 500
-	defaultPrerollMS        = 300
+	defaultMinSilenceMS      = 500
+	defaultMinSpeechMS       = 150
+	defaultMinUtteranceMS    = 500
+	defaultPrerollMS         = 300
 	defaultMaxSegmentSeconds = 30
-	defaultMinSegmentPeak   = 0.02
-	defaultMinSegmentRMS    = 0.005
+	defaultMinSegmentPeak    = 0.02
+	defaultMinSegmentRMS     = 0.005
 )
 
 // Daemon owns the recall lifecycle: recorder → Silero VAD → segment
@@ -439,13 +439,13 @@ func (d *Daemon) dispatch(ctx context.Context, req Request) Response {
 	case OpList:
 		return Response{Segments: d.listSegments()}
 	case OpTranscribe:
-		text, err := d.transcribeSegment(ctx, req.SegmentID, req.PostProcess)
+		text, err := d.transcribeSegment(ctx, req.SegmentID)
 		if err != nil {
 			return Response{Error: err.Error()}
 		}
 		return Response{Transcript: text}
 	case OpTranscribeBatch:
-		text, err := d.transcribeBatch(ctx, req.SegmentIDs, req.PostProcess)
+		text, err := d.transcribeBatch(ctx, req.SegmentIDs)
 		if err != nil {
 			return Response{Error: err.Error()}
 		}
@@ -509,12 +509,11 @@ func (d *Daemon) listSegments() []SegmentInfo {
 // still started under ctx so it remains a root span (handleConn's
 // ctx carries no existing span), giving each pick its own trace in
 // Jaeger.
-func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bool) (string, error) {
+func (d *Daemon) transcribeSegment(ctx context.Context, id int64) (string, error) {
 	goroutinesBefore := runtime.NumGoroutine()
 
 	spanCtx, span := telemetry.StartSpan(ctx, "vocis.recall.transcribe",
 		attribute.Int64("segment.id", id),
-		attribute.Bool("postprocess", postprocess),
 	)
 	var err error
 	defer func() {
@@ -533,14 +532,14 @@ func (d *Daemon) transcribeSegment(ctx context.Context, id int64, postprocess bo
 		attribute.Float64("segment.peak_level", seg.PeakLevel),
 	)
 
-	if seg.Transcript != "" && !postprocess {
+	if seg.Transcript != "" {
 		span.SetAttributes(attribute.Bool("cache_hit", true))
 		return seg.Transcript, nil
 	}
 	span.SetAttributes(attribute.Bool("cache_hit", false))
 
 	text, runErr := d.runDictation(spanCtx, 60*time.Second, seg.PCM, seg.SampleRate,
-		int(seg.Duration/time.Millisecond), "vocis.recall.transcribe", postprocess)
+		int(seg.Duration/time.Millisecond), "vocis.recall.transcribe")
 	if runErr != nil {
 		err = runErr
 		return "", err

@@ -53,7 +53,7 @@ probes the local Lemonade Server to populate transcription.base_url.`,
 
 var configModelsCmd = &cobra.Command{
 	Use:   "models",
-	Short: "List models from the configured backend and pick transcription + postprocess models",
+	Short: "List models from the configured backend and pick the transcription model",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runConfigModels()
 	},
@@ -243,15 +243,12 @@ func runConfigModels() error {
 		return err
 	}
 
-	txModels, ppModels, err := fetchLemonadeModels(cfg)
+	txModels, err := fetchLemonadeModels(cfg)
 	if err != nil {
 		return err
 	}
 	if len(txModels) == 0 {
 		return errors.New("no transcription-capable models returned from Lemonade")
-	}
-	if len(ppModels) == 0 {
-		return errors.New("no chat-capable models returned from Lemonade")
 	}
 
 	fmt.Printf("Transcription model (current: %s)\n", cfg.Transcription.Model)
@@ -259,28 +256,19 @@ func runConfigModels() error {
 	if err != nil {
 		return err
 	}
-
-	fmt.Printf("\nPost-processing model (current: %s)\n", cfg.PostProcess.Model)
-	newPP, err := pickModel(ppModels, cfg.PostProcess.Model)
-	if err != nil {
-		return err
-	}
-
 	cfg.Transcription.Model = newTx
-	cfg.PostProcess.Model = newPP
 
 	if err := config.Save(path, cfg); err != nil {
 		return err
 	}
-	fmt.Printf("\nWrote %s\n  transcription.model=%s\n  postprocess.model=%s\n",
-		path, cfg.Transcription.Model, cfg.PostProcess.Model)
+	fmt.Printf("\nWrote %s\n  transcription.model=%s\n", path, cfg.Transcription.Model)
 	return nil
 }
 
-func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {
+func fetchLemonadeModels(cfg config.Config) (tx []modelChoice, err error) {
 	baseURL := strings.TrimRight(cfg.Transcription.BaseURL, "/")
 	if baseURL == "" {
-		return nil, nil, errors.New("transcription.base_url is empty; run `vocis config backend` and pick lemonade first")
+		return nil, errors.New("transcription.base_url is empty; run `vocis config backend` and pick lemonade first")
 	}
 
 	// show_all=true returns Lemonade's full registry (not just downloaded),
@@ -290,15 +278,15 @@ func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models?show_all=true", nil)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("GET %s/models: %w", baseURL, err)
+		return nil, fmt.Errorf("GET %s/models: %w", baseURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("GET %s/models: status %d", baseURL, resp.StatusCode)
+		return nil, fmt.Errorf("GET %s/models: status %d", baseURL, resp.StatusCode)
 	}
 
 	var payload struct {
@@ -311,7 +299,7 @@ func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, nil, fmt.Errorf("decode models: %w", err)
+		return nil, fmt.Errorf("decode models: %w", err)
 	}
 
 	for _, m := range payload.Data {
@@ -330,26 +318,9 @@ func fetchLemonadeModels(cfg config.Config) (tx, pp []modelChoice, err error) {
 		if labels["transcription"] {
 			tx = append(tx, choice)
 		}
-		if isLemonadePP(labels) {
-			pp = append(pp, choice)
-		}
 	}
 	sort.Slice(tx, func(i, j int) bool { return tx[i].sortKey < tx[j].sortKey })
-	sort.Slice(pp, func(i, j int) bool { return pp[i].sortKey < pp[j].sortKey })
-	return tx, pp, nil
-}
-
-// isLemonadePP returns true for chat models suitable for post-processing.
-// We exclude reasoning models because their streaming response emits
-// reasoning_content before content, which trips the first-token timeout
-// in PostProcess. The other exclusions drop non-chat modalities.
-func isLemonadePP(labels map[string]bool) bool {
-	for _, bad := range []string{"tts", "transcription", "embeddings", "reranking", "image", "esrgan", "vision", "speech", "reasoning"} {
-		if labels[bad] {
-			return false
-		}
-	}
-	return true
+	return tx, nil
 }
 
 func labelSet(ls []string) map[string]bool {

@@ -12,9 +12,8 @@ sequenceDiagram
     participant Recorder
     participant Lemonade
     participant Injector
-    participant PostProcess
 
-    Note over User,PostProcess: Record Start
+    Note over User,Injector: Record Start
 
     User->>App: Ctrl+Shift+Space (Down)
     App->>App: Reload config
@@ -45,11 +44,10 @@ sequenceDiagram
         App->>Overlay: SetSubmitMode (⏎ submit throbs yellow)
     end
 
-    Note over User,PostProcess: Record Stop
+    Note over User,Injector: Record Stop
 
     User->>App: Release all keys (Up)
     App->>Overlay: ShowFinishing (heartbeat + elapsed timer)
-    App->>Overlay: GrabEscape
     App->>Recorder: Stop capture
 
     Note over Lemonade: Finalize / collect_trailing
@@ -60,26 +58,7 @@ sequenceDiagram
 
     App->>Overlay: SetFinishingText (full text with newlines)
 
-    alt Post-processing enabled & enough words
-        App->>Overlay: SetFinishingPhase("Wait")
-        App->>PostProcess: Stream cleanup (two-phase timeout)
-        alt First token arrives
-            PostProcess-->>App: onFirstToken callback
-            App->>Overlay: ExtendFinishingPhase("Stream")
-            PostProcess-->>App: Cleaned text
-        else User presses Escape
-            App->>App: Skip, use raw text
-            App->>Overlay: ShowWarning("Raw text pasted...")
-        else First token timeout
-            PostProcess-->>App: Fall back to raw text
-            App->>Overlay: ShowWarning("Raw text pasted...")
-        else Total timeout
-            PostProcess-->>App: Fall back to raw text
-            App->>Overlay: ShowWarning("Raw text pasted...")
-        end
-    end
-
-    Note over User,PostProcess: Insert
+    Note over User,Injector: Insert
 
     App->>Injector: Insert (paste into target window)
 
@@ -88,7 +67,6 @@ sequenceDiagram
     end
 
     App->>App: Restore speaker volume
-    App->>Overlay: UngrabEscape
     App->>Overlay: Hide
 
     opt User cancels during finishing (only valid until paste lands)
@@ -113,9 +91,8 @@ When `vocis serve` runs:
 
 **Refreshed on every hotkey press (no restart needed):**
 
-- `transcription.*` — base_url, model, prompt, prompt_hint, language, hallucination_filters, min_chunk_peak, min_chunk_rms, ctx_size, batch_until_release, continuation_rebatch, rebatch_max_seconds, silero.onnxruntime_library. The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
+- `transcription.*` — base_url, model, prompt, prompt_hint, language, hallucination_filters, min_chunk_peak, min_chunk_rms, ctx_size, silero.onnxruntime_library. The transcribe `Client` is rebuilt so a new endpoint/model takes effect.
 - `recording.device`.
-- `postprocess.*` — enabled, combine, model, prompt. `combine=true` folds the cleanup prompt into the chat-audio per-chunk system message (one round-trip, but each chunk is cleaned in isolation); `combine=false` drops it from the chat-audio prompt and runs cleanup as a separate `/chat/completions` pass on the joined transcript (one extra round-trip, but re-punctuates across chunk boundaries).
 - `log_window_title`.
 
 **Pinned at `vocis serve` startup (require restart to change):**
@@ -128,19 +105,17 @@ When `vocis serve` runs:
 **Tuning constants pinned as Go consts (rebuild required to change):**
 
 The bulk of the previous YAML surface — overlay dimensions/copy, the
-chat-audio protocol knobs (chunk_max_seconds, history_turns, stream,
+chat-audio protocol knobs (chunk_max_seconds, stream,
 context_mode, batch_prompt, batch_max_audio_seconds,
 request_timeout_seconds), Silero hysteresis (silence_ms / speech_ms /
-min_utterance_ms in both `transcription.silero.*` and `recall.*`),
-postprocess timing (min_word_count, first_token_timeout_seconds,
-total_timeout_seconds, temperature), recorder shape (sample_rate=16000
+min_utterance_ms in both `transcription.silero.*` and `recall.*`), recorder shape (sample_rate=16000
 and channels=1 are required by Silero / chat-audio anyway,
 duck_volume, max_duration_seconds, backend) — all of those live as
 package-level consts at the consumer site now. The motivation was a
 config-surface cull: ~60 knobs had defaults that were never tuned in
 practice. To change one, edit the const and rebuild.
 
-**Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*` and `postprocess.*` blocks the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands load fresh config on each invocation.
+**Recall daemon (`vocis recall`) is a separate long-lived process that does NOT reload.** Every field under `recall.*` plus the `transcription.*` block the daemon copies at startup are pinned for the daemon's lifetime. Restart with `pkill -f 'vocis recall' && vocis recall &` after editing. The short-lived `recall pick`/`last`/`delete` subcommands load fresh config on each invocation.
 
 ## Record Start
 
@@ -167,23 +142,15 @@ The overlay shows a throbbing yellow "⏎ submit" indicator when submit mode is 
 When the hotkey stops dictation:
 
 1. [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go) stops local recording.
-2. The Escape key is temporarily grabbed for the finishing state.
-3. The overlay switches to the "Finishing" state with a heartbeat wave animation, showing the accumulated text and an elapsed-time counter that ticks up from 0 (e.g. `Wrapping up... (2.3s)`). There is no outer deadline on the finalize call — the counter runs until the transcription completes or the user cancels.
-4. The user can press the hotkey during this state to cancel the in-flight transcription. The overlay shows "Cancelled — transcription discarded". The dismissable window ends as soon as the paste lands (and submit Enter, if any, has fired): from that point onward, a hotkey press starts a fresh dictation rather than dismissing the just-completed one. This matters because the success-overlay fade-out takes ~320ms — without an explicit "delivery completed" marker, an eager user pressing the hotkey during the fade would otherwise hit the cancel path and see a stray "Cancelled" warning even though the transcript already landed.
-5. [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go) finalizes the `chatAudioSession`:
+2. The overlay switches to the "Finishing" state with a heartbeat wave animation, showing the accumulated text and an elapsed-time counter that ticks up from 0 (e.g. `Wrapping up... (2.3s)`). There is no outer deadline on the finalize call — the counter runs until the transcription completes or the user cancels.
+3. The user can press the hotkey during this state to cancel the in-flight transcription. The overlay shows "Cancelled — transcription discarded". The dismissable window ends as soon as the paste lands (and submit Enter, if any, has fired): from that point onward, a hotkey press starts a fresh dictation rather than dismissing the just-completed one. This matters because the success-overlay fade-out takes ~320ms — without an explicit "delivery completed" marker, an eager user pressing the hotkey during the fade would otherwise hit the cancel path and see a stray "Cancelled" warning even though the transcript already landed.
+4. [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go) finalizes the `chatAudioSession`:
    - `Finalize` flips the session out of live-segment mode, waits for the audio pump to drain, and the worker flushes a trailing chunk that POSTs to `/chat/completions` one last time (multi-clip when force-cut segments are pending).
-   - Trailing transcripts are joined to the already-emitted live segments. Continuation rebatch first emits a `begin_replace` event (live phase only) so the overlay can retract — and animate the deletion of — the prior segment in parallel with the rebatched POST; a `replace_segment` follows on success with the unified two-clip transcript, or a `cancel_replace` restores the prior segment if the POST fails.
-6. The overlay updates to show the complete transcription text (segments + trailing) with newlines preserved. The finished "Wrapping up" phase is pushed onto a completed-phases list with its elapsed duration (e.g. `Wrapping up — done (2.3s)`) so the user can see how long finalization actually took.
-7. If post-processing is enabled and the text has enough words (`postprocess.min_word_count`). Skipped entirely when `postprocess.combine=true` (the cleanup already happened per-chunk inside the chat-audio system prompt); the steps below apply only in `combine=false` separate-pass mode:
-   - The overlay shows a new `Wait...` phase counting up from 0. Internal first-token / total timeouts still apply inside the post-processing call — they are enforced but not displayed.
-   - When the first token arrives, the phase extends in place to `Wait · Stream... (elapsed)`, again counting up from 0 for the streaming portion.
-   - If no first token arrives within the first-token timeout, raw text is pasted immediately (the model is likely stuck).
-   - Pressing Escape during either phase skips post-processing and pastes raw text.
-   - If the stream errors or returns empty, raw text is pasted with a yellow warning overlay.
-8. The accumulated segment text plus any trailing transcript is combined and inserted as a single paste.
-9. If submit mode was toggled on, Enter is pressed on the target window.
-10. Audio ducking restores the speaker volume.
-11. The Escape key grab is released.
+   - Trailing transcripts are joined to the already-emitted live segments. Audio that already produced a segment is never re-sent for re-transcription.
+5. The overlay updates to show the complete transcription text (segments + trailing) with newlines preserved.
+6. The accumulated segment text plus any trailing transcript is combined and inserted as a single paste.
+7. If submit mode was toggled on, Enter is pressed on the target window.
+8. Audio ducking restores the speaker volume.
 
 ## Insert
 
@@ -232,22 +199,17 @@ When telemetry is enabled, the following OpenTelemetry spans are emitted per dic
 - `vocis.dictation` — root span covering the full session lifecycle
   - Attributes: `hotkey.backend` (`x11` or `gnome-extension`), `target.window_id`, `target.window_class`, `hotkey_mode`, `submit_mode`, `recording.bytes`, `recording.duration`, `transcription.total_chars`, `transcription.live_chars`, `transcription.trailing_chars`
   - Events (overlay state transitions):
-    - `overlay.connecting` (`attempt`, `max`) — WebSocket connection attempt
-    - `overlay.connected` — connection established
+    - `overlay.connected` — first audio chunk reached the transcription session
     - `overlay.submit_mode` (`enabled`) — user toggled submit mode
     - `overlay.finishing` (`auto_stop`) — recording stopped, entering finish phase
-    - `overlay.phase.wait` — post-processing wait phase started
-    - `overlay.warning` (`reason`) — warning shown (e.g. `postprocess_skipped`)
+    - `overlay.warning` (`reason`) — warning shown (e.g. `target_gone`)
     - `overlay.success` — transcription inserted successfully
   - Child spans:
     - `vocis.capture_target` — identify the focused window. `capture.source` = `xdotool` or `extension`; the extension path nests `vocis.gnome.get_focused_window` for the D-Bus call.
     - `vocis.recorder.start` — PulseAudio client init and stream creation
     - `vocis.recording.active` — the user speaking (from dictation start to release)
-    - `vocis.transcribe.chat_audio.chunk` — one span per VAD-bounded audio chunk POSTed to `/chat/completions`. Attributes include `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, `chunk.request_bytes`, and the response text. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing`.
+    - `vocis.transcribe.chat_audio.chunk` — one span per VAD-bounded audio chunk POSTed to `/chat/completions`. Attributes include `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.request_bytes`, and the response text. The trailing transcript from `Finalize` is collected under `vocis.transcribe.chat_audio.collect_trailing`.
     - `vocis.recorder.stop` — stream stop and resource cleanup
-    - `vocis.postprocess` — LLM cleanup with two-phase streaming timeout
-      - Attributes: `input.length`, `model`, `output.length`, `skipped`, `postprocess.first_token_timeout_sec`, `postprocess.total_timeout_sec`, `postprocess.error`
-      - Events: `postprocess.streaming_request_sent`, `postprocess.first_token_received` (`elapsed`), `postprocess.first_token_timeout` (`timeout`), `postprocess.streaming_complete` (`elapsed`), `postprocess.empty_response`, `postprocess.cancelled_by_user`
     - `vocis.inject` — text insertion into the target window
       - `vocis.inject.focus` — window activate and modifier key release
       - `vocis.inject.paste` or `vocis.inject.type` — clipboard paste or xdotool type
@@ -267,7 +229,6 @@ Errors are translated to user-friendly messages in the overlay:
 - Network timeouts → "Could not connect to Lemonade (network timeout)"
 - Context deadline → "Timed out waiting for transcription"
 - Empty audio buffer → "No speech detected" (yellow warning, not red error)
-- Post-processing failure → "Raw text pasted — cleanup was skipped" (yellow warning)
 - Cancellation → "Cancelled — transcription discarded" (yellow warning)
 
 See [`debugging.md`](/home/fred/git/vtt/docs/debugging.md) for logs, tracing (Jaeger API), and diagnostic tips.

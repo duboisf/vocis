@@ -11,7 +11,7 @@ internal/app/       ← orchestration via interfaces (no platform imports)
     ↓
 internal/hotkey/    ← state machine, parsing (platform-agnostic)
 internal/ui/        ← drawing, text, easing (platform-agnostic)
-internal/transcribe/    ← transcription (Lemonade chat-audio) + post-processing
+internal/transcribe/    ← transcription (Lemonade chat-audio)
 internal/recorder/  ← PulseAudio capture
 internal/audio/     ← volume ducking
     ↓
@@ -32,7 +32,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 
 ## Platform-agnostic packages
 
-- [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go): orchestration — hotkey events, recorder lifecycle, overlay updates, submit mode, post-processing, insertion. Consumes platform deps through interfaces.
+- [`internal/app/app.go`](/home/fred/git/vtt/internal/app/app.go): orchestration — hotkey events, recorder lifecycle, overlay updates, submit mode, insertion. Consumes platform deps through interfaces.
 - [`internal/hotkey/state.go`](/home/fred/git/vtt/internal/hotkey/state.go): hotkey state machine — down/up/tap detection, auto-repeat filtering, lock/unlock, suppression. No X11 imports.
 - [`internal/hotkey/parse.go`](/home/fred/git/vtt/internal/hotkey/parse.go): shortcut string parsing (`"ctrl+shift+space"` → key names), modifier mapping.
 - [`internal/ui/draw.go`](/home/fred/git/vtt/internal/ui/draw.go): pixel-level drawing primitives — `WriteText`, `DrawRect`, `DrawBars`, `BlendFrames`, `HeartbeatPulse`, easing functions. Operates on `image.RGBA`, no X11 dependency.
@@ -41,9 +41,8 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - [`internal/recorder/recorder.go`](/home/fred/git/vtt/internal/recorder/recorder.go): in-process PulseAudio/PipeWire microphone capture and live sample stream.
 - [`internal/recall/`](/home/fred/git/vtt/internal/recall/): Wokis Recall daemon. `segment.go` holds the bounded ring buffer, `daemon.go` runs recorder + Silero VAD and exposes a Unix-socket control protocol, `client.go` is the pick/status/stop client, `protocol.go` defines the request/response JSON shapes, `selection.go` parses the picker's range syntax (`3-5`, `3-`, `all`, etc.), `persist.go` provides an optional `FilePersister` that mirrors each segment to `<dir>/seg-<id>.json` so the ring survives daemon restarts, `batch.go` handles `recall last <duration>` — sends every in-window segment as its own labelled `input_audio` part in a single `/chat/completions` POST and asks the model (via `transcription.batch_prompt`) for one line per segment prefixed with the capture timestamp. Segments are stored as raw 16 kHz int16 PCM; transcription is lazy — done only when the `pick` or `last` client requests it. Persistence is opt-in via `recall.persist.mode=disk` (default is `in_memory`) and writes to `recall.persist.dir` (default `$XDG_STATE_HOME/vocis/recall`).
 - [`internal/transcribe/transcribe.go`](/home/fred/git/vtt/internal/transcribe/transcribe.go): thin shell — holds the `Client` struct, the public `Dictation` interface, the shared event types, hallucination filter helpers, and segment-text formatters. The real work lives in `chat_audio.go`.
-- [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go): the chat-audio dictation session — the only transcription backend vocis ships. Reads samples → Silero VAD → per-chunk WAV → POST to `/chat/completions` with the audio embedded as an `input_audio` content part. SSE deltas drive live overlay partials. Maintains a rolling few-shot history of prior `(audio, transcript)` pairs so context survives the documented 30s per-call cap. Implements the `Dictation` interface so `app` and `recall` consume it identically.
+- [`internal/transcribe/chat_audio.go`](/home/fred/git/vtt/internal/transcribe/chat_audio.go): the chat-audio dictation session — the only transcription backend vocis ships. Reads samples → Silero VAD → per-chunk WAV → POST to `/chat/completions` with the audio embedded as an `input_audio` content part. SSE deltas drive live overlay partials. Each chunk is posted once, in isolation; nothing already transcribed is re-sent. Implements the `Dictation` interface so `app` and `recall` consume it identically.
 - [`internal/transcribe/silero.go`](/home/fred/git/vtt/internal/transcribe/silero.go): Silero VAD wrapper — embedded ONNX model, onnxruntime_go session (pinned single-threaded), two-threshold hysteresis (0.5 speech / 0.35 silence with an ambiguous hold band). Used by both client-VAD during serve and segment boundaries in recall. See [docs/silero.md](/home/fred/git/vtt/docs/silero.md) for the full design.
-- [`internal/transcribe/postprocess.go`](/home/fred/git/vtt/internal/transcribe/postprocess.go): LLM post-processing to clean up filler words and hesitations via Lemonade's OpenAI-compatible `/chat/completions`.
 - [`internal/tts/lemonade.go`](/home/fred/git/vtt/internal/tts/lemonade.go): Lemonade Kokoro TTS client — POSTs to `/audio/speech` with `response_format=pcm` and parses the PCM16 LE stream + sample rate out of the `audio/l16;rate=N` content-type. `wav.go` writes a 24 kHz mono PCM16 WAV header for the `vocis speak --out` path. Used by `cmd/vocis/speak.go` only.
 - [`internal/audio/duck.go`](/home/fred/git/vtt/internal/audio/duck.go): lower speaker volume during recording via `wpctl`.
 - [`internal/sessionlog/sessionlog.go`](/home/fred/git/vtt/internal/sessionlog/sessionlog.go): per-session logs on disk with DEBUG/INFO/WARN/ERROR levels.
@@ -52,7 +51,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 ## Platform-specific packages
 
 - [`internal/platform/target.go`](/home/fred/git/vtt/internal/platform/target.go): shared `Target` type (window ID, class, name) — platform-agnostic struct used by both app and platform backends.
-- [`internal/platform/x11/overlay.go`](/home/fred/git/vtt/internal/platform/x11/overlay.go): X11 overlay — xgbutil window, xgraphics rendering, Xinerama monitor detection, Escape key grab. Uses `ui.*` for drawing and text.
+- [`internal/platform/x11/overlay.go`](/home/fred/git/vtt/internal/platform/x11/overlay.go): X11 overlay — xgbutil window, xgraphics rendering, Xinerama monitor detection. Uses `ui.*` for drawing and text.
 - [`internal/platform/x11/hotkeys.go`](/home/fred/git/vtt/internal/platform/x11/hotkeys.go): X11 global hotkey — keybind grab, xevent loop. Thin wrapper (~100 lines) that feeds raw events into `hotkey.State`.
 - [`internal/platform/x11/injector.go`](/home/fred/git/vtt/internal/platform/x11/injector.go): X11 text injection — xdotool for focus/paste/type/Enter, clipboard handling.
 - [`internal/platform/kitty/kitty.go`](/home/fred/git/vtt/internal/platform/kitty/kitty.go): focus-free text delivery for kitty terminals via the `kitty @ ls` and `kitty @ send-text` remote-control CLI. Three primitives — `FocusedWindowID` (capture at recording start), `Exists` (liveness probe at delivery time), `SendText` (deliver transcript without focus change), `SendEnter` (submit-mode \r without focus change). The inject layer calls these when the captured target is a kitty class and `insertion.kitty_remote_control` is on. `kitty @ send-text` always exits 0 even on no-match per the kitty docs, so we use `kitty @ ls --match id:N` as the explicit liveness probe instead. On a "no matching windows" reply (the user closed the tab mid-recording), the inject layer writes the transcript to the clipboard and surfaces `platform.ErrTargetGone` so the app shows a soft warning instead of a hard error. On any other CLI error, the inject layer falls back transparently to OS-window focus + paste so dictation still completes. Each kitty CLI shell-out is wrapped in its own OTel span (`vocis.kitty.*`) so the latency cost is visible in Jaeger.
@@ -64,8 +63,7 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - `hotkey.State` receives raw press/release events from any backend
 - `ui.*` provides drawing primitives to any overlay backend
 - `platform/x11/*` implements `OverlayUI`, `InjectorClient`, and `HotkeySource` for X11
-- `transcribe.startChatAudioSession` owns Silero chunking, per-chunk `/chat/completions` POSTs, few-shot history, and the trailing-finalize collector
-- `transcribe.PostProcess` handles LLM cleanup with timeout and fallback
+- `transcribe.startChatAudioSession` owns Silero chunking, per-chunk `/chat/completions` POSTs, and the trailing-finalize collector
 
 ## Useful rule of thumb
 
@@ -73,12 +71,12 @@ A future Wayland backend would add `internal/platform/wayland/` satisfying the s
 - if the bug is about missed words or audio timing → `recorder` and `transcribe`
 - if the bug is about pasting into the wrong place → `platform/x11/injector`
 - if the bug is about what the user sees → `platform/x11/overlay` and `ui`
-- if the bug is about post-processing quality → check the prompt in `config`
+- if the bug is about transcript wording or punctuation → `transcription.prompt` / `prompt_hint` in the config
 - if the bug is about volume levels → `audio`
 - if the bug is about hotkey detection or auto-repeat → `hotkey/state.go`
 - if the bug is about Wokis Recall (always-on mode) → `recall/daemon.go` (capture + VAD + socket) and `cmd/vocis/recall.go` (subcommands, picker)
 - if the bug is about `vocis speak` (text-to-speech) → `tts/lemonade.go` (HTTP client + PCM parse) and `cmd/vocis/speak.go` (CLI + paplay streaming)
 - if the bug is about kitty pasting into the wrong tab → `platform/kitty/kitty.go` (CLI shell-out), `platform/inject/injector.go` (capture + focus path), and `insertion.kitty_remote_control` in the config
-- if the bug is about Gemma chat-audio (lemonade-chat backend) → `transcribe/chat_audio.go` (chunking + POST + SSE + few-shot history) and the chunking/batch/silero knobs under `transcription.*` in the config
+- if the bug is about Gemma chat-audio (lemonade-chat backend) → `transcribe/chat_audio.go` (chunking + POST + SSE) and the chunking/batch/silero knobs under `transcription.*` in the config
 
 If you need execution details rather than file ownership, continue to `runtime-flow.md`.

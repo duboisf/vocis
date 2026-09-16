@@ -40,3 +40,34 @@ transcription:
 		t.Fatalf("input should pass through unchanged when no retired keys present")
 	}
 }
+
+// TestStripRetiredKeysDropsPostprocessAndRebatch guards the loop
+// simplification: a config still carrying the removed postprocess
+// section or the rebatch knobs must keep loading under the strict
+// decoder instead of failing on unknown fields.
+func TestStripRetiredKeysDropsPostprocessAndRebatch(t *testing.T) {
+	in := []byte(`transcription:
+  model: gemma4-it-e2b-FLM
+  continuation_rebatch: true
+  batch_until_release: false
+  rebatch_max_seconds: 28
+postprocess:
+  enabled: true
+  combine: false
+  model: gemma4-it-e2b-FLM
+  prompt: clean it
+`)
+	var cfg Config
+	if err := decodeStrict(stripRetiredKeys(in), &cfg); err != nil {
+		t.Fatalf("strict decode after strip: %v", err)
+	}
+	if cfg.Transcription.Model != "gemma4-it-e2b-FLM" {
+		t.Fatalf("model dropped: %+v", cfg.Transcription)
+	}
+	s := string(stripRetiredKeys(in))
+	for _, gone := range []string{"postprocess:", "continuation_rebatch", "batch_until_release", "rebatch_max_seconds"} {
+		if strings.Contains(s, gone) {
+			t.Fatalf("%s still present: %s", gone, s)
+		}
+	}
+}

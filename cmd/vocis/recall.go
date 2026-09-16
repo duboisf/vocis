@@ -23,13 +23,10 @@ import (
 )
 
 var (
-	recallPickSelection   string
-	recallPickPostprocess bool
-	recallPickJoin        string
-	recallPickNoFZF       bool
+	recallPickSelection string
+	recallPickJoin      string
+	recallPickNoFZF     bool
 )
-
-var recallLastPostprocess bool
 
 var recallCmd = &cobra.Command{
 	Use:   "recall",
@@ -125,8 +122,7 @@ Duration accepts any Go time.ParseDuration string — "10m", "2h",
 between segments so words from adjacent segments don't weld together.
 
 Example:
-    vocis recall last 10m                   # last 10 minutes → stdout
-    vocis recall last 2h --postprocess      # also run LLM cleanup`,
+    vocis recall last 10m                   # last 10 minutes → stdout`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runRecallLast(args[0])
@@ -153,8 +149,6 @@ also deleted. Selection syntax matches the pick subcommand:
 func init() {
 	recallPickCmd.Flags().StringVar(&recallPickSelection, "ids", "",
 		"selection string (e.g. \"3\", \"3-5\", \"3-\", \"-5\", \"all\", or a comma-separated mix) — skips the interactive prompt")
-	recallPickCmd.Flags().BoolVar(&recallPickPostprocess, "postprocess", false,
-		"run the configured LLM cleanup on each transcript before joining")
 	recallPickCmd.Flags().StringVar(&recallPickJoin, "join", " ",
 		"separator inserted between segment transcripts when selecting multiple")
 	recallPickCmd.Flags().BoolVar(&recallPickNoFZF, "no-fzf", false,
@@ -169,9 +163,6 @@ func init() {
 	recallReplayCmd.Flags().DurationVar(&recallReplayGap, "gap", 300*time.Millisecond,
 		"silence inserted between segments when playing multiple")
 	_ = recallReplayCmd.MarkFlagRequired("ids")
-
-	recallLastCmd.Flags().BoolVar(&recallLastPostprocess, "postprocess", false,
-		"run the configured LLM cleanup on the joint transcript before printing")
 
 	recallCmd.AddCommand(recallStartCmd)
 	recallCmd.AddCommand(recallPickCmd)
@@ -242,8 +233,8 @@ func runRecallPick() error {
 	defer session.Close()
 
 	startedAt := time.Now()
-	sessionlog.Infof("recall pick: starting (postprocess=%t no_fzf=%t selection=%q)",
-		recallPickPostprocess, recallPickNoFZF, recallPickSelection)
+	sessionlog.Infof("recall pick: starting (no_fzf=%t selection=%q)",
+		recallPickNoFZF, recallPickSelection)
 
 	listStartedAt := time.Now()
 	client, segs, availableIDs, err := listRecallSegments()
@@ -293,11 +284,10 @@ func runRecallPick() error {
 	empties := 0
 	for _, id := range ids {
 		fmt.Fprintf(os.Stderr, "transcribing segment #%d...\n", id)
-		sessionlog.Infof("recall pick: requesting transcribe id=%d postprocess=%t",
-			id, recallPickPostprocess)
+		sessionlog.Infof("recall pick: requesting transcribe id=%d", id)
 		reqStartedAt := time.Now()
 		txCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		text, err := client.Transcribe(txCtx, id, recallPickPostprocess)
+		text, err := client.Transcribe(txCtx, id)
 		cancel()
 		reqElapsed := time.Since(reqStartedAt).Round(time.Millisecond)
 		if err != nil {
@@ -389,7 +379,7 @@ func runRecallLast(rawDuration string) error {
 		len(ids), totalAudio.Round(time.Second), window)
 
 	startedAt := time.Now()
-	text, err := client.TranscribeBatch(txCtx, ids, recallLastPostprocess)
+	text, err := client.TranscribeBatch(txCtx, ids)
 	elapsed := time.Since(startedAt).Round(100 * time.Millisecond)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || txCtx.Err() == context.Canceled {

@@ -13,23 +13,20 @@ Every meaningful branch leaves a trail. New features and guards must log when th
 - `TRACE` — high-volume protocol events (every SSE delta, every chat-audio request body). Cheap, verbose.
 - `DEBUG` — routine state transitions, one-shot protocol decisions, internal handoffs.
 - `INFO` — user-visible decisions (filtered hallucination, submit mode toggle, config reload, dictation started/stopped).
-- `WARN` — recoverable problems (postprocess timeout, empty transcript, unknown event type).
+- `WARN` — recoverable problems (empty transcript, unknown event type).
 - `ERROR` — fatal to the current operation (dial failed, commit refused with non-empty reason).
 
 If an event is filtered from the existing trace machinery (e.g. the audio payload redaction in `redactedRequestJSON` to keep request-body dumps readable), add an explicit log so the behavior stays visible.
 
 ### Useful things to look for
 
-- `chat-audio: posting chunk clips=N wav=…B history=N req=…B` — one per `/chat/completions` POST. Confirms VAD/force-cut boundaries are firing as expected.
+- `chat-audio: posting chunk clips=N wav=…B req=…B` — one per `/chat/completions` POST. Confirms VAD/force-cut boundaries are firing as expected.
 - `chat-audio: chunk response %q` — the final transcript for that chunk.
-- `chat-audio: request body (audio redacted)` (DEBUG) — the exact JSON message structure (system prompt, history shape, multi-clip layout) with audio bytes replaced by `<wav N bytes>` placeholders.
+- `chat-audio: request body (audio redacted)` (DEBUG) — the exact JSON message structure (system prompt, multi-clip layout) with audio bytes replaced by `<wav N bytes>` placeholders.
 - `chat-audio: SSE delta` (TRACE) — every streamed delta from the model.
 - `chat-audio: force-cut at Ns` — a long monologue without a VAD pause hit `chunk_max_seconds`; the cut clip is stashed for the next natural flush.
 - `chat-audio: dropped silent clip peak=… rms=…` — energy gate filtered a clip before posting. Compare against `min_chunk_peak` / `min_chunk_rms`.
-- `chat-audio: continuation rebatch` — the previous chunk's transcript ended without terminal punctuation; this chunk was reposted with the prior audio prepended to produce a unified transcript.
-- `chat-audio: continuation rebatch skipped` — prepending the prior audio would have pushed the combined POST past `transcription.rebatch_max_seconds` (and so past Gemma's 30 s window, which silently drops the tail). The chunk posted as a fresh segment instead. Expected on long pause-free monologues — it's the guard against losing freshly-spoken audio.
 - `dropped hallucinated final:` — the hallucination filter caught a Whisper/Gemma stock phrase ("Thank you.", etc.). See `transcription.hallucination_filters`.
-- `postprocess` — input/output text (DEBUG), timeouts, errors.
 - `finalization` — trailing transcript assembly, commit errors.
 - `duck` — audio volume ducking/restore.
 - `overlay backend:` — `x11` when the on-screen overlay is live, `none` when `x11.NewOverlay()` failed and the no-op overlay took over (preceded by an `overlay: cannot create X11 overlay` WARN with the underlying error). `none` means dictation works but there is no visual feedback.
@@ -53,9 +50,8 @@ Filenames are `<session-ts>-chunkNNN-<reason>.wav` where:
 - `NNN` is a monotonic per-session counter (so chunk001 is the first
   POST of that dictation session, etc.).
 - `reason` is the flush trigger (`vad_stopped`, `samples_closed`,
-  `force_cut_batch`), suffixed with `-rebatch` when continuation_rebatch
-  prepended prior audio and `-trailing` when this was the last chunk
-  after the samples channel closed.
+  `force_cut_batch`), suffixed with `-trailing` when this was the last
+  chunk after the samples channel closed.
 
 Each write also leaves an `INFO  audio capture: wrote <path> bytes=N`
 line in the session log so you can grep either side to find the other.
@@ -95,9 +91,8 @@ The JSON response contains all spans with their tags (attributes) and logs (even
 | `vocis.dictation` | Root span. `hotkey.backend` tells you whether the session used `x11` or `gnome-extension`. |
 | `vocis.capture_target` | `capture.source` = `xdotool` (X11 path) or `extension` (gnome path). If the extension path, look for the nested `vocis.gnome.get_focused_window` span with the D-Bus call timing/error. |
 | `vocis.transcribe.finalize` | Total finalization time. The "Wrapping up" overlay phase counts up from 0 for as long as this span runs — there is no outer deadline, so a slow finalize will keep ticking rather than time out. |
-| `vocis.transcribe.chat_audio.chunk` | One per `/chat/completions` POST. Attributes: `chunk.clip_count`, `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.history_turns`, `chunk.history_sent_turns`, `chunk.request_bytes`, `chunk.response_text`. |
+| `vocis.transcribe.chat_audio.chunk` | One per `/chat/completions` POST. Attributes: `chunk.clip_count`, `chunk.duration_ms`, `chunk.wav_bytes`, `chunk.request_bytes`, `chunk.response_text`. |
 | `vocis.transcribe.chat_audio.collect_trailing` | The Finalize-time wait for the worker to drain any trailing chunk. |
-| `vocis.postprocess` | `skipped` attribute, `first_token_timeout` vs `first_token_received` events, `elapsed` timings. Inline events: `postprocess.input` (with `input.text`) and `postprocess.output` (with `output.text` + `skipped`/`reason` when PP fell back). Text is truncated to 500 chars. |
 | `vocis.inject` | Paste vs type, terminal detection, target window. |
 
 ### Recall-mode spans
@@ -110,7 +105,7 @@ inspect these first:
 | Span | What to look for |
 |------|-----------------|
 | `vocis.recall.capture` | One per VAD-bounded utterance (kept **or** dropped). `segment.id` (0 if dropped), `segment.duration_ms`, `segment.peak_level`, `segment.avg_level` (RMS), `segment.force_flushed` (true when `max_segment_seconds` cut it short), `segment.dropped_as_silence` (true when peak/RMS filter fired), `segment.drop_reason` (empty or e.g. `"rms=0.003 < min_rms=0.005"`), plus the threshold values for context. |
-| `vocis.recall.transcribe` | One per daemon transcribe call. `segment.id`, `cache_hit`, `postprocess`, `transcript.length`, `runtime.goroutines_delta` (should be 0 — non-zero means we're leaking). Child spans: `…transcribe.feed`, `…transcribe.finalize`, `…transcribe.postprocess`. |
+| `vocis.recall.transcribe` | One per daemon transcribe call. `segment.id`, `cache_hit`, `transcript.length`, `runtime.goroutines_delta` (should be 0 — non-zero means we're leaking). Child spans: `…transcribe.feed`, `…transcribe.finalize`. |
 
 `recall: transcribe id=N goroutines M→K (Δ=±X)` also lands in the
 daemon log per transcribe — use it as a quick sanity check when you

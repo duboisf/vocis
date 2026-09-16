@@ -15,8 +15,7 @@ func TestHandleDictationEventUpdatesOverlayWithPartialText(t *testing.T) {
 
 	fakeOverlay := &overlayStub{}
 	app := &App{
-		cfg: config.Config{
-		},
+		cfg:     config.Config{},
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
@@ -48,8 +47,7 @@ func TestPartialAppendsBelowAccumulatedSegments(t *testing.T) {
 
 	fakeOverlay := &overlayStub{}
 	app := &App{
-		cfg: config.Config{
-		},
+		cfg:     config.Config{},
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
@@ -79,8 +77,7 @@ func TestPartialReplacesPreviousPartial(t *testing.T) {
 
 	fakeOverlay := &overlayStub{}
 	app := &App{
-		cfg: config.Config{
-		},
+		cfg:     config.Config{},
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
@@ -107,8 +104,7 @@ func TestSegmentClearsPartial(t *testing.T) {
 
 	fakeOverlay := &overlayStub{}
 	app := &App{
-		cfg: config.Config{
-		},
+		cfg:     config.Config{},
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
@@ -136,8 +132,7 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 
 	fakeOverlay := &overlayStub{}
 	app := &App{
-		cfg: config.Config{
-		},
+		cfg:     config.Config{},
 		overlay: fakeOverlay,
 	}
 	state := &recordingState{
@@ -156,110 +151,6 @@ func TestEmptyPartialDoesNotFlashHelperWhenSegmentsExist(t *testing.T) {
 
 	if fakeOverlay.listeningText != "Hello world." {
 		t.Fatalf("listeningText = %q, want unchanged display text", fakeOverlay.listeningText)
-	}
-}
-
-// TestBeginReplacePreRetractsBeforeReplaceSegment locks down the
-// continuation-rebatch flow: when the chat-audio backend announces a
-// rebatch with BeginReplace, the prior segment must be stripped from
-// liveText/displayText IMMEDIATELY (before any partials of the unified
-// transcript stream in) so the overlay can animate the deletion in
-// parallel with the model round-trip. The matching ReplaceSegment then
-// adds the new text without retracting again.
-func TestBeginReplacePreRetractsBeforeReplaceSegment(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{cfg: config.Config{}, overlay: fakeOverlay}
-	state := &recordingState{
-		target:      platform.Target{WindowClass: "Gedit"},
-		liveText:    " Hello",
-		displayText: "Hello",
-	}
-
-	// BeginReplace fires before the rebatched POST returns.
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
-		Type:    transcribe.DictationEventBeginReplace,
-		PrevLen: len([]rune(" Hello")),
-	})
-
-	if state.liveText != "" {
-		t.Fatalf("liveText after BeginReplace = %q, want empty", state.liveText)
-	}
-	if state.displayText != "" {
-		t.Fatalf("displayText after BeginReplace = %q, want empty", state.displayText)
-	}
-	if !state.replacePending {
-		t.Fatal("replacePending should be true after BeginReplace")
-	}
-	if fakeOverlay.listeningText != "" {
-		t.Fatalf("overlay listeningText after BeginReplace = %q, want empty", fakeOverlay.listeningText)
-	}
-
-	// Partials stream in while retraction animates — they update overlay
-	// preview but must not double up on the old text since it was retracted.
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
-		Type: transcribe.DictationEventPartial,
-		Text: "Hello world",
-	})
-	if fakeOverlay.listeningText != "Hello world" {
-		t.Fatalf("partial preview = %q, want %q (no leftover prior segment)", fakeOverlay.listeningText, "Hello world")
-	}
-
-	// ReplaceSegment delivers the unified transcript. It must NOT retract
-	// again (BeginReplace already did), just append.
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
-		Type:    transcribe.DictationEventReplaceSegment,
-		Text:    " Hello world.",
-		PrevLen: len([]rune(" Hello")),
-	})
-	if state.liveText != " Hello world." {
-		t.Fatalf("liveText after ReplaceSegment = %q, want %q", state.liveText, " Hello world.")
-	}
-	if state.displayText != "Hello world." {
-		t.Fatalf("displayText after ReplaceSegment = %q, want %q", state.displayText, "Hello world.")
-	}
-	if state.replacePending {
-		t.Fatal("replacePending should be cleared after ReplaceSegment")
-	}
-}
-
-// TestCancelReplaceRestoresPriorSegment verifies the failure path: if
-// the rebatched POST errors after BeginReplace was fired, the prior
-// segment must come back into liveText/displayText so the user doesn't
-// see a hole in the overlay until the next chunk replaces it cleanly.
-func TestCancelReplaceRestoresPriorSegment(t *testing.T) {
-	t.Parallel()
-
-	fakeOverlay := &overlayStub{}
-	app := &App{cfg: config.Config{}, overlay: fakeOverlay}
-	state := &recordingState{
-		target:      platform.Target{WindowClass: "Gedit"},
-		liveText:    " Hello",
-		displayText: "Hello",
-	}
-
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
-		Type:    transcribe.DictationEventBeginReplace,
-		PrevLen: len([]rune(" Hello")),
-	})
-	_ = app.handleDictationEvent(context.Background(), state, transcribe.DictationEvent{
-		Type:    transcribe.DictationEventCancelReplace,
-		Text:    " Hello",
-		PrevLen: len([]rune(" Hello")),
-	})
-
-	if state.liveText != " Hello" {
-		t.Fatalf("liveText after CancelReplace = %q, want %q", state.liveText, " Hello")
-	}
-	if state.displayText != "Hello" {
-		t.Fatalf("displayText after CancelReplace = %q, want %q", state.displayText, "Hello")
-	}
-	if state.replacePending {
-		t.Fatal("replacePending should be cleared after CancelReplace")
-	}
-	if fakeOverlay.listeningText != "Hello" {
-		t.Fatalf("overlay listeningText after CancelReplace = %q, want %q", fakeOverlay.listeningText, "Hello")
 	}
 }
 
@@ -376,35 +267,22 @@ func TestHandleDownAfterDeliveryStartsNewSessionInsteadOfCancelling(t *testing.T
 }
 
 type overlayStub struct {
-	windowClass    string
-	listeningText  string
-	animatedChunks []string
-	successText    string
-	warningText    string
-	hideCalls      int
+	windowClass   string
+	listeningText string
+	warningText   string
+	hideCalls     int
 }
 
-func (o *overlayStub) ShowHint(string)      {}
-func (o *overlayStub) ShowListening(string, string)  {}
-func (o *overlayStub) SetConnected(string)            {}
-func (o *overlayStub) SetConnecting(int, int)         {}
-func (o *overlayStub) SetLoadingModel(string)         {}
-func (o *overlayStub) SetSubmitMode(bool)             {}
-func (o *overlayStub) AnimateChunk(text string) {
-	o.animatedChunks = append(o.animatedChunks, text)
-}
+func (o *overlayStub) ShowHint(string)              {}
+func (o *overlayStub) ShowListening(string, string) {}
+func (o *overlayStub) SetConnected(string)          {}
+func (o *overlayStub) SetLoadingModel(string)       {}
+func (o *overlayStub) SetSubmitMode(bool)           {}
 func (o *overlayStub) ShowFinishing(string, string) {}
-func (o *overlayStub) SetFinishingPhase(string)     {}
-func (o *overlayStub) ExtendFinishingPhase(string)  {}
-func (o *overlayStub) SetFinishingText(string)                    {}
-func (o *overlayStub) ShowSuccess(text string) {
-	o.successText = text
-}
-func (o *overlayStub) ShowError(error)    {}
-func (o *overlayStub) ShowWarning(text string) { o.warningText = text }
-func (o *overlayStub) GrabEscape() <-chan struct{} { return make(chan struct{}) }
-func (o *overlayStub) UngrabEscape()              {}
-func (o *overlayStub) SetLevel(float64) {}
+func (o *overlayStub) SetFinishingText(string)      {}
+func (o *overlayStub) ShowError(error)              {}
+func (o *overlayStub) ShowWarning(text string)      { o.warningText = text }
+func (o *overlayStub) SetLevel(float64)             {}
 func (o *overlayStub) Hide() {
 	o.hideCalls++
 }
@@ -502,88 +380,3 @@ func TestWrapSamplesWithPrerollEmptyPreroll(t *testing.T) {
 		t.Fatalf("got %d chunks, want 1", chunks)
 	}
 }
-
-// TestPostProcessModeCombinedByDefault locks down the legacy fast-path:
-// when postprocess is enabled and `combine` is left at its default
-// (true), the postprocess pass is folded into the chat-audio system
-// prompt and the separate /chat/completions round-trip is skipped.
-func TestPostProcessModeCombinedByDefault(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.PostProcessConfig{Enabled: true, Combine: true}
-	enabled, combined := postProcessMode(cfg)
-	if !enabled || !combined {
-		t.Fatalf("Enabled+Combine=true: got enabled=%v combined=%v, want both true",
-			enabled, combined)
-	}
-}
-
-// TestPostProcessModeSeparatePassWhenCombineOff is the new behaviour
-// the user-pause-period bug fix turns on. Combine=false means the
-// postprocess prompt is NOT folded into transcription; it must run as
-// a separate pass on the joined transcript so it can re-punctuate
-// across chunk boundaries.
-func TestPostProcessModeSeparatePassWhenCombineOff(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.PostProcessConfig{Enabled: true, Combine: false}
-	enabled, combined := postProcessMode(cfg)
-	if !enabled {
-		t.Fatalf("Enabled=true: got enabled=%v, want true", enabled)
-	}
-	if combined {
-		t.Fatalf("Combine=false: got combined=%v, want false", combined)
-	}
-}
-
-// TestPostProcessModeDisabledIsNeverCombined: Enabled=false means no
-// postprocess at all, regardless of Combine.
-func TestPostProcessModeDisabledIsNeverCombined(t *testing.T) {
-	t.Parallel()
-
-	for _, combine := range []bool{true, false} {
-		cfg := config.PostProcessConfig{Enabled: false, Combine: combine}
-		enabled, combined := postProcessMode(cfg)
-		if enabled || combined {
-			t.Fatalf("Enabled=false Combine=%v: got enabled=%v combined=%v, want both false",
-				combine, enabled, combined)
-		}
-	}
-}
-
-// TestBuildChatAudioExtraSystemPromptCombineOnIncludesPP confirms the
-// legacy fast-path: in combine mode, prompt_hint AND postprocess.prompt
-// are both appended to the chat-audio system message.
-func TestBuildChatAudioExtraSystemPromptCombineOnIncludesPP(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.Config{
-		Transcription: config.TranscriptionConfig{PromptHint: "hint text"},
-		PostProcess:   config.PostProcessConfig{Enabled: true, Combine: true, Prompt: "pp text"},
-	}
-	got := buildChatAudioExtraSystemPrompt(cfg, true)
-	want := "hint text\n\npp text"
-	if got != want {
-		t.Fatalf("extra prompt = %q, want %q", got, want)
-	}
-}
-
-// TestBuildChatAudioExtraSystemPromptCombineOffDropsPP is the core
-// guard: when combine=false, the chat-audio system prompt must NOT
-// contain the postprocess cleanup rules (otherwise we'd double-clean
-// after the separate pass runs).
-func TestBuildChatAudioExtraSystemPromptCombineOffDropsPP(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.Config{
-		Transcription: config.TranscriptionConfig{PromptHint: "hint text"},
-		PostProcess:   config.PostProcessConfig{Enabled: true, Combine: false, Prompt: "pp text"},
-	}
-	got := buildChatAudioExtraSystemPrompt(cfg, false)
-	want := "hint text"
-	if got != want {
-		t.Fatalf("extra prompt = %q, want %q (postprocess must NOT be folded in)", got, want)
-	}
-}
-
-

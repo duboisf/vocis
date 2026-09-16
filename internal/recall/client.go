@@ -12,7 +12,7 @@ import (
 // opens a fresh connection and closes it after the response — matches
 // the daemon's per-connection framing.
 type Client struct {
-	SocketPath string
+	SocketPath  string
 	DialTimeout time.Duration
 }
 
@@ -32,11 +32,9 @@ func (c *Client) List(ctx context.Context) ([]SegmentInfo, error) {
 	return resp.Segments, nil
 }
 
-// Transcribe asks the daemon to turn the given segment into text. If
-// postprocess is true and post-processing is enabled in config, the
-// daemon runs the LLM cleanup step too.
-func (c *Client) Transcribe(ctx context.Context, id int64, postprocess bool) (string, error) {
-	resp, err := c.do(ctx, Request{Op: OpTranscribe, SegmentID: id, PostProcess: postprocess})
+// Transcribe asks the daemon to turn the given segment into text.
+func (c *Client) Transcribe(ctx context.Context, id int64) (string, error) {
+	resp, err := c.do(ctx, Request{Op: OpTranscribe, SegmentID: id})
 	if err != nil {
 		return "", err
 	}
@@ -47,8 +45,8 @@ func (c *Client) Transcribe(ctx context.Context, id int64, postprocess bool) (st
 // (in the provided order, with a configured silence gap between them)
 // and transcribe the result as a single realtime session. Returns the
 // joint transcript.
-func (c *Client) TranscribeBatch(ctx context.Context, ids []int64, postprocess bool) (string, error) {
-	resp, err := c.do(ctx, Request{Op: OpTranscribeBatch, SegmentIDs: ids, PostProcess: postprocess})
+func (c *Client) TranscribeBatch(ctx context.Context, ids []int64) (string, error) {
+	resp, err := c.do(ctx, Request{Op: OpTranscribeBatch, SegmentIDs: ids})
 	if err != nil {
 		return "", err
 	}

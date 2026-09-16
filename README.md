@@ -32,16 +32,14 @@ text (or text into audio):
   ≥ 10.3.0 with `whisper-v3-turbo-FLM` (realtime WS) or
   `gemma4-it-e2b-FLM` (chat-audio) running on NPU via FLM — no API key,
   no network. Pick a backend with `vocis config backend`.
-- **LLM post-processing** that cleans up filler words ("um", "uh", "like")
-  and false starts without changing your meaning. Few-shot prompted to
-  *never* answer questions in the transcript — "what time is it?" stays a
-  question. Uses Lemonade's OpenAI-compatible `/chat/completions`.
+- **Single-pass transcription.** Each chunk of speech is sent to the model
+  exactly once; cleanup rules (filler words, digits, technical vocabulary)
+  live in `transcription.prompt` / `prompt_hint`, so there is no second LLM
+  round-trip after you release the hotkey.
 - **Mic preroll during model preflight.** On Lemonade with a cold model,
   vocis opens the mic *before* the 5–10 s NPU load and replays those samples
   into the realtime session once it's ready, so the first words after you
   press the hotkey aren't lost.
-- **Pre-warm of the post-processing model** while you're still talking, so
-  the first PP request doesn't pay Lemonade's `max_models.llm: 1` swap cost.
 - **Hallucination filters** for stock phrases Whisper-class models love to
   emit on silence ("Thank you.", "Thanks for watching.", lone "you").
 - **Audio ducking.** Speaker volume drops to 10% (configurable) while the
@@ -94,8 +92,6 @@ text (or text into audio):
   collide with the held `Ctrl+Shift`.
 - **Connection retry.** WebSocket connect retries up to 3 times on
   transient failures, with the attempt counter visible in the overlay.
-- **Escape to skip post-processing.** While the overlay shows "Finishing",
-  Escape pastes the raw transcript immediately.
 - **Configurable overlay** — every string, the font (resolved via
   `fc-match`, defaults to `monospace`), size, opacity, and auto-hide
   timer.
@@ -166,7 +162,6 @@ Always-on capture mode in another terminal:
 ./bin/vocis recall start                # foreground daemon
 ./bin/vocis recall pick                 # browse + transcribe (fzf or plain)
 ./bin/vocis recall last 10m             # batch the last 10 minutes
-./bin/vocis recall last 1h --postprocess
 ./bin/vocis recall replay --ids=3-5     # hear what was captured
 ./bin/vocis recall drop --ids=3,7-9     # forget those segments
 ./bin/vocis recall stop                 # ask the daemon to exit
@@ -208,7 +203,7 @@ WebSocket. Defaults:
 `vocis config backend` autodetects a running Lemonade on localhost and
 writes the right URLs. `vocis config models` lists `tts`/`speech`/
 `transcription`/`reasoning`-labelled models with download status so you
-can pick one for transcription and one for post-processing.
+can pick one for transcription.
 
 **Lemonade Server 10.3.0+ required.** See `docs/lemonade.md` for
 which 10.3 protocol/classification changes vocis depends on (the
@@ -226,12 +221,12 @@ Drives Gemma's native multimodal audio mode through Lemonade's
 OpenAI-compatible `/chat/completions` endpoint instead of the realtime
 WebSocket. Speech is segmented client-side with Silero VAD, each chunk
 is wrapped in a WAV and sent as one POST with the audio embedded as an
-`input_audio` content part, and a few-shot history of prior `(audio,
-transcript)` pairs threads context across the documented 30-second
-per-call cap. SSE streaming drives live overlay partials.
+`input_audio` content part. Each chunk is transcribed exactly once and
+in isolation: nothing already spoken is re-sent. SSE streaming drives
+live overlay partials.
 
 Tunable knobs live directly under `transcription:` —
-`chunk_max_seconds`, `history_turns`, `prompt`, `language`, `stream`.
+`prompt`, `prompt_hint`, `language`, `hallucination_filters`.
 Run `vocis config backend` and pick option 2 to flip; it also rewrites
 `model` to `gemma4-it-e2b-FLM` automatically.
 
@@ -301,10 +296,8 @@ Other `config` subcommands:
 - `vocis config backend` — interactively pick `lemonade` (realtime WS)
   or `lemonade-chat` (chat-completions with input_audio); autodetects a
   running Lemonade on localhost and rewrites the URLs and default model.
-- `vocis config models` — interactive picker for transcription and
-  post-processing models from the configured backend. Use `config
-  models` to pick a Lemonade-resident LLM for `postprocess.model`, or
-  set `postprocess.enabled: false`.
+- `vocis config models` — interactive picker for the transcription
+  model from the configured backend.
 - `vocis config edit` — open the config file in `$VISUAL` / `$EDITOR`
   (falls back to `nvim`/`vim`/`nano`).
 
@@ -327,10 +320,6 @@ A few useful fields (see `config.example.yaml` for everything):
 - `recall.batch_gap_ms` / `recall.batch_max_seconds`: `recall last`
   concatenation knobs
 - `speak.model` / `speak.voice`: Kokoro defaults
-- `postprocess.enabled` / `postprocess.model` / `postprocess.prompt`:
-  LLM cleanup
-- `postprocess.temperature` / `top_p` / `min_p` / `repetition_penalty`:
-  sampling knobs forwarded to `/chat/completions`
 - `overlay.*`: every overlay string is templated and configurable
 - `telemetry.enabled` / `telemetry.endpoint`: OpenTelemetry tracing
 
@@ -384,7 +373,6 @@ vocis.dictation                       ← root span (entire session lifecycle)
 ├── vocis.transcribe.finalize
 │   ├── vocis.transcribe.commit
 │   └── vocis.transcribe.wait_final
-├── vocis.postprocess
 └── vocis.inject
     ├── vocis.inject.kitty_direct     ← preferred path on kitty targets
     │   ├── vocis.kitty.exists
@@ -402,7 +390,6 @@ Span attributes worth knowing:
   consumed by mid-hold segments (normal)
 - `trailing.skipped=true` on `vocis.transcribe.wait_final` — no trailing
   audio (normal)
-- `skipped=true` on `vocis.postprocess` — PP timed out or was Escape'd
 
 ```bash
 # Get a specific trace as JSON
@@ -425,8 +412,8 @@ tail -50 "$(ls -t ~/.local/state/vocis/sessions/*.log | head -1)"
 
 `vocis doctor` runs a one-shot health check covering display, xdotool,
 xclip, audio, config, log dir, keyring, the gnome extension, and (on
-Lemonade) whether the configured transcribe + post-processing models are
-downloaded and currently resident.
+Lemonade) whether the configured transcription model is downloaded and
+currently resident.
 
 ### Common issues
 
@@ -436,7 +423,7 @@ downloaded and currently resident.
 | First few words missing on cold Lemonade | Model preflight took longer than mic preroll buffer | Pre-warm by running an empty dictation, or wait for the "ready" subtitle |
 | Kitty paste landed in wrong tab | `kitty @ ls` not reachable from vocis | Check `KITTY_LISTEN_ON`; configure `allow_remote_control yes` and `listen_on` in `kitty.conf` |
 | Submit-mode Enter goes to wrong window | Compositor focus path used instead of kitty | Confirm `target.KittyWindowID` is set on the trace; if empty, see above |
-| Post-processing too aggressive | Prompt removes too much | Edit `postprocess.prompt` |
+| Transcript too aggressive / too literal | Prompt wording | Edit `transcription.prompt` / `prompt_hint` |
 | Recall daemon eating disk | `persist.mode: disk` + long retention | Drop old segments, lower `retention_seconds` / `max_segments` |
 | Overlay stuck on "Finishing" | Backend hang | Press hotkey to cancel; check trace for missing `vocis.transcribe.finalize` |
 
@@ -456,8 +443,7 @@ Project rules live in [`AGENTS.md`](AGENTS.md). The most important one:
 
 ## Notes
 
-- The overlay is intentionally small and non-interactive (Escape only
-  during finishing).
+- The overlay is intentionally small and non-interactive.
 - Clipboard restore is enabled by default after paste.
 - The app assumes an unlocked desktop session with access to your keyring.
 - Audio ducking uses `wpctl` and requires PipeWire or PulseAudio.

@@ -8,9 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	openaisdk "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
-
 	"vocis/internal/config"
 )
 
@@ -22,48 +19,19 @@ import (
 // disable, but that's a rebuild-and-redeploy change.
 const defaultRequestTimeoutSeconds = 45
 
-// ErrInputAudioBufferCommitEmpty was previously emitted by the realtime
-// WebSocket backend when a finalize-time commit found the audio buffer
-// already drained. The chat-audio backend does not produce this error,
-// but the sentinel stays so callers that wrap it in errors.Is checks
-// keep compiling. Reachable only from legacy code paths that no longer
-// exist; safe to remove once any external dependency on it is gone.
-var ErrInputAudioBufferCommitEmpty = errors.New("input audio buffer commit empty")
-
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
 type Client struct {
-	cfg          config.TranscriptionConfig
-	client       openaisdk.Client
-	chatStreamer chatCompletionStreamer
-	httpClient   *http.Client
-	writeTimeout time.Duration
+	cfg        config.TranscriptionConfig
+	httpClient *http.Client
 }
 
 func New(cfg config.TranscriptionConfig) *Client {
-	timeout := time.Duration(defaultRequestTimeoutSeconds) * time.Second
-
-	baseURL := strings.TrimRight(cfg.BaseURL, "/")
-
-	opts := []option.RequestOption{
-		option.WithBaseURL(baseURL),
-		option.WithRequestTimeout(timeout),
-	}
-
-	sdkClient := openaisdk.NewClient(opts...)
-
-	// Plain http.Client for the chat-audio backend, sharing the same
-	// per-request cap as the SDK above.
-	httpClient := &http.Client{Timeout: timeout}
-
 	return &Client{
-		cfg:          cfg,
-		client:       sdkClient,
-		chatStreamer: &sdkChatStreamer{completions: &sdkClient.Chat.Completions},
-		httpClient:   httpClient,
-		writeTimeout: minDuration(timeout, 5*time.Second),
+		cfg:        cfg,
+		httpClient: &http.Client{Timeout: time.Duration(defaultRequestTimeoutSeconds) * time.Second},
 	}
 }
 
@@ -76,51 +44,15 @@ type DictationEventType string
 const (
 	DictationEventPartial DictationEventType = "partial"
 	DictationEventSegment DictationEventType = "segment"
-	// DictationEventBeginReplace announces that the next chunk is a
-	// continuation rebatch and the prior emitted segment is about to be
-	// replaced. PrevLen is the rune count of the prior segment's text
-	// as it was previously emitted. Fired BEFORE the rebatched POST so
-	// the overlay can retract the prior segment (and animate the
-	// deletion) before any streaming partial of the unified transcript
-	// renders on top of the old text. A matching ReplaceSegment then
-	// supplies the new text once the model returns. If the rebatched
-	// POST fails, a CancelReplace restores the prior segment.
-	DictationEventBeginReplace DictationEventType = "begin_replace"
-	// DictationEventCancelReplace rolls back a prior BeginReplace
-	// after the rebatched chunk failed (HTTP error, hallucination
-	// filter, etc). Text carries the prior segment's formatted text so
-	// the caller can re-add it to its displayed buffer; PrevLen is the
-	// same rune count BeginReplace was sent with.
-	DictationEventCancelReplace DictationEventType = "cancel_replace"
-	// DictationEventReplaceSegment retracts the immediately-previous
-	// segment and substitutes Text in its place. PrevLen is the rune
-	// count of the prior segment's text as it was previously emitted
-	// (used by the injector to know how many backspaces to send into
-	// the target window). Emitted by the chat-audio backend when
-	// continuation_rebatch is on and a multi-clip re-batch produced
-	// a unified transcript covering the previously-emitted segment +
-	// the current chunk.
-	DictationEventReplaceSegment DictationEventType = "replace_segment"
 )
 
 type DictationEvent struct {
-	Type    DictationEventType
-	Text    string
-	PrevLen int
+	Type DictationEventType
+	Text string
 }
 
 type FinalizeResult struct {
 	Text string
-	// RetractFromLivePrevLen, when > 0, is the rune count the caller
-	// must strip from its already-emitted live text (the running
-	// concatenation of DictationEventSegment/ReplaceSegment events)
-	// before concatenating Text. Used by the chat-audio
-	// continuation_rebatch path when a rebatch fires AFTER liveSegments
-	// flipped to false: the prior segment lives in the caller's
-	// liveText (it was emitted before Finalize), not in the
-	// trailing-collector's buffer, so the retraction has to be
-	// forwarded up here for the caller to apply.
-	RetractFromLivePrevLen int
 }
 
 // Dictation is the surface every backend's session must expose to the
@@ -132,9 +64,9 @@ type Dictation interface {
 }
 
 // ConnectCallbacks receives notifications about connection status.
+// OnConnected fires once, on the first audio chunk the session sees.
 type ConnectCallbacks struct {
-	OnConnecting func(attempt, max int)
-	OnConnected  func()
+	OnConnected func()
 }
 
 // DictationOpts groups every parameter StartDictation needs. Pass-by-struct
@@ -149,29 +81,14 @@ type DictationOpts struct {
 	// informational — reserved for future per-call timeout scaling.
 	// 0 = unknown.
 	ExpectedAudioMS int
-	// ExtraSystemPrompt, when non-empty, is appended to the chat-audio
-	// session's system message with a blank-line separator. Used by
-	// the serve path to append prompt_hint and (in combine-postprocess
-	// mode) postprocess.prompt to the user's transcription.prompt lead.
-	ExtraSystemPrompt string
 }
 
 // finalResult is the trailing-transcript message the chat-audio worker
 // publishes to its finals channel after Finalize has flipped the session
-// out of live mode. text/err carry the trailing chunk's output;
-// replacePrevLen carries the continuation-rebatch retraction count when
-// a rebatch lands after the live boundary.
+// out of live mode.
 type finalResult struct {
 	text string
 	err  error
-	// replacePrevLen, when > 0, marks this result as a retraction-then-
-	// replace of the previously-queued finalResult's text. Used by the
-	// chat-audio continuation_rebatch path when a rebatch happens after
-	// liveSegments has flipped to false (post-Finalize): we can't fire
-	// a DictationEventReplaceSegment because the worker has switched to
-	// the finals queue, so the trailing-collector drops the last
-	// queued text and substitutes this one.
-	replacePrevLen int
 }
 
 // StartDictation begins a chat-audio dictation session. The backend is
@@ -272,14 +189,4 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max] + "…"
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a <= 0 {
-		return b
-	}
-	if a < b {
-		return a
-	}
-	return b
 }

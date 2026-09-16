@@ -23,10 +23,6 @@ type Request struct {
 	// stream with a silence gap between them, and returns a single
 	// joint transcript.
 	SegmentIDs []int64 `json:"segment_ids,omitempty"`
-
-	// PostProcess tells the daemon to also run the configured LLM
-	// post-processing step before returning the final text.
-	PostProcess bool `json:"postprocess,omitempty"`
 }
 
 // Response shapes vary by op; they all share an Error field so a single
@@ -49,8 +45,8 @@ type Response struct {
 	// SampleRate is always the segment's capture rate (16 kHz for
 	// current Silero-based recall; encoded explicitly so callers can
 	// set their playback device correctly instead of assuming).
-	AudioPCMBase64 string `json:"audio_pcm_b64,omitempty"`
-	AudioSampleRate int   `json:"audio_sample_rate,omitempty"`
+	AudioPCMBase64  string `json:"audio_pcm_b64,omitempty"`
+	AudioSampleRate int    `json:"audio_sample_rate,omitempty"`
 }
 
 // SegmentInfo is the on-the-wire summary of a ring-buffer segment. PCM
@@ -58,22 +54,22 @@ type Response struct {
 // daemon handles transcription itself (get_audio is the dedicated op
 // for replay).
 type SegmentInfo struct {
-	ID           int64     `json:"id"`
-	StartedAt    time.Time `json:"started_at"`
-	DurationMS   int       `json:"duration_ms"`
-	PeakLevel    float64   `json:"peak_level"`
-	AvgLevel     float64   `json:"avg_level"`
-	Transcribed  bool      `json:"transcribed"`
-	CachedText   string    `json:"cached_text,omitempty"`
+	ID          int64     `json:"id"`
+	StartedAt   time.Time `json:"started_at"`
+	DurationMS  int       `json:"duration_ms"`
+	PeakLevel   float64   `json:"peak_level"`
+	AvgLevel    float64   `json:"avg_level"`
+	Transcribed bool      `json:"transcribed"`
+	CachedText  string    `json:"cached_text,omitempty"`
 }
 
 // StatsInfo is a mirror of Ring.Stats shaped for JSON.
 type StatsInfo struct {
-	Count         int   `json:"count"`
-	TotalSeen     int64 `json:"total_seen"`
-	OldestAgeMS   int64 `json:"oldest_age_ms"`
-	NewestAgeMS   int64 `json:"newest_age_ms"`
-	TotalFrames   int64 `json:"total_frames"`
+	Count       int   `json:"count"`
+	TotalSeen   int64 `json:"total_seen"`
+	OldestAgeMS int64 `json:"oldest_age_ms"`
+	NewestAgeMS int64 `json:"newest_age_ms"`
+	TotalFrames int64 `json:"total_frames"`
 }
 
 // Op names. Kept as string constants for forward-compat — clients and

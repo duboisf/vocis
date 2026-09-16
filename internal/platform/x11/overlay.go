@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/color"
 	"io"
-	"strings"
 	"sync"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/BurntSushi/xgbutil/xwindow"
 
 	"vocis/internal/config"
-	"vocis/internal/sessionlog"
 	"vocis/internal/ui"
 )
 
@@ -37,12 +35,6 @@ type Overlay struct {
 	liveBody     string
 	wavePhase    float64
 	partialToken uint64
-	// retracting is set while animateListeningTextRetraction is walking
-	// the displayed text backwards (continuation-rebatch deletion of the
-	// prior segment). While true, SetListeningText updates liveBody but
-	// skips drawing so the retraction can complete uninterrupted; the
-	// retraction goroutine catches up to liveBody when it finishes.
-	retracting bool
 	height       int
 	targetHeight int
 	resizeToken  uint64
@@ -56,19 +48,6 @@ type Overlay struct {
 
 	crossFadeT     float64
 	crossPrevFrame *image.RGBA
-
-	countdownReset  chan countdownPhase
-	countdownExtend chan countdownPhase
-	completedPhases []string // pre-formatted: "Wrapping up — done (2.3s)"
-
-	escapeCh      chan struct{}
-	escapeGrabbed bool
-	escapeKeycode xproto.Keycode
-	escapeConn    *xgb.Conn
-}
-
-type countdownPhase struct {
-	label string
 }
 
 type viewState struct {
@@ -160,24 +139,6 @@ func (o *Overlay) SetConnected(windowClass string) {
 	o.drawLocked()
 }
 
-func (o *Overlay) SetConnecting(attempt, max int) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	if !o.visible || o.state.title != ui.OverlayListeningTitle {
-		return
-	}
-	if attempt > 1 {
-		o.state.subtitle = config.ExpandTemplate(ui.OverlayListeningReconnecting, map[string]string{
-			"attempt": fmt.Sprintf("%d", attempt),
-			"max":     fmt.Sprintf("%d", max),
-		})
-	} else {
-		o.state.subtitle = ui.OverlayListeningConnecting
-	}
-	o.drawLocked()
-}
-
 // SetLoadingModel updates the Listening-view subtitle to indicate the
 // transcription model is being force-loaded on the backend. Intended
 // for the session-start preflight on Lemonade; no-op if the overlay
@@ -228,19 +189,6 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 	if o.animating {
 		return
 	}
-	if o.retracting {
-		// A retraction is in flight (continuation rebatch deletion). The
-		// updated liveBody we just wrote will be picked up by the
-		// retraction goroutine when it finishes.
-		return
-	}
-	if ui.ShouldAnimateRetraction(currentText, targetText) {
-		o.partialToken++
-		token := o.partialToken
-		o.retracting = true
-		go o.animateListeningTextRetraction(token, currentText, targetText)
-		return
-	}
 	if ui.ShouldAnimatePartial(currentText, targetText) {
 		o.partialToken++
 		token := o.partialToken
@@ -249,28 +197,6 @@ func (o *Overlay) SetListeningText(windowClass, text string) {
 	}
 	o.state.body = body
 	o.drawLocked()
-}
-
-func (o *Overlay) AnimateChunk(text string) {
-	text = strings.TrimSpace(strings.ReplaceAll(text, "\n", " "))
-	if text == "" {
-		return
-	}
-
-	o.mu.Lock()
-	if !o.visible || o.state.title != ui.OverlayListeningTitle {
-		o.mu.Unlock()
-		return
-	}
-
-	o.animToken++
-	token := o.animToken
-	o.animating = true
-	o.state.body = ""
-	o.drawLocked()
-	o.mu.Unlock()
-
-	go o.animateChunk(token, ui.Shorten(text, o.renderer.BodyTextLimit()))
 }
 
 func (o *Overlay) ShowFinishing(body, shortcut string) {
@@ -290,41 +216,7 @@ func (o *Overlay) ShowFinishing(body, shortcut string) {
 		heartbeatWave: true,
 	}, false)
 
-	o.mu.Lock()
-	o.completedPhases = nil
-	o.countdownReset = make(chan countdownPhase, 1)
-	o.countdownExtend = make(chan countdownPhase, 1)
-	o.mu.Unlock()
-
-	go o.animateElapsed(countdownPhase{label: ui.OverlayFinishingWrappingUp})
-}
-
-func (o *Overlay) SetFinishingPhase(label string) {
-	o.mu.Lock()
-	ch := o.countdownReset
-	o.mu.Unlock()
-
-	if ch != nil {
-		select {
-		case ch <- countdownPhase{label: label}:
-		default:
-		}
-	}
-}
-
-// ExtendFinishingPhase transitions the current phase to a second sub-phase
-// shown inline (e.g. "Wait · Stream... (10.0s)") without completing it.
-func (o *Overlay) ExtendFinishingPhase(label string) {
-	o.mu.Lock()
-	ch := o.countdownExtend
-	o.mu.Unlock()
-
-	if ch != nil {
-		select {
-		case ch <- countdownPhase{label: label}:
-		default:
-		}
-	}
+	go o.animateElapsed()
 }
 
 func (o *Overlay) SetFinishingText(body string) {
@@ -338,90 +230,27 @@ func (o *Overlay) SetFinishingText(body string) {
 	o.drawLocked()
 }
 
-func (o *Overlay) buildSubtitle(activeLine string) string {
-	var lines []string
-	lines = append(lines, o.completedPhases...)
-	lines = append(lines, activeLine)
-	return strings.Join(lines, "\n")
-}
-
 func formatElapsed(label string, elapsed time.Duration) string {
 	return fmt.Sprintf("%s... (%.1fs)", label, elapsed.Seconds())
 }
 
-func formatTwoPhaseElapsed(doneLabel, activeLabel string, elapsed time.Duration) string {
-	return fmt.Sprintf("%s · %s... (%.1fs)", doneLabel, activeLabel, elapsed.Seconds())
-}
-
-// phaseDoneLine formats a completed phase with its final elapsed duration,
-// e.g. "Wrapping up — done (2.3s)". Pushed onto completedPhases so the user
-// can see how long each stage of finishing took.
-func (o *Overlay) phaseDoneLine(label string, elapsed time.Duration) string {
-	return fmt.Sprintf("%s — %s (%.1fs)", label, ui.OverlayFinishingPhaseDone, elapsed.Seconds())
-}
-
-func (o *Overlay) animateElapsed(phase countdownPhase) {
+// animateElapsed ticks the Finishing subtitle ("Wrapping up... (2.3s)")
+// until the overlay leaves the Finishing state.
+func (o *Overlay) animateElapsed() {
 	start := time.Now()
-	label := phase.label
-	doneLabel := "" // set when extended; makes the line two-phase
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	o.mu.Lock()
-	resetCh := o.countdownReset
-	extendCh := o.countdownExtend
-	o.mu.Unlock()
-
-	activeElapsed := func(elapsed time.Duration) string {
-		if doneLabel != "" {
-			return formatTwoPhaseElapsed(doneLabel, label, elapsed)
+	for range ticker.C {
+		o.mu.Lock()
+		if !o.visible || o.state.title != ui.OverlayFinishingTitle {
+			o.mu.Unlock()
+			return
 		}
-		return formatElapsed(label, elapsed)
+		o.state.subtitle = formatElapsed(ui.OverlayFinishingWrappingUp, time.Since(start))
+		o.drawLocked()
+		o.mu.Unlock()
 	}
-
-	for {
-		select {
-		case newPhase := <-resetCh:
-			o.mu.Lock()
-			completedLabel := label
-			if doneLabel != "" {
-				completedLabel = doneLabel + " · " + label
-			}
-			o.completedPhases = append(o.completedPhases, o.phaseDoneLine(completedLabel, time.Since(start)))
-			label = newPhase.label
-			doneLabel = ""
-			start = time.Now()
-			o.state.subtitle = o.buildSubtitle(formatElapsed(label, 0))
-			o.drawLocked()
-			o.mu.Unlock()
-		case ext := <-extendCh:
-			o.mu.Lock()
-			doneLabel = label
-			label = ext.label
-			start = time.Now()
-			o.state.subtitle = o.buildSubtitle(activeElapsed(0))
-			o.drawLocked()
-			o.mu.Unlock()
-		case <-ticker.C:
-			o.mu.Lock()
-			if !o.visible || o.state.title != ui.OverlayFinishingTitle {
-				o.mu.Unlock()
-				return
-			}
-			o.state.subtitle = o.buildSubtitle(activeElapsed(time.Since(start)))
-			o.drawLocked()
-			o.mu.Unlock()
-		}
-	}
-}
-
-func (o *Overlay) ShowSuccess(text string) {
-	o.show(viewState{
-		title:    ui.OverlaySuccessTitle,
-		subtitle: ui.OverlaySuccessSubtitle,
-		body:     ui.Shorten(strings.ReplaceAll(text, "\n", " "), o.renderer.BodyTextLimit()),
-		accent:   color.RGBA{R: 56, G: 189, B: 248, A: 255},
-	}, true)
 }
 
 func (o *Overlay) ShowWarning(text string) {
@@ -438,102 +267,6 @@ func (o *Overlay) ShowError(err error) {
 		subtitle: ui.Shorten(err.Error(), o.renderer.SubtitleTextLimit()),
 		accent:   color.RGBA{R: 248, G: 113, B: 113, A: 255},
 	}, true)
-}
-
-func (o *Overlay) GrabEscape() <-chan struct{} {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	if o.escapeGrabbed {
-		return o.escapeCh
-	}
-
-	// Use a separate X connection so WaitForEvent doesn't block the overlay.
-	conn, err := xgb.NewConn()
-	if err != nil {
-		sessionlog.Warnf("failed to open X connection for Escape grab: %v", err)
-		o.escapeCh = make(chan struct{}, 1)
-		return o.escapeCh
-	}
-
-	setup := xproto.Setup(conn)
-	root := setup.DefaultScreen(conn).Root
-	mapping, err := xproto.GetKeyboardMapping(conn,
-		setup.MinKeycode,
-		byte(setup.MaxKeycode-setup.MinKeycode+1),
-	).Reply()
-	if err != nil {
-		sessionlog.Warnf("failed to get keyboard mapping: %v", err)
-		conn.Close()
-		o.escapeCh = make(chan struct{}, 1)
-		return o.escapeCh
-	}
-	cols := int(mapping.KeysymsPerKeycode)
-	var escapeKeycode xproto.Keycode
-	for i := 0; i < len(mapping.Keysyms)/cols; i++ {
-		if mapping.Keysyms[i*cols] == 0xff1b { // XK_Escape
-			escapeKeycode = xproto.Keycode(int(setup.MinKeycode) + i)
-			break
-		}
-	}
-	if escapeKeycode == 0 {
-		sessionlog.Warnf("could not find Escape keycode")
-		conn.Close()
-		o.escapeCh = make(chan struct{}, 1)
-		return o.escapeCh
-	}
-
-	err = xproto.GrabKeyChecked(conn, true, root,
-		xproto.ModMaskAny, escapeKeycode,
-		xproto.GrabModeAsync, xproto.GrabModeAsync,
-	).Check()
-	if err != nil {
-		sessionlog.Warnf("failed to grab Escape: %v", err)
-		conn.Close()
-		o.escapeCh = make(chan struct{}, 1)
-		return o.escapeCh
-	}
-
-	o.escapeCh = make(chan struct{}, 1)
-	o.escapeKeycode = escapeKeycode
-	o.escapeConn = conn
-	o.escapeGrabbed = true
-	go o.escapeEventLoop(conn)
-	return o.escapeCh
-}
-
-func (o *Overlay) escapeEventLoop(conn *xgb.Conn) {
-	for {
-		ev, err := conn.WaitForEvent()
-		if ev == nil {
-			return
-		}
-		if err != nil {
-			return
-		}
-		if _, ok := ev.(xproto.KeyPressEvent); ok {
-			select {
-			case o.escapeCh <- struct{}{}:
-			default:
-			}
-		}
-	}
-}
-
-func (o *Overlay) UngrabEscape() {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	if !o.escapeGrabbed {
-		return
-	}
-	_ = xproto.UngrabKeyChecked(o.escapeConn, o.escapeKeycode,
-		xproto.Setup(o.escapeConn).DefaultScreen(o.escapeConn).Root,
-		xproto.ModMaskAny,
-	).Check()
-	o.escapeConn.Close()
-	o.escapeConn = nil
-	o.escapeGrabbed = false
 }
 
 func (o *Overlay) Close() {
@@ -781,34 +514,6 @@ func (o *Overlay) drawLocked() {
 	ximg.Destroy()
 }
 
-func (o *Overlay) animateChunk(token uint64, text string) {
-	runes := []rune(text)
-	for i := range runes {
-		time.Sleep(16 * time.Millisecond)
-
-		o.mu.Lock()
-		if token != o.animToken || !o.visible || o.state.title != ui.OverlayListeningTitle {
-			o.mu.Unlock()
-			return
-		}
-		o.state.body = string(runes[:i+1])
-		o.drawLocked()
-		o.mu.Unlock()
-	}
-
-	time.Sleep(260 * time.Millisecond)
-
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	if token != o.animToken || !o.visible || o.state.title != ui.OverlayListeningTitle {
-		return
-	}
-	o.animating = false
-	o.state.body = o.liveBody
-	o.drawLocked()
-}
-
 func (o *Overlay) animateListeningText(token uint64, current, target string) {
 	targetRunes := []rune(target)
 	currentLen := len([]rune(current))
@@ -831,70 +536,6 @@ func (o *Overlay) animateListeningText(token uint64, current, target string) {
 
 		currentLen = next
 	}
-}
-
-// animateListeningTextRetraction walks the displayed listening text
-// backwards word-by-word until it reaches target (which must be a prefix
-// of current). Used by the continuation-rebatch flow so the user sees the
-// prior segment delete in step with the model's round-trip rather than
-// being snap-replaced after the new transcript finishes streaming.
-//
-// While running, SetListeningText callers see o.retracting=true and only
-// update o.liveBody (no drawing). Once the retraction reaches the target,
-// this goroutine catches up to whatever liveBody accumulated (the SSE
-// partials that arrived during the deletion) by snapping to it, then
-// kicks the normal forward animation if more text is still streaming in.
-func (o *Overlay) animateListeningTextRetraction(token uint64, current, target string) {
-	defer func() {
-		o.mu.Lock()
-		o.retracting = false
-		o.mu.Unlock()
-	}()
-
-	currentRunes := []rune(current)
-	targetRunes := []rune(target)
-	targetLen := len(targetRunes)
-	currentLen := len(currentRunes)
-
-	for currentLen > targetLen {
-		prev := ui.PrevWordBoundary(currentRunes, currentLen)
-		if prev < targetLen {
-			prev = targetLen
-		}
-		// Slower than the forward typing animation (28ms/word) — deletion
-		// is meant to be visible as its own beat before the new transcript
-		// starts streaming in.
-		time.Sleep(75 * time.Millisecond)
-
-		o.mu.Lock()
-		if token != o.partialToken || o.animating || !o.visible || o.state.title != ui.OverlayListeningTitle {
-			o.mu.Unlock()
-			return
-		}
-		o.state.body = ui.ListeningBody(string(currentRunes[:prev]))
-		o.drawLocked()
-		o.mu.Unlock()
-
-		currentLen = prev
-	}
-
-	// Retraction done. liveBody holds the latest target — likely the
-	// retraction endpoint, but partials that arrived mid-retraction may
-	// have grown it. Snap to liveBody so the catch-up is instantaneous,
-	// then let the next SetListeningText call drive the forward
-	// animation.
-	o.mu.Lock()
-	if token != o.partialToken || !o.visible || o.state.title != ui.OverlayListeningTitle {
-		o.mu.Unlock()
-		return
-	}
-	currentDisplayed := ui.DisplayedListeningText(o.state.body)
-	accumulated := ui.DisplayedListeningText(o.liveBody)
-	if accumulated != currentDisplayed {
-		o.state.body = o.liveBody
-		o.drawLocked()
-	}
-	o.mu.Unlock()
 }
 
 func (o *Overlay) captureFrameLocked() *image.RGBA {

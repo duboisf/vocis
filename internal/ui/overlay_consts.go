@@ -26,12 +26,11 @@ const (
 	OverlayReadyTitle    = "Ready"
 	OverlayReadySubtitle = "Voice typing is armed"
 
-	OverlayListeningTitle        = "Listening"
-	OverlayListeningSuffix       = "— release to paste"
-	OverlayListeningSubmitHint   = "⏎ submit"
-	OverlayListeningConnecting   = "○ Connecting..."
-	OverlayListeningReconnecting = "○ Reconnecting... (attempt {attempt}/{max})"
-	OverlayListeningConnected    = "● Ready to type into {window}"
+	OverlayListeningTitle      = "Listening"
+	OverlayListeningSuffix     = "— release to paste"
+	OverlayListeningSubmitHint = "⏎ submit"
+	OverlayListeningConnecting = "○ Connecting..."
+	OverlayListeningConnected  = "● Ready to type into {window}"
 	// OverlayListeningLoadingModel shows while vocis is forcing a
 	// local transcription model into memory at session-start.
 	// {model} expands to the configured transcribe model name.
@@ -40,20 +39,11 @@ const (
 	OverlayFinishingTitle      = "Finishing"
 	OverlayFinishingCancelHint = "— press {shortcut} to cancel"
 	OverlayFinishingWrappingUp = "Wrapping up"
-	// OverlayFinishingPPWait / OverlayFinishingPPStream label the
-	// postprocess sub-phases inside the Wrapping-up countdown.
-	OverlayFinishingPPWait    = "Wait"
-	OverlayFinishingPPStream  = "Stream"
-	OverlayFinishingPhaseDone = "done"
-
-	OverlaySuccessTitle    = "Typed"
-	OverlaySuccessSubtitle = "Transcription inserted into your active app"
 
 	OverlayErrorTitle = "Error"
 
-	OverlayWarningTitle              = "Heads up"
-	OverlayWarningNoSpeech           = "No speech detected"
-	OverlayWarningCancelled          = "Cancelled — transcription discarded"
-	OverlayWarningPostprocessSkipped = "Raw text pasted — cleanup was skipped due to a timeout or error"
-	OverlayWarningTargetGone         = "Target window closed — transcript copied to clipboard"
+	OverlayWarningTitle      = "Heads up"
+	OverlayWarningNoSpeech   = "No speech detected"
+	OverlayWarningCancelled  = "Cancelled — transcription discarded"
+	OverlayWarningTargetGone = "Target window closed — transcript copied to clipboard"
 )

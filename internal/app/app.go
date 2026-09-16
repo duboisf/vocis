@@ -13,11 +13,11 @@ import (
 
 	"vocis/internal/audiocapture"
 	"vocis/internal/config"
-	"vocis/internal/transcribe"
 	"vocis/internal/platform"
 	"vocis/internal/recorder"
 	"vocis/internal/sessionlog"
 	"vocis/internal/telemetry"
+	"vocis/internal/transcribe"
 	"vocis/internal/ui"
 )
 
@@ -43,11 +43,11 @@ type App struct {
 }
 
 type recordingState struct {
-	id        uint64
-	startedAt time.Time
-	session   *recorder.Session
-	dictation transcribe.Dictation
-	cancel    context.CancelFunc
+	id          uint64
+	startedAt   time.Time
+	session     *recorder.Session
+	dictation   transcribe.Dictation
+	cancel      context.CancelFunc
 	target      platform.Target
 	liveText    string
 	displayText string // committed segments (canonical text), one per line
@@ -60,37 +60,19 @@ type recordingState struct {
 	span           trace.Span
 	spanCtx        context.Context
 	activeSpan     trace.Span
-	// combinedPostProcess is true when postprocess is enabled — the
-	// chat-audio session folds the cleanup prompt into its own system
-	// prompt has folded the cleanup rules in already, so the trailing
-	// PostProcess call is skipped to avoid a redundant round-trip.
-	combinedPostProcess bool
-	// replacePending tracks an outstanding continuation rebatch: set
-	// when BeginReplace pre-retracted the prior segment from
-	// liveText/displayText, cleared when the matching ReplaceSegment
-	// (success) or CancelReplace (failure) lands. Keeps ReplaceSegment
-	// from retracting a second time.
-	replacePending bool
 }
 
 type OverlayUI interface {
 	ShowHint(text string)
 	ShowListening(windowClass, hotkeyMode string)
 	SetConnected(windowClass string)
-	SetConnecting(attempt, max int)
 	SetLoadingModel(modelName string)
 	SetSubmitMode(enabled bool)
 	SetListeningText(windowClass, text string)
-	AnimateChunk(text string)
 	ShowFinishing(body, shortcut string)
-	SetFinishingPhase(label string)
-	ExtendFinishingPhase(label string)
 	SetFinishingText(body string)
-	ShowSuccess(text string)
 	ShowError(err error)
 	ShowWarning(subtitle string)
-	GrabEscape() <-chan struct{}
-	UngrabEscape()
 	SetLevel(level float64)
 	Hide()
 	Close()
@@ -304,40 +286,9 @@ func (a *App) reloadConfig() {
 	}
 	a.cfg.Transcription = cfg.Transcription
 	a.cfg.Recording = cfg.Recording
-	a.cfg.PostProcess = cfg.PostProcess
 	a.cfg.LogWindowTitle = cfg.LogWindowTitle
 	a.transcribe = transcribe.New(a.cfg.Transcription)
 	sessionlog.Infof("config reloaded: %s", path)
-}
-
-// postProcessMode reports whether postprocess runs at all, and
-// whether it's combined into the chat-audio system prompt (combine=true,
-// the legacy fast-path) vs. run as a separate /chat/completions pass
-// on the joined transcript (combine=false). Pure helper — easy to unit
-// test, single source of truth for the two flags' interaction.
-func postProcessMode(cfg config.PostProcessConfig) (enabled, combined bool) {
-	enabled = cfg.Enabled
-	combined = enabled && cfg.Combine
-	return
-}
-
-// buildChatAudioExtraSystemPrompt assembles the supplemental system
-// prompt text appended to transcription.prompt for each chat-audio
-// chunk. prompt_hint is always appended when set. postprocess.prompt
-// is appended only when `combined` is true — in separate-pass mode it
-// gets dropped here and runs later on the joined transcript instead
-// (see runPostProcess).
-func buildChatAudioExtraSystemPrompt(cfg config.Config, combined bool) string {
-	var parts []string
-	if hint := strings.TrimSpace(cfg.Transcription.PromptHint); hint != "" {
-		parts = append(parts, hint)
-	}
-	if combined {
-		if pp := strings.TrimSpace(cfg.PostProcess.Prompt); pp != "" {
-			parts = append(parts, pp)
-		}
-	}
-	return strings.Join(parts, "\n\n")
 }
 
 func (a *App) startRecordingLocked(ctx context.Context) {
@@ -448,45 +399,11 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		spanCtx:    spanCtx,
 		submitMode: a.cfg.Insertion.AutoSubmit,
 	}
-	// chat-audio is an LLM doing transcription, so it's just as capable
-	// of cleanup as a dedicated postprocess pass. With combine=true
-	// (the default) we fold the postprocess prompt into the chat-audio
-	// system message and skip the separate /chat/completions round-trip
-	// — same final text, half the latency. With combine=false the
-	// postprocess prompt is dropped from the chat-audio system message
-	// and runs as a real second pass on the joined transcript (see
-	// runPostProcess), which lets the cleanup prompt re-punctuate across
-	// chunk boundaries.
-	_, state.combinedPostProcess = postProcessMode(a.cfg.PostProcess)
-
-	// Build the chat-audio extra system content from user config only.
-	// transcription.prompt is the lead (set inside the chat-audio session
-	// itself). prompt_hint and (in combine mode) postprocess.prompt
-	// are appended verbatim with blank-line separators. No hardcoded
-	// leads, headers, or footers — the user owns the wording.
-	extraSystemPrompt := buildChatAudioExtraSystemPrompt(a.cfg, state.combinedPostProcess)
-	if extraSystemPrompt != "" {
-		sessionlog.Infof("chat-audio: extra system prompt %d chars (combine_postprocess=%t)",
-			len(extraSystemPrompt), state.combinedPostProcess)
-	}
-	if a.cfg.PostProcess.Enabled && !state.combinedPostProcess {
-		sessionlog.Infof("postprocess: separate-pass mode (combine=false); cleanup will run on joined transcript")
-	}
 	dictation, err := a.transcribe.StartDictation(recordCtx, transcribe.DictationOpts{
-		SampleRate:        recorder.SampleRate,
-		Channels:          recorder.Channels,
-		Samples:           wrappedSamples,
-		ExtraSystemPrompt: extraSystemPrompt,
+		SampleRate: recorder.SampleRate,
+		Channels:   recorder.Channels,
+		Samples:    wrappedSamples,
 		Callbacks: transcribe.ConnectCallbacks{
-			OnConnecting: func(attempt, max int) {
-				a.overlay.SetConnecting(attempt, max)
-				recordingSpan.AddEvent("overlay.connecting",
-					trace.WithAttributes(
-						attribute.Int("attempt", attempt),
-						attribute.Int("max", max),
-					),
-				)
-			},
 			OnConnected: func() {
 				a.overlay.SetConnected(target.WindowClass)
 				recordingSpan.AddEvent("overlay.connected")
@@ -513,16 +430,6 @@ func (a *App) startRecordingLocked(ctx context.Context) {
 		state.session.SampleRate(), state.session.Channels())
 	go a.consumeDictationEvents(recordCtx, state)
 	go a.monitorRecordingLevel(ctx, state.id, state.session)
-
-	// Pre-warm the post-processing model in the background while the user
-	// is still talking. On Lemonade with max_models.llm=1, this triggers
-	// the model swap eagerly so the real PP request after Finalize doesn't
-	// pay the 5s+ load cost. Skipped in combine mode — the chat-audio
-	// session does cleanup itself, and warming a different llm here would
-	// evict the transcription model from the single llm slot mid-session.
-	if !state.combinedPostProcess && a.cfg.PostProcess.Enabled && a.cfg.PostProcess.Model != "" {
-		go a.transcribe.WarmPostProcess(ctx, a.cfg.PostProcess.Model)
-	}
 
 	if recorder.DefaultMaxDurationSeconds > 0 {
 		go a.forceStopAfter(ctx, state.id, time.Duration(recorder.DefaultMaxDurationSeconds)*time.Second)
@@ -603,8 +510,6 @@ func (a *App) forceStopAfter(ctx context.Context, id uint64, maxDuration time.Du
 }
 
 func (a *App) finishRecording(ctx context.Context, state *recordingState) {
-	escapeCh := a.overlay.GrabEscape()
-	defer a.overlay.UngrabEscape()
 	// Safety net for error returns. The success path clears the flag
 	// earlier via markDelivered() so the overlay fade-out doesn't
 	// extend the dismissable window past the paste.
@@ -683,26 +588,6 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	sessionlog.Infof("finalization completed elapsed=%s", finalizeDuration)
 	trailing := strings.TrimSpace(result.Text)
 
-	// Apply any rebatch retraction that the backend couldn't absorb
-	// into its trailing buffer (because the prior emitted segment
-	// lives in state.liveText, not in trailing — happens when a
-	// chat-audio continuation_rebatch fires DURING Finalize on the
-	// last segment that was emitted live).
-	if result.RetractFromLivePrevLen > 0 {
-		runes := []rune(state.liveText)
-		if result.RetractFromLivePrevLen <= len(runes) {
-			state.liveText = string(runes[:len(runes)-result.RetractFromLivePrevLen])
-		} else {
-			state.liveText = ""
-		}
-		if i := strings.LastIndex(state.displayText, "\n"); i >= 0 {
-			state.displayText = state.displayText[:i]
-		} else {
-			state.displayText = ""
-		}
-		sessionlog.Infof("rebatch retraction applied to live buffer: prev_runes=%d", result.RetractFromLivePrevLen)
-	}
-
 	text := state.liveText
 	if trailing != "" {
 		if text == "" {
@@ -735,9 +620,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 	}
 	a.overlay.SetFinishingText(displayText)
 
-	text, postProcessSkipped := a.runPostProcess(spanCtx, escapeCh, state, text)
-
-	if err := a.deliverTranscript(spanCtx, state, text, postProcessSkipped); err != nil {
+	if err := a.deliverTranscript(spanCtx, state, text); err != nil {
 		dictationErr = err
 	}
 }
@@ -748,7 +631,7 @@ func (a *App) finishRecording(ctx context.Context, state *recordingState) {
 // hard insert failures — ErrTargetGone is soft because the transcript
 // is on the clipboard, the transcription itself succeeded, and tainting
 // the dictation span as failed would be misleading.
-func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, text string, postProcessSkipped bool) error {
+func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, text string) error {
 	insertCtx, insertSpan := telemetry.StartSpan(spanCtx, "vocis.inject",
 		attribute.String("target.window_id", state.target.WindowID),
 		attribute.String("target.window_class", state.target.WindowClass),
@@ -795,66 +678,9 @@ func (a *App) deliverTranscript(spanCtx context.Context, state *recordingState, 
 	// dismissInFlightOverlay during the ~320ms overlay fade-out below.
 	a.markDelivered()
 	state.span.SetAttributes(attribute.Bool("submit_mode", state.submitMode))
-	if postProcessSkipped {
-		state.span.AddEvent("overlay.warning", trace.WithAttributes(attribute.String("reason", "postprocess_skipped")))
-		a.overlay.ShowWarning(ui.OverlayWarningPostprocessSkipped)
-	} else {
-		state.span.AddEvent("overlay.success")
-		a.overlay.Hide()
-	}
+	state.span.AddEvent("overlay.success")
+	a.overlay.Hide()
 	return nil
-}
-
-// runPostProcess runs the LLM cleanup pass on the assembled transcript
-// if enabled, with Escape-to-skip support and a span around the whole
-// thing. Returns the cleaned text (or the input verbatim if skipped or
-// the backend already combined cleanup into transcription).
-func (a *App) runPostProcess(spanCtx context.Context, escapeCh <-chan struct{}, state *recordingState, text string) (string, bool) {
-	if state.combinedPostProcess {
-		// chat-audio already folded the cleanup rules into its system
-		// prompt and produced a cleaned transcript in the same call.
-		// Running the separate /chat/completions postprocess pass on
-		// top would just add latency and may double-clean.
-		state.span.AddEvent("postprocess.combined_into_chat_audio")
-		sessionlog.Infof("postprocess: combined into chat-audio call; skipping separate pass")
-		return text, false
-	}
-	if !a.cfg.PostProcess.Enabled {
-		return text, false
-	}
-
-	a.overlay.SetFinishingPhase(ui.OverlayFinishingPPWait)
-	state.span.AddEvent("overlay.phase.wait")
-	ppSpanCtx, ppSpan := telemetry.StartSpan(spanCtx, "vocis.postprocess",
-		attribute.Int("input.length", len(text)),
-		attribute.String("model", a.cfg.PostProcess.Model),
-	)
-
-	ppCtx, ppCancel := context.WithCancel(ppSpanCtx)
-	resultCh := make(chan transcribe.PostProcessResult, 1)
-	go func() {
-		resultCh <- a.transcribe.PostProcess(ppCtx, a.cfg.PostProcess, text, func() {
-			a.overlay.ExtendFinishingPhase(ui.OverlayFinishingPPStream)
-		})
-	}()
-
-	var result transcribe.PostProcessResult
-	select {
-	case result = <-resultCh:
-	case <-escapeCh:
-		ppCancel()
-		ppSpan.AddEvent("postprocess.cancelled_by_user")
-		sessionlog.Infof("post-processing skipped by user (Escape)")
-		result = transcribe.PostProcessResult{Text: text, Skipped: true}
-	}
-	ppCancel()
-
-	ppSpan.SetAttributes(
-		attribute.Int("output.length", len(result.Text)),
-		attribute.Bool("skipped", result.Skipped),
-	)
-	telemetry.EndSpan(ppSpan, nil)
-	return result.Text, result.Skipped
 }
 
 // markDelivered ends the dismissable phase of a dictation. The
@@ -937,10 +763,8 @@ func (a *App) showCompletionError(err error) {
 }
 
 func isNoSpeechError(err error) bool {
-	return errors.Is(err, transcribe.ErrInputAudioBufferCommitEmpty) ||
-		strings.Contains(err.Error(), "transcription came back empty")
+	return strings.Contains(err.Error(), "transcription came back empty")
 }
-
 
 func userFacingError(err error) error {
 	msg := err.Error()
@@ -1041,89 +865,6 @@ func (a *App) handleDictationEvent(
 		state.currentPartial = ""
 		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
 		sessionlog.Infof("stream segment accumulated: %d chars total", len(state.liveText))
-		return nil
-
-	case transcribe.DictationEventBeginReplace:
-		// Continuation rebatch announced: retract the prior segment NOW
-		// (before the POST's SSE partials arrive) so the overlay can
-		// animate the deletion in parallel with the model round-trip.
-		// The matching ReplaceSegment will add the new text once the
-		// model returns; a CancelReplace puts the prior text back if
-		// the rebatched POST fails.
-		if event.PrevLen > 0 {
-			runes := []rune(state.liveText)
-			if event.PrevLen <= len(runes) {
-				state.liveText = string(runes[:len(runes)-event.PrevLen])
-			} else {
-				state.liveText = ""
-			}
-			if i := strings.LastIndex(state.displayText, "\n"); i >= 0 {
-				state.displayText = state.displayText[:i]
-			} else {
-				state.displayText = ""
-			}
-		}
-		state.currentPartial = ""
-		state.replacePending = true
-		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
-		a.overlay.SetFinishingText(state.displayText)
-		sessionlog.Infof("stream segment begin-replace: prev_runes=%d, %d chars remaining",
-			event.PrevLen, len(state.liveText))
-		return nil
-
-	case transcribe.DictationEventCancelReplace:
-		// Rebatched POST failed — restore the prior segment we just
-		// retracted in BeginReplace so the overlay doesn't show a hole
-		// until the next chunk lands.
-		if !state.replacePending {
-			return nil
-		}
-		state.replacePending = false
-		state.liveText += event.Text
-		restored := strings.TrimSpace(event.Text)
-		if restored != "" {
-			if state.displayText != "" {
-				state.displayText += "\n"
-			}
-			state.displayText += restored
-		}
-		state.currentPartial = ""
-		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
-		a.overlay.SetFinishingText(state.displayText)
-		sessionlog.Infof("stream segment cancel-replace: restored prior segment (%d runes)", event.PrevLen)
-		return nil
-
-	case transcribe.DictationEventReplaceSegment:
-		// Continuation rebatch: substitute the unified transcript for
-		// the prior segment. BeginReplace already retracted the old
-		// text from liveText/displayText, so we skip the retract step
-		// unless that pre-emptive event never landed (post-Finalize
-		// paths go through the finals queue, not events, but a defense-
-		// in-depth retract here keeps the in-memory buffers correct).
-		if !state.replacePending && event.PrevLen > 0 {
-			runes := []rune(state.liveText)
-			if event.PrevLen <= len(runes) {
-				state.liveText = string(runes[:len(runes)-event.PrevLen])
-			}
-			if i := strings.LastIndex(state.displayText, "\n"); i >= 0 {
-				state.displayText = state.displayText[:i]
-			} else {
-				state.displayText = ""
-			}
-		}
-		state.replacePending = false
-		text := strings.TrimSpace(event.Text)
-		state.liveText += event.Text
-		if text != "" {
-			if state.displayText != "" {
-				state.displayText += "\n"
-			}
-			state.displayText += text
-		}
-		state.currentPartial = ""
-		a.overlay.SetListeningText(state.target.WindowClass, state.displayText)
-		sessionlog.Infof("stream segment replaced: prev_runes=%d, %d chars total",
-			event.PrevLen, len(state.liveText))
 		return nil
 
 	default:

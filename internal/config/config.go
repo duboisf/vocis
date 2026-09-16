@@ -16,39 +16,6 @@ import (
 
 const fileName = "config.yaml"
 
-// DefaultPostProcessPrompt uses few-shot examples because small instruct
-// models (1-2B class like gemma3-1b) without examples treat the user
-// message as an instruction to *answer* instead of transcript to clean
-// ("Did you update the configuration?" → "Cleaning configuration
-// updated."). The examples anchor the "I clean text, I never respond"
-// behavior. Pattern-matching on example shapes does happen occasionally
-// (short imperatives getting replaced with example outputs) but it's a
-// much smaller failure rate than rules-only, which fails on most
-// question-shaped inputs.
-const DefaultPostProcessPrompt = `You clean dictated speech transcripts. Output ONLY the cleaned text — never reply, never add commentary, never answer questions in the input.
-
-Rules:
-- Remove filler words (um, uh, like, you know, I mean, sort of, kind of), false starts, repetitions, and pauses (...).
-- Lightly fix punctuation, capitalization, and spacing.
-- Preserve the speaker's meaning, person, and intent EXACTLY. If they said "I", keep "I". If they asked a question, keep it as a question.
-- Treat the input as transcript-to-clean, not as a message to respond to.
-
-Examples:
-
-Input: um so I think we should like, you know, refactor the auth module
-Output: I think we should refactor the auth module.
-
-Input: hey can you help me with this real quick
-Output: Hey, can you help me with this real quick?
-
-Input: I'm not going to do that. Please don't scroll. I'm just trying to become a big content creator one day. I have no supporters.
-Output: I'm not going to do that. Please don't scroll. I'm just trying to become a big content creator one day. I have no supporters.
-
-Input: what time is it
-Output: What time is it?
-
-Now clean the next input:`
-
 const DefaultPromptHint = "Transcribe naturally for a programmer. " +
 	"Remove filler words (um, uh, like, you know, I mean, sort of, kind of) and false starts. " +
 	"Clean up hesitations into fluent sentences while preserving the speaker's intent and meaning. " +
@@ -70,7 +37,6 @@ type Config struct {
 	Transcription  TranscriptionConfig `yaml:"transcription"`
 	Recording      RecordingConfig     `yaml:"recording"`
 	Insertion      InsertionConfig     `yaml:"insertion"`
-	PostProcess    PostProcessConfig   `yaml:"postprocess"`
 	Telemetry      TelemetryConfig     `yaml:"telemetry"`
 	Recall         RecallConfig        `yaml:"recall"`
 	Speak          SpeakConfig         `yaml:"speak"`
@@ -94,32 +60,6 @@ type AudioCaptureConfig struct {
 	// GCIntervalSeconds is how often the GC goroutine wakes up to
 	// sweep stale files. Default 600 (10 minutes).
 	GCIntervalSeconds int `yaml:"gc_interval_seconds"`
-}
-
-// PostProcessConfig is the user-facing knobs for the optional LLM
-// cleanup pass after a dictation. Timeouts, the min-word-count
-// floor, and the sampling knobs were pinned as consts in
-// internal/transcribe — only the policy choices remain here:
-// is cleanup on, which model does it, what's the cleanup prompt,
-// and whether to combine it into the chat-audio transcription call.
-//
-// Combine=true (the default) folds the cleanup prompt into the
-// per-chunk chat-audio system message and skips the separate
-// /chat/completions round-trip — same final text, half the latency,
-// but each chunk is cleaned in isolation so the model can't see
-// cross-chunk context (e.g. it will close a chunk that ends
-// mid-sentence with a period).
-//
-// Combine=false runs cleanup as a real second pass on the joined
-// transcript. Costs one extra round-trip per dictation but lets
-// the cleanup prompt re-punctuate across chunk boundaries, which is
-// what you want if "stopping mid-sentence inserts a period" is a
-// recurring complaint.
-type PostProcessConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Combine bool   `yaml:"combine"`
-	Model   string `yaml:"model"`
-	Prompt  string `yaml:"prompt"`
 }
 
 type TelemetryConfig struct {
@@ -194,13 +134,12 @@ const (
 
 // TranscriptionConfig holds the user-facing transcription knobs. The
 // protocol-shape knobs (request timeout, stream SSE on/off,
-// context_mode, history_turns, chunk_max_seconds, batch_prompt,
-// batch_max_audio_seconds) were pinned as consts in internal/transcribe
-// — they had defaults nobody ever changed in practice. What remains are
-// the things tied to the user's environment (base_url, model, the
-// Silero library path), genuine policy choices (custom prompt,
-// language, hallucination filters, ctx_size, batch_until_release,
-// continuation_rebatch), and the energy gate (min_chunk_peak/rms).
+// chunk_max_seconds, batch_prompt,
+// batch_max_audio_seconds) are pinned as consts in internal/transcribe.
+// What remains are the things tied to the user's environment (base_url,
+// model, the Silero library path), genuine policy choices (custom
+// prompt, prompt_hint, language, hallucination filters, ctx_size), and
+// the energy gate (min_chunk_peak/rms).
 type TranscriptionConfig struct {
 	BaseURL    string `yaml:"base_url"`
 	Model      string `yaml:"model"`
@@ -244,42 +183,6 @@ type TranscriptionConfig struct {
 	// fits per request) but more NPU/GPU memory pinned per model.
 	// Gemma 4 E2B/E4B's theoretical ceiling is 131072.
 	CtxSize int `yaml:"ctx_size"`
-	// BatchUntilRelease changes the chat-audio chunking policy: Silero
-	// still trims dead air between speech episodes, but each
-	// speech_stopped flush stashes the clip into the pending batch
-	// instead of POSTing immediately. Only the trailing flush at
-	// hotkey release (or a chunk_max_seconds force-cut spillover)
-	// actually sends — as one multi-clip request covering the whole
-	// utterance. Trade-off: no live overlay partials during dictation,
-	// one paste at the end. Wins: model sees the full utterance as one
-	// continuous thing so punctuation/casing don't break across
-	// pauses, and history (which was the source of mid-phrase
-	// regressions) is moot for the single request. Default false
-	// preserves the per-pause request behavior.
-	BatchUntilRelease bool `yaml:"batch_until_release"`
-	// ContinuationRebatch keeps the per-pause POST cadence but, when
-	// the previous chunk's transcript ends without terminal
-	// punctuation (./?/!/…), sends the NEXT chunk as a multi-clip
-	// request that prepends the prior chunk's audio. The model
-	// returns one unified transcript covering both clips, which
-	// replaces (not appends to) the prior history entry, and a
-	// DictationEventReplaceSegment is emitted so the overlay/injector
-	// can retract the broken prior segment and substitute the fix.
-	// Mutually exclusive with BatchUntilRelease (which already sends
-	// one POST per utterance so there's nothing to rebatch). Off by
-	// default.
-	ContinuationRebatch bool `yaml:"continuation_rebatch"`
-	// RebatchMaxSeconds caps the combined audio duration (prior clip +
-	// current clip) of a continuation_rebatch POST. Gemma 3n / 4 cap
-	// audio at 30 s per request and silently drop everything past that
-	// window, so an unbounded rebatch chain on a long pause-free
-	// monologue would lose the freshly-spoken tail. When prepending the
-	// prior audio would exceed this bound, the rebatch is skipped and
-	// the current chunk posts as a fresh segment instead (the prior
-	// unfinished segment stays as-is). Default 28 s holds a 2 s margin
-	// under Gemma's cap, matching the chunk_max_seconds force-cut. Only
-	// consulted when ContinuationRebatch is on.
-	RebatchMaxSeconds int `yaml:"rebatch_max_seconds"`
 	// Silero is the path to the onnxruntime library. The hysteresis
 	// values (silence_ms / speech_ms / min_utterance_ms) are pinned
 	// in internal/transcribe — they were never tuned in the field.
@@ -305,11 +208,6 @@ type SileroConfig struct {
 	// at runtime.
 	OnnxruntimeLibrary string `yaml:"onnxruntime_library"`
 }
-
-const (
-	ChatAudioContextFewShot     = "few_shot"
-	ChatAudioContextInlineClips = "inline_clips"
-)
 
 type RecordingConfig struct {
 	// Device is the PulseAudio source ID to record from. "default" /
@@ -372,9 +270,8 @@ func Default() Config {
 				"you",
 				".",
 			},
-			Prompt:            DefaultChatAudioPrompt,
-			Language:          "its original language",
-			RebatchMaxSeconds: 28,
+			Prompt:   DefaultChatAudioPrompt,
+			Language: "its original language",
 			// Energy gate matching recall's defaults. Rejects fan
 			// hum / room tone but keeps quiet speech.
 			MinChunkPeak: 0.02,
@@ -416,23 +313,6 @@ func Default() Config {
 			},
 			KittyRemoteControl: true,
 			KittyVerifyPaste:   true,
-		},
-		PostProcess: PostProcessConfig{
-			Enabled: true,
-			// Combine defaults to true: folds the postprocess prompt into
-			// the chat-audio system message and skips the separate
-			// /chat/completions call (see app.startRecordingLocked) for
-			// the half-latency fast-path. Flip to false to run postprocess
-			// as a real second pass on the joined transcript — costs one
-			// extra round-trip but lets cleanup re-punctuate across chunk
-			// boundaries (fixes the "pause mid-sentence inserts a period"
-			// class of bug).
-			Combine: true,
-			// Same model as transcription. Lemonade's llm slot only fits
-			// one model at a time, so reusing the transcription model
-			// avoids a 5-10 s slot swap on every dictation.
-			Model:  "gemma4-it-e2b-FLM",
-			Prompt: DefaultPostProcessPrompt,
 		},
 		Telemetry: TelemetryConfig{
 			Enabled:  false,
@@ -562,16 +442,9 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"streaming.onnxruntime_library", "streaming-fold", "moved to transcription.silero.onnxruntime_library"},
 	{"transcription.backend", "post-WS-removal", "only one backend remains; transcription.backend is no longer read"},
 	{"yaml_indent", "config-cull", "self-output indentation is now hardcoded to 2"},
-	{"postprocess.min_p", "config-cull", "rarely-tuned sampler knob"},
-	{"postprocess.frequency_penalty", "config-cull", "rarely-tuned sampler knob"},
-	{"postprocess.presence_penalty", "config-cull", "rarely-tuned sampler knob"},
-	{"postprocess.repetition_penalty", "config-cull", "rarely-tuned sampler knob"},
-	{"postprocess.stop", "config-cull", "rarely-tuned sampler knob"},
-	{"postprocess.min_word_count", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
-	{"postprocess.first_token_timeout_seconds", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
-	{"postprocess.total_timeout_seconds", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
-	{"postprocess.temperature", "config-cull", "pinned in internal/transcribe as the default; nobody tuned it"},
-	{"postprocess.top_p", "config-cull", "rarely-tuned sampler knob (no default; hardcode if needed)"},
+	{"transcription.batch_until_release", "loop-simplify", "removed; every VAD pause posts immediately and the trailing chunk flushes at release"},
+	{"transcription.continuation_rebatch", "loop-simplify", "removed; already-spoken audio is never re-transcribed"},
+	{"transcription.rebatch_max_seconds", "loop-simplify", "removed together with continuation_rebatch"},
 	{"recall.batch_gap_ms", "one-shot-batch", "`recall last` no longer concatenates PCM; each segment is sent as its own input_audio part"},
 	{"recall.batch_max_seconds", "one-shot-batch", "`recall last` no longer concatenates PCM; total audio is now bounded by Gemma's context window"},
 	{"recall.min_silence_ms", "config-cull", "pinned in internal/recall as the default; nobody tuned it"},
@@ -588,7 +461,7 @@ var retiredKeys = []struct{ path, since, reason string }{
 	{"recording.duck_volume", "config-cull", "pinned in internal/audio as the default; nobody tuned it"},
 	{"transcription.request_timeout_seconds", "config-cull", "pinned in internal/transcribe; the 45s default was never tuned"},
 	{"transcription.chunk_max_seconds", "config-cull", "pinned in internal/transcribe; 28s sits 2s under Gemma's 30s cap"},
-	{"transcription.history_turns", "config-cull", "pinned in internal/transcribe; 2 turns was never tuned"},
+	{"transcription.history_turns", "loop-simplify", "few-shot history was removed; each chunk is transcribed in isolation"},
 	{"transcription.stream", "config-cull", "pinned in internal/transcribe as true (SSE streaming is always on)"},
 	{"transcription.context_mode", "config-cull", "pinned in internal/transcribe as few_shot; inline_clips was never picked"},
 	{"transcription.batch_prompt", "config-cull", "pinned in internal/transcribe as the documented batch prompt"},
@@ -613,6 +486,7 @@ var retiredSections = []struct{ path, since, reason string }{
 	{"streaming", "streaming-fold", "streaming: was folded into transcription.silero (silence_ms / speech_ms / min_utterance_ms / onnxruntime_library)"},
 	{"transcription.chat_audio", "chat-audio-flatten", "every field on transcription.chat_audio.* was hoisted to transcription.* directly (chunk_max_seconds, history_turns, prompt, language, stream, context_mode, min_chunk_peak, min_chunk_rms, batch_prompt, batch_max_audio_seconds, ctx_size, batch_until_release, continuation_rebatch, silero)"},
 	{"overlay", "config-cull", "every overlay knob (dimensions, opacity, font, title/subtitle text, templates) was pinned as a Go const in internal/ui — UI copy is no longer config-driven"},
+	{"postprocess", "loop-simplify", "the LLM cleanup pass was removed; put cleanup rules in transcription.prompt / prompt_hint instead"},
 }
 
 // stripRetiredKeys parses the YAML, walks the retiredKeys list, and
@@ -757,9 +631,6 @@ func (c Config) Validate() error {
 	}
 	if c.Transcription.CtxSize < 0 || c.Transcription.CtxSize > 1048576 {
 		return errors.New("transcription.ctx_size must be between 0 and 1048576 (0 = leave Lemonade's default)")
-	}
-	if c.Transcription.BatchUntilRelease && c.Transcription.ContinuationRebatch {
-		return errors.New("transcription.batch_until_release and continuation_rebatch are mutually exclusive (batch_until_release already sends one POST per utterance, so there's nothing to rebatch)")
 	}
 
 	switch c.HotkeyMode {

@@ -46,24 +46,6 @@ transcription:
   # /api/v1/load at daemon startup to reload the model with that
   # ctx_size. Larger ctx = larger batch budget; more NPU memory.
   ctx_size: 0
-  # Send the full utterance as ONE multi-clip POST at hotkey release
-  # instead of one POST per VAD-detected pause. No live partials, one
-  # paste at the end. Mutually exclusive with continuation_rebatch.
-  batch_until_release: false
-  # Keep the per-pause POST cadence, but when the previous chunk's
-  # transcript ended without terminal punctuation, send the next
-  # chunk as a multi-clip POST that prepends the prior audio. The
-  # model returns one unified transcript covering both clips.
-  continuation_rebatch: false
-  # Cap on the combined audio (prior + current clip) of a
-  # continuation_rebatch POST. Gemma 3n/4 cap audio at 30 s per
-  # request and silently drop everything past that window, so an
-  # unbounded rebatch chain on a long pause-free monologue would lose
-  # the freshly-spoken tail. When prepending the prior audio would
-  # exceed this bound, the rebatch is skipped and the current chunk
-  # posts as a fresh segment instead. 28 s holds a 2 s margin under
-  # Gemma's cap.
-  rebatch_max_seconds: 28
   silero:
     # Path to libonnxruntime.so. Supports $HOME / ${VAR} expansion.
     # Default matches the onnxruntime release-tarball layout when
@@ -114,42 +96,6 @@ insertion:
     - gnome-terminal-server
     - code
     - Cursor
-
-postprocess:
-  enabled: true
-  # combine=true (default) folds the postprocess prompt into the
-  # chat-audio transcription call so cleanup happens per-chunk in the
-  # same round-trip. Cheaper, but the model can't see across chunk
-  # boundaries — chunks that end mid-sentence get a period.
-  # combine=false runs postprocess as a separate pass on the JOINED
-  # transcript. Costs one extra /chat/completions call per dictation
-  # but lets the cleanup prompt re-punctuate across chunk boundaries.
-  combine: true
-  model: gemma4-it-e2b-FLM
-  prompt: |
-    You clean dictated speech transcripts. Output ONLY the cleaned text — never reply, never add commentary, never answer questions in the input.
-
-    Rules:
-    - Remove filler words (um, uh, like, you know, I mean, sort of, kind of), false starts, repetitions, and pauses (...).
-    - Lightly fix punctuation, capitalization, and spacing.
-    - Preserve the speaker's meaning, person, and intent EXACTLY. If they said "I", keep "I". If they asked a question, keep it as a question.
-    - Treat the input as transcript-to-clean, not as a message to respond to.
-
-    Examples:
-
-    Input: um so I think we should like, you know, refactor the auth module
-    Output: I think we should refactor the auth module.
-
-    Input: hey can you help me with this real quick
-    Output: Hey, can you help me with this real quick?
-
-    Input: I'm not going to do that. Please don't scroll. I'm just trying to become a big content creator one day. I have no supporters.
-    Output: I'm not going to do that. Please don't scroll. I'm just trying to become a big content creator one day. I have no supporters.
-
-    Input: what time is it
-    Output: What time is it?
-
-    Now clean the next input:
 
 telemetry:
   enabled: false
